@@ -211,6 +211,10 @@ class SkeletonInfo:
     bind_matrices: list[list[float]]
     inverse_bind_matrices: list[list[float]]
     local_matrices: list[list[float]]
+    local_scales: list[list[float]]
+    local_rotations_xyzw: list[list[float]]
+    local_translations: list[list[float]]
+    local_srt_matrices: list[list[float]]
 
 
 def crc32b(data: bytes) -> int:
@@ -246,6 +250,63 @@ def matrix_from_3x4(data: bytes, offset: int) -> list[float]:
         1.0,
     ]
 
+
+
+
+def matrix_from_srt(scale: list[float], rotation_xyzw: list[float], translation: list[float]) -> list[float]:
+    sx, sy, sz = scale
+    x, y, z, w = rotation_xyzw
+    tx, ty, tz = translation
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    r00 = 1.0 - 2.0 * (yy + zz)
+    r01 = 2.0 * (xy - wz)
+    r02 = 2.0 * (xz + wy)
+    r10 = 2.0 * (xy + wz)
+    r11 = 1.0 - 2.0 * (xx + zz)
+    r12 = 2.0 * (yz - wx)
+    r20 = 2.0 * (xz - wy)
+    r21 = 2.0 * (yz + wx)
+    r22 = 1.0 - 2.0 * (xx + yy)
+    return [
+        r00 * sx,
+        r01 * sy,
+        r02 * sz,
+        tx,
+        r10 * sx,
+        r11 * sy,
+        r12 * sz,
+        ty,
+        r20 * sx,
+        r21 * sy,
+        r22 * sz,
+        tz,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+
+
+def read_local_srt(data: bytes, section_offset: int, joint_count: int) -> tuple[list[list[float]], list[list[float]], list[list[float]], list[list[float]]]:
+    scales: list[list[float]] = []
+    rotations: list[list[float]] = []
+    translations: list[list[float]] = []
+    matrices: list[list[float]] = []
+    for joint_index in range(joint_count):
+        off = section_offset + joint_index * 0x30
+        if off + 0x30 > len(data):
+            break
+        values = struct.unpack_from("<12f", data, off)
+        scale = [values[0], values[1], values[2]]
+        rotation = [values[4], values[5], values[6], values[7]]
+        translation = [values[8], values[9], values[10]]
+        scales.append(scale)
+        rotations.append(rotation)
+        translations.append(translation)
+        matrices.append(matrix_from_srt(scale, rotation, translation))
+    return scales, rotations, translations, matrices
 
 def matrix_mul(a: list[float], b: list[float]) -> list[float]:
     out = [0.0] * 16
@@ -945,6 +1006,11 @@ def parse_g4sk(data: bytes) -> dict:
             break
         inverse_bind_matrices.append(matrix_from_3x4(data, off))
 
+    local_srt_table = section_offsets[1] if len(section_offsets) > 1 else 0
+    local_scales, local_rotations_xyzw, local_translations, local_srt_matrices = read_local_srt(
+        data, local_srt_table, joint_count
+    )
+
     parent_indices: list[int] = []
     parent_table = section_offsets[3] if len(section_offsets) > 3 else 0
     for joint_index in range(joint_count):
@@ -991,6 +1057,10 @@ def parse_g4sk(data: bytes) -> dict:
         bind_matrices=bind_matrices,
         inverse_bind_matrices=inverse_bind_matrices,
         local_matrices=local_matrices,
+        local_scales=local_scales,
+        local_rotations_xyzw=local_rotations_xyzw,
+        local_translations=local_translations,
+        local_srt_matrices=local_srt_matrices,
     )
     return asdict(info)
 
@@ -2467,6 +2537,19 @@ def summarize_skin_influences(influences: list[list[tuple[int, float]]]) -> dict
     }
 
 
+def skeleton_bone_orientation(skeleton_info: dict | None) -> dict | None:
+    if skeleton_info is None:
+        return None
+    return {
+        "space": "local",
+        "rotation_order": "quaternion_xyzw",
+        "source": "G4SK section 1 SRT",
+        "names": skeleton_info.get("names", []),
+        "parent_indices": skeleton_info.get("parent_indices", []),
+        "local_rotations_xyzw": skeleton_info.get("local_rotations_xyzw", []),
+    }
+
+
 def face_rigid_joint_override(path: Path, skeleton_info: dict | None, joint_palette: list[int]) -> list[int] | None:
     if skeleton_info is None or len(joint_palette) != 1:
         return None
@@ -2809,6 +2892,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         ],
         "skeleton_source": skeleton_source,
         "assigned_skeleton": assigned_skeleton,
+        "bone_orientation": skeleton_bone_orientation(skeleton_info),
         "skeleton": None
         if skeleton_info is None
         else {
@@ -2817,6 +2901,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             "section_offsets": [f"0x{offset:x}" for offset in skeleton_info["section_offsets"]],
             "joint_node_matrices": "local matrices derived from global bind block at 0x40 and parent table",
             "inverse_bind_matrices": "G4SK section 0",
+            "local_srt": "G4SK section 1: scale.xyz, pad, rotation quaternion xyzw, translation.xyz, pad",
+            "first_local_rotations_xyzw": skeleton_info.get("local_rotations_xyzw", [])[:32],
             "name_count": len(skeleton_info["names"]),
             "first_names": skeleton_info["names"][:32],
         },

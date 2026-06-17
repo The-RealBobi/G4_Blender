@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Level-5 G4 Model Importer",
     "author": "Bobi",
-    "version": (0, 1, 3),
+    "version": (0, 1, 7),
     "blender": (4, 0, 0),
     "location": "File > Import > Level-5 G4 Model",
-    "description": "Import G4MD/G4PKM models",
+    "description": "Import G4MD/G4PKM models.",
     "category": "Import-Export",
 }
 
@@ -20,6 +20,7 @@ import bpy
 from bpy.props import BoolProperty, CollectionProperty, StringProperty
 from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
+from mathutils import Matrix, Quaternion, Vector
 
 
 ADDON_ID = __name__
@@ -123,6 +124,7 @@ def addon_preferences() -> "G4ImporterPreferences":
         chara_model_xml = default_chara_model_xml()
         pack_imported_textures = True
         cleanup_import_cache = True
+        apply_bone_orientation = True
 
     return Defaults()
 
@@ -210,6 +212,11 @@ class G4ImporterPreferences(AddonPreferences):
         default=True,
         description="Delete generated DAE/report/texture files after Blender has loaded and packed them",
     )
+    apply_bone_orientation: BoolProperty(
+        name="Apply Bone Orientation",
+        default=True,
+        description="Orient imported armature bones using G4SK section-1 rest quaternions",
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -221,6 +228,7 @@ class G4ImporterPreferences(AddonPreferences):
         layout.prop(self, "chara_model_xml")
         layout.prop(self, "pack_imported_textures")
         layout.prop(self, "cleanup_import_cache")
+        layout.prop(self, "apply_bone_orientation")
 
 
 def run_exporter(model_path: str, prefs: G4ImporterPreferences) -> dict:
@@ -269,6 +277,7 @@ def run_exporter(model_path: str, prefs: G4ImporterPreferences) -> dict:
             "meshes",
             "skeleton_source",
             "skeleton",
+            "bone_orientation",
         ):
             if key in report:
                 summary[key] = report[key]
@@ -321,6 +330,130 @@ def collapse_duplicate_materials(imported_names: set[str]) -> None:
             slot.material = target
             if material.users == 0:
                 bpy.data.materials.remove(material)
+
+
+def global_orientation_matrices(names: list[str], parents: list[int], rotations: list[list[float]]) -> list[Matrix]:
+    local_matrices = []
+    for rotation in rotations:
+        if len(rotation) != 4:
+            local_matrices.append(Matrix.Identity(4))
+            continue
+        x, y, z, w = rotation
+        local_matrices.append(Quaternion((w, x, y, z)).to_matrix().to_4x4())
+
+    global_matrices: list[Matrix] = [Matrix.Identity(4) for _ in names]
+    for index, local_matrix in enumerate(local_matrices[: len(names)]):
+        parent = parents[index] if index < len(parents) else len(names)
+        if 0 <= parent < index:
+            global_matrices[index] = global_matrices[parent] @ local_matrix
+        else:
+            global_matrices[index] = local_matrix
+    return global_matrices
+
+
+def imported_armatures(imported_names: set[str]) -> list[bpy.types.Object]:
+    armatures = []
+    for item in imported_names:
+        obj = item if hasattr(item, "type") else bpy.data.objects.get(item)
+        if obj is not None and obj.type == "ARMATURE":
+            armatures.append(obj)
+    return armatures
+
+
+def apply_g4_bone_orientation(imported_names: set[str], summary: dict, enabled: bool) -> dict:
+    orientation = summary.get("bone_orientation")
+    if not enabled or not isinstance(orientation, dict):
+        return {"enabled": bool(enabled), "applied": 0, "missing": 0}
+
+    names = orientation.get("names") or []
+    parents = orientation.get("parent_indices") or []
+    rotations = orientation.get("local_rotations_xyzw") or []
+    if not names or not rotations:
+        return {"enabled": bool(enabled), "applied": 0, "missing": len(names)}
+
+    matrices = global_orientation_matrices(names, parents, rotations)
+    result = {"enabled": True, "applied": 0, "missing": 0, "armatures": []}
+    previous_active = bpy.context.view_layer.objects.active
+    previous_mode = bpy.context.object.mode if bpy.context.object is not None else "OBJECT"
+    if previous_mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    try:
+        for armature in imported_armatures(imported_names):
+            result["armatures"].append(armature.name)
+            bpy.context.view_layer.objects.active = armature
+            armature.select_set(True)
+            bpy.ops.object.mode_set(mode="EDIT")
+            name_to_index = {name: index for index, name in enumerate(names)}
+            child_indices: dict[int, list[int]] = {index: [] for index in range(len(names))}
+            for index, parent in enumerate(parents):
+                if 0 <= parent < len(names):
+                    child_indices.setdefault(parent, []).append(index)
+
+            original_heads = {
+                bone_name: edit_bone.head.copy()
+                for bone_name, edit_bone in armature.data.edit_bones.items()
+            }
+            original_tails = {
+                bone_name: edit_bone.tail.copy()
+                for bone_name, edit_bone in armature.data.edit_bones.items()
+            }
+            directions: dict[int, Vector] = {}
+
+            for index, bone_name in enumerate(names):
+                head = original_heads.get(bone_name)
+                if head is None:
+                    continue
+                candidates = []
+                for child_index in child_indices.get(index, []):
+                    if child_index >= len(names):
+                        continue
+                    child_head = original_heads.get(names[child_index])
+                    if child_head is None:
+                        continue
+                    delta = child_head - head
+                    if delta.length > 1e-6:
+                        candidates.append(delta)
+                if candidates:
+                    directions[index] = max(candidates, key=lambda item: item.length).normalized()
+
+            for index, bone_name in enumerate(names):
+                edit_bone = armature.data.edit_bones.get(bone_name)
+                if edit_bone is None or index >= len(matrices):
+                    result["missing"] += 1
+                    continue
+                length = max(edit_bone.length, 0.004)
+                head = edit_bone.head.copy()
+                rotation = matrices[index].to_3x3().normalized()
+                parent = parents[index] if index < len(parents) else len(names)
+                if index in directions:
+                    y_axis = directions[index]
+                elif 0 <= parent < len(names) and parent in directions:
+                    y_axis = directions[parent]
+                else:
+                    original_tail = original_tails.get(bone_name)
+                    fallback = (original_tail - head) if original_tail is not None else Vector()
+                    y_axis = fallback.normalized() if fallback.length > 1e-6 else (rotation @ Vector((0.0, 1.0, 0.0))).normalized()
+                z_axis = (rotation @ Vector((0.0, 0.0, 1.0))).normalized()
+                edit_bone.tail = head + y_axis * length
+                edit_bone.align_roll(z_axis)
+                result["applied"] += 1
+            bpy.ops.object.mode_set(mode="OBJECT")
+            for index, bone_name in enumerate(names):
+                bone = armature.data.bones.get(bone_name)
+                if bone is not None and index < len(rotations):
+                    bone["g4_rest_rotation_xyzw"] = rotations[index]
+    finally:
+        if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        if previous_active is not None:
+            bpy.context.view_layer.objects.active = previous_active
+        if previous_active is not None and previous_mode != "OBJECT":
+            try:
+                bpy.ops.object.mode_set(mode=previous_mode)
+            except RuntimeError:
+                pass
+    return result
 
 
 def compact_skeleton_summary(summary: dict) -> None:
@@ -917,6 +1050,13 @@ def import_g4_model(path: Path, prefs: G4ImporterPreferences, create_report_text
         raise RuntimeError(f"Generated DAE not found: {dae_path}")
     imported_names = import_collada(dae_path)
     debug.append(f"[collada] imported_objects={sorted(imported_names)}")
+    orientation = apply_g4_bone_orientation(
+        imported_names,
+        summary,
+        getattr(prefs, "apply_bone_orientation", True),
+    )
+    summary["bone_orientation_import"] = orientation
+    debug.append(f"[armature] bone_orientation={orientation}")
     compact_skeleton_summary(summary)
     collapse_duplicate_materials(imported_names)
     apply_material_texture_variants(summary, debug)
