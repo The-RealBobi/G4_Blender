@@ -1,10 +1,10 @@
 bl_info = {
-    "name": "Level-5 G4 Model Importer",
+    "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 1, 7),
+    "version": (0, 2, 0),
     "blender": (4, 0, 0),
-    "location": "File > Import > Level-5 G4 Model",
-    "description": "Import G4MD/G4PKM models.",
+    "location": "File > Import/Export > G4MD / G4PKM",
+    "description": "",
     "category": "Import-Export",
 }
 
@@ -22,9 +22,15 @@ from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
 
-
 ADDON_ID = __name__
 MODEL_EXTENSIONS = {".g4md", ".g4pkm"}
+
+try:
+    from . import g4_port_addon
+except ImportError:
+    import g4_port_addon
+
+g4_port_addon.ADDON_ID = ADDON_ID
 
 
 def default_probe_script() -> str:
@@ -35,10 +41,7 @@ def default_probe_script() -> str:
     addon_path = Path(__file__).resolve()
     candidates.extend(
         [
-            addon_path.parents[1] / "tools" / "g4_model_probe.py",
-            addon_path.parent / "tools" / "g4_model_probe.py",
             addon_path.parent / "g4_model_probe.py",
-            Path.cwd() / "MODELS" / "tools" / "g4_model_probe.py",
         ]
     )
     for candidate in candidates:
@@ -104,7 +107,7 @@ def default_chara_model_lookup() -> str:
 
 
 def default_python() -> str:
-    for candidate in ("/usr/bin/python3", "/opt/homebrew/bin/python3", sys.executable):
+    for candidate in (sys.executable, "python3"):
         if candidate and Path(candidate).exists():
             return candidate
     return "python3"
@@ -143,8 +146,7 @@ def resolve_probe_script(prefs: "G4ImporterPreferences") -> Path:
 
     raise RuntimeError(
         "Exporter script not found. Set the addon preference 'Exporter Script' "
-        "to MODELS/tools/g4_model_probe.py, place g4_model_probe.py next to the addon, "
-        "or define LEVEL5_G4_PROBE."
+        "to g4_model_probe.py, place g4_model_probe.py next to the addon, or define LEVEL5_G4_PROBE."
     )
 
 
@@ -176,7 +178,7 @@ class G4ImporterPreferences(AddonPreferences):
         name="Exporter Script",
         subtype="FILE_PATH",
         default=default_probe_script(),
-        description="Path to MODELS/tools/g4_model_probe.py",
+        description="Path to the bundled or external g4_model_probe.py",
     )
     export_dir: StringProperty(
         name="Export Cache",
@@ -217,18 +219,60 @@ class G4ImporterPreferences(AddonPreferences):
         default=True,
         description="Orient imported armature bones using G4SK section-1 rest quaternions",
     )
+    port_script: StringProperty(
+        name="G4 Port Script",
+        subtype="FILE_PATH",
+        default=g4_port_addon.default_port_script(),
+        description="Path to bundled or external g4_port.py; bundled installations detect it automatically",
+    )
+    config_dir: StringProperty(
+        name="Port Preset Folder",
+        subtype="DIR_PATH",
+        default=g4_port_addon.default_config_dir(),
+        description="Folder containing G4 port presets",
+    )
+    output_root: StringProperty(
+        name="Port Package Folder",
+        subtype="DIR_PATH",
+        default=os.environ.get("LEVEL5_G4_OUT_ROOT", g4_port_addon.default_output_root()),
+        description="Destination folder. The exporter writes data/common and data/dx11 inside it",
+    )
+    cache_dir: StringProperty(
+        name="Port Export Cache",
+        subtype="DIR_PATH",
+        default=g4_port_addon.default_cache_dir(),
+        description="Temporary folder for DAE, weights, generated presets and reports",
+    )
+    keep_temporary_files: BoolProperty(
+        name="Keep Port Temporary Files",
+        default=False,
+        description="Keep generated DAE/config/weights files after export",
+    )
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "python_path")
-        layout.prop(self, "probe_script")
-        layout.prop(self, "export_dir")
-        layout.prop(self, "raw_data_root")
-        layout.prop(self, "chara_model_lookup")
-        layout.prop(self, "chara_model_xml")
-        layout.prop(self, "pack_imported_textures")
-        layout.prop(self, "cleanup_import_cache")
-        layout.prop(self, "apply_bone_orientation")
+        shared_box = layout.box()
+        shared_box.label(text="Shared Runtime")
+        shared_box.prop(self, "python_path")
+        shared_box.prop(self, "probe_script")
+        shared_box.prop(self, "raw_data_root")
+        shared_box.prop(self, "chara_model_xml")
+
+        import_box = layout.box()
+        import_box.label(text="Import")
+        import_box.prop(self, "export_dir")
+        import_box.prop(self, "chara_model_lookup")
+        import_box.prop(self, "pack_imported_textures")
+        import_box.prop(self, "cleanup_import_cache")
+        import_box.prop(self, "apply_bone_orientation")
+
+        port_box = layout.box()
+        port_box.label(text="Port Export")
+        port_box.prop(self, "port_script")
+        port_box.prop(self, "config_dir")
+        port_box.prop(self, "output_root")
+        port_box.prop(self, "cache_dir")
+        port_box.prop(self, "keep_temporary_files")
 
 
 def run_exporter(model_path: str, prefs: G4ImporterPreferences) -> dict:
@@ -1246,9 +1290,11 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    g4_port_addon.register()
 
 
 def unregister():
+    g4_port_addon.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

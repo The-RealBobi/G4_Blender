@@ -51,8 +51,6 @@ def default_chara_model_lookup() -> Path | None:
     candidates.extend(
         [
             script_dir / "chara_model_lookup.json",
-            script_dir.parent / "data" / "chara_model_lookup.json",
-            Path("MODELS/data/chara_model_lookup.json"),
             Path("data/chara_model_lookup.json"),
         ]
     )
@@ -2979,7 +2977,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error("paths are required unless --build-skeleton-cache is used")
 
     if args.export_model:
-        out_dir = args.dae_dir or Path("MODELS/exports/dae")
+        out_dir = args.dae_dir or Path("exports/dae")
         summaries = [export_model_auto(path, out_dir) for path in args.paths]
         if args.json:
             print(json.dumps(summaries, indent=2))

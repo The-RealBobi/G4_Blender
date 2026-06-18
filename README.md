@@ -1,12 +1,18 @@
-# Level-5 G4 Importer for Blender
+# Level-5 G4 Blender Tools
 
-Import models, characters, maps and textures from Level-5 G4-based games directly into Blender.
+Import models, characters, maps and textures from Level-5 G4-based games directly into Blender, and port edited Blender/DAE geometry back to conservative `G4MD/G4MG/G4TX` packages.
 
-The addon automatically converts G4 assets into Blender-compatible data, recreating materials, textures and skeletons with minimal user interaction.
+The repository ships one unified Blender add-on:
+
+* `Level-5 G4 Blender Tools`: import and port/export tools in one flat add-on package.
+
+The importer automatically converts G4 assets into Blender-compatible data, recreating materials, textures and skeletons with minimal user interaction. The port exporter wraps the same parser/validator stack and patches a native model base conservatively instead of rebuilding unknown format tables from scratch.
 
 <img src="img/img_02.png" alt="Stadium" width="750" height="auto" />
 
 ## Features
+
+### Importer
 
 * Direct import from Blender.
 * Drag & drop support.
@@ -20,6 +26,15 @@ The addon automatically converts G4 assets into Blender-compatible data, recreat
 * Batch processing support.
 * Automatic scene reconstruction.
 
+### Port Exporter
+
+* Export edited Blender/DAE geometry into a native `G4MD/G4MG` pair.
+* Preserve native layouts, materials, hashes, texture references and record structure where possible.
+* Copy or rebuild `G4TX` texture archives from a native base.
+* Resolve Collada skin controllers and Blender-exported weight sidecars.
+* Validate generated records, palettes, indices and packed weight sums before writing packages.
+* Build port settings from the selected original model instead of shipping model-specific bone presets.
+
 ## Supported Formats
 
 | Format | Description             |
@@ -28,6 +43,31 @@ The addon automatically converts G4 assets into Blender-compatible data, recreat
 | G4PKM  | Packed model containers |
 | G4SK   | Skeleton files          |
 | G4TX   | Texture archives        |
+
+## Installation
+
+Install this repository as a single Blender add-on package. The root `__init__.py` is the only add-on entry point; helper scripts and lookup data live next to it at the same level.
+
+The add-on package includes:
+
+```text
+|-- __init__.py
+|-- g4_port_addon.py
+|-- g4_port.py
+|-- g4_model_probe.py
+`-- chara_model_lookup.json
+```
+
+In Blender, enable `Level-5 G4 Blender Tools` and use:
+
+```text
+File > Import > Level-5 G4 Model
+File > Import > Level-5 G4 Model Folder
+File > Export > Level-5 G4 Port
+View3D > Sidebar > Level-5 > G4 Port
+```
+
+The exporter needs a legally obtained native model base from a complete game dump. The original model defines the compatible record structure, materials, palettes and texture archive that the port operation patches.
 
 ## Character Rigging
 
@@ -60,6 +100,7 @@ After Collada import, Blender may display imported bones with vertical default t
 
 * Blender 4.0 or newer
 * Python 3.10 or newer
+* Pillow available to Blender/Python for custom texture rebuilds
 
 ## Disclaimer
 
