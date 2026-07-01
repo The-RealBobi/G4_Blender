@@ -66,14 +66,51 @@ def default_chara_model_lookup() -> Path | None:
     return None
 
 
+def default_chara_parts_json() -> Path | None:
+    env_path = os.environ.get("LEVEL5_G4_CHARA_PARTS")
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    script_dir = Path(__file__).resolve().parent
+    candidates.extend(sorted(script_dir.glob("chara_parts*.json")))
+    candidates.extend(sorted((script_dir / "data").glob("chara_parts*.json")))
+
+    if RAW_DATA_ROOT.parts[-2:] == ("raw", "data"):
+        readable_root = RAW_DATA_ROOT.parents[1] / "readable" / "data"
+        candidates.extend(
+            sorted((readable_root / "common" / "gamedata" / "character").glob("chara_parts*.json"))
+        )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate
+    return None
+
+
 CHARA_MODEL_XML = default_chara_model_xml()
 CHARA_MODEL_LOOKUP = default_chara_model_lookup()
 CHARA_MODEL_LOOKUP_DATA: dict | None = None
+CHARA_PARTS_JSON = default_chara_parts_json()
+CHARA_PARTS_DATA: dict | None = None
+UNIFORM_FAMILY_LOOKUP: dict[str, dict] | None = None
+UNIFORM_FAMILY_SKELETON_CACHE: dict[str, tuple[bytes | None, str | None]] = {}
 SKELETON_CACHE = (
     Path(os.environ["LEVEL5_G4_SKELETON_CACHE"]).expanduser()
     if os.environ.get("LEVEL5_G4_SKELETON_CACHE")
     else None
 )
+TARGET_SKELETON_OVERRIDE = (
+    Path(os.environ["LEVEL5_G4_TARGET_SKELETON"]).expanduser()
+    if os.environ.get("LEVEL5_G4_TARGET_SKELETON")
+    else None
+)
+TARGET_SKELETON_DATA: dict | None = None
 MODEL_EXTENSIONS = {".g4md", ".g4pkm", ".objbin"}
 
 # Shared character models store palette indices in this compact, stable joint
@@ -108,6 +145,10 @@ ASSIGNED_SKELETON_JOINT_NAMES = (
     "c_sht1_1_0", "c_ball_1_0",
 )
 
+# Uniform G4MD palettes omit optional targets from the full character target
+# table.  These discontinuities are visible in the original fbx2g4 logs; the
+# stored values therefore cannot always index ASSIGNED_SKELETON_JOINT_NAMES
+# linearly across sleeve/accessory and lower-body boundaries.
 
 def u16(data: bytes, offset: int) -> int:
     return struct.unpack_from("<H", data, offset)[0]
@@ -145,12 +186,16 @@ def infer_raw_data_root(path: Path) -> Path | None:
 
 
 def configure_raw_data_root_from_path(path: Path) -> None:
-    global RAW_DATA_ROOT
+    global RAW_DATA_ROOT, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE
     if os.environ.get("LEVEL5_G4_RAW_ROOT"):
         return
     inferred = infer_raw_data_root(path)
     if inferred is not None:
         RAW_DATA_ROOT = inferred
+        CHARA_PARTS_JSON = None
+        CHARA_PARTS_DATA = None
+        UNIFORM_FAMILY_LOOKUP = None
+        UNIFORM_FAMILY_SKELETON_CACHE.clear()
 
 
 @dataclass
@@ -1063,6 +1108,57 @@ def parse_g4sk(data: bytes) -> dict:
     return asdict(info)
 
 
+def normalize_skeleton_info(info: dict | None) -> dict | None:
+    if not isinstance(info, dict):
+        return None
+    names = list(info.get("names") or [])
+    joint_count = int(info.get("joint_count") or len(names))
+    if joint_count <= 0 or len(names) != joint_count:
+        return None
+    parents = list(info.get("parent_indices") or [])
+    if len(parents) < joint_count:
+        parents.extend([joint_count] * (joint_count - len(parents)))
+    bind_matrices = list(info.get("bind_matrices") or [])
+    if len(bind_matrices) != joint_count:
+        return None
+    inverse_bind_matrices = list(info.get("inverse_bind_matrices") or [])
+    if len(inverse_bind_matrices) != joint_count:
+        inverse_bind_matrices = [rigid_matrix_inverse(matrix) for matrix in bind_matrices]
+    local_matrices = list(info.get("local_matrices") or [])
+    if len(local_matrices) != joint_count:
+        local_matrices = []
+        for joint_index, matrix in enumerate(bind_matrices):
+            parent = parents[joint_index] if joint_index < len(parents) else joint_count
+            if parent < len(bind_matrices) and parent != joint_index:
+                local_matrices.append(matrix_mul(rigid_matrix_inverse(bind_matrices[parent]), matrix))
+            else:
+                local_matrices.append(matrix)
+    normalized = dict(info)
+    normalized["joint_count"] = joint_count
+    normalized["names"] = names
+    normalized["parent_indices"] = parents[:joint_count]
+    normalized["bind_matrices"] = bind_matrices[:joint_count]
+    normalized["inverse_bind_matrices"] = inverse_bind_matrices[:joint_count]
+    normalized["local_matrices"] = local_matrices[:joint_count]
+    return normalized
+
+
+def load_target_skeleton_override() -> dict | None:
+    global TARGET_SKELETON_DATA
+    if TARGET_SKELETON_DATA is not None:
+        return TARGET_SKELETON_DATA
+    if TARGET_SKELETON_OVERRIDE is None or not TARGET_SKELETON_OVERRIDE.exists():
+        TARGET_SKELETON_DATA = {}
+        return None
+    try:
+        data = json.loads(TARGET_SKELETON_OVERRIDE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        TARGET_SKELETON_DATA = {}
+        return None
+    TARGET_SKELETON_DATA = normalize_skeleton_info(data) or {}
+    return TARGET_SKELETON_DATA or None
+
+
 def model_relpath_candidates(path: Path) -> set[str]:
     candidates = set()
     try:
@@ -1124,6 +1220,79 @@ def load_chara_model_lookup() -> dict:
     except json.JSONDecodeError:
         CHARA_MODEL_LOOKUP_DATA = {}
     return CHARA_MODEL_LOOKUP_DATA
+
+
+def load_chara_parts_data() -> dict:
+    global CHARA_PARTS_JSON, CHARA_PARTS_DATA
+    resolved_path = CHARA_PARTS_JSON if CHARA_PARTS_JSON and CHARA_PARTS_JSON.exists() else default_chara_parts_json()
+    if resolved_path != CHARA_PARTS_JSON:
+        CHARA_PARTS_JSON = resolved_path
+        CHARA_PARTS_DATA = None
+    if CHARA_PARTS_DATA is not None:
+        return CHARA_PARTS_DATA
+    if CHARA_PARTS_JSON is None or not CHARA_PARTS_JSON.exists():
+        CHARA_PARTS_DATA = {}
+        return {}
+    try:
+        CHARA_PARTS_DATA = json.loads(CHARA_PARTS_JSON.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        CHARA_PARTS_DATA = {}
+    return CHARA_PARTS_DATA
+
+
+def load_uniform_family_lookup() -> dict[str, dict]:
+    global UNIFORM_FAMILY_LOOKUP
+    if UNIFORM_FAMILY_LOOKUP is not None:
+        return UNIFORM_FAMILY_LOOKUP
+
+    data = load_chara_parts_data()
+    entries = data.get("Entries") or []
+    lookup: dict[str, dict] = {}
+    for index, entry in enumerate(entries):
+        if entry.get("Name") != "CHARA_PARTS_CLOTHES_MODEL":
+            continue
+        values = entry.get("Values") or []
+        if len(values) < 2:
+            continue
+        stem = str(values[1].get("Value") or "").strip()
+        if not stem:
+            continue
+        ref_entry = entries[index + 1] if index + 1 < len(entries) else None
+        if ref_entry is None or ref_entry.get("Name") != "CHARA_PARTS_CLOTHES_MODEL_REF_INFO":
+            continue
+        ref_values = ref_entry.get("Values") or []
+        if not ref_values:
+            continue
+        info_index = int(ref_values[0].get("Value") or 0)
+        if info_index <= 0 or info_index >= len(entries):
+            continue
+        info_entry = entries[info_index]
+        if info_entry.get("Name") != "CHARA_PARTS_CLOTHES_INFO":
+            continue
+        info_values = info_entry.get("Values") or []
+        family_model = str(info_values[0].get("Value") or "").replace("\\", "/") if len(info_values) > 0 else ""
+        family_type = int(info_values[2].get("Value") or 0) if len(info_values) > 2 else 0
+        family_skeleton_model = str(info_values[6].get("Value") or "").replace("\\", "/") if len(info_values) > 6 else ""
+        lookup[stem] = {
+            "family_info_index": info_index,
+            "family_model": family_model,
+            "family_type": family_type,
+            "family_skeleton_model": family_skeleton_model,
+        }
+
+    UNIFORM_FAMILY_LOOKUP = lookup
+    return lookup
+
+
+def uniform_family_probe_model(path: Path) -> Path | None:
+    family = load_uniform_family_lookup().get(path.stem)
+    if not family:
+        return None
+    rel = family.get("family_skeleton_model") or family.get("family_model") or ""
+    if not rel:
+        return None
+    candidate = RAW_DATA_ROOT / "common" / "chr" / rel
+    return candidate if candidate.is_file() else None
 
 
 def lookup_model_row(path: Path) -> tuple[dict | None, str | None]:
@@ -1389,7 +1558,32 @@ def resolve_uniform_generic_g4sk(path: Path) -> tuple[bytes | None, str | None]:
     if "/_uniform/" not in f"/{rel}":
         return None, None
 
-    for stem in ("c000401", "c000301", "c000201", "c000101"):
+    match = re.fullmatch(r"[us](\d{6,8})", path.stem, re.IGNORECASE)
+    if match:
+        character_root = RAW_DATA_ROOT / "common" / "chr"
+        character_stem = f"c{match.group(1)}"
+        direct = character_root / character_stem
+        candidates = [direct / f"{character_stem}.g4sk", direct / f"{character_stem}.g4pkm"]
+        if character_root.is_dir():
+            candidates.extend(character_root.rglob(f"{character_stem}.g4sk"))
+            candidates.extend(character_root.rglob(f"{character_stem}.g4pkm"))
+        for candidate in dict.fromkeys(candidates):
+            if not candidate.is_file():
+                continue
+            data = candidate.read_bytes()
+            if data[:4] == b"G4SK":
+                return data, f"{candidate} via matching uniform ID"
+            if data[:4] == b"G4PK":
+                pack = parse_g4pk(data)
+                for entry in pack["entries"]:
+                    if entry["magic"] == "G4SK":
+                        start = entry["offset"]
+                        return data[start:start + entry["size"]], f"{candidate}::{entry['name']} via matching uniform ID"
+
+    # Uniforms without an exact character skeleton use the common body rig.
+    # Its raw palette indices follow c000101; similarly sized edit skeletons
+    # have different helper-bone insertion points and silently misbind limbs.
+    for stem in ("c000101", "c000201", "c000301", "c000401"):
         candidate = RAW_DATA_ROOT / "common" / "chr" / stem / f"{stem}.g4sk"
         if candidate.exists():
             return candidate.read_bytes(), f"{candidate} via _uniform generic fallback"
@@ -1410,6 +1604,9 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
         return own.read_bytes(), str(own)
 
     skeleton_data, skeleton_source = resolve_g4sk_from_chara_model(path)
+    if skeleton_data is not None:
+        return skeleton_data, skeleton_source
+    skeleton_data, skeleton_source = resolve_uniform_family_g4sk(path)
     if skeleton_data is not None:
         return skeleton_data, skeleton_source
     return resolve_uniform_generic_g4sk(path)
@@ -2579,15 +2776,731 @@ def remap_assigned_joint_palette(joint_palette: list[int], skeleton_info: dict |
     remapped = []
     changed = 0
     for joint_index in joint_palette:
-        if joint_index >= len(ASSIGNED_SKELETON_JOINT_NAMES):
-            remapped.append(joint_index)
+        source_index = joint_index - 1
+        source_name = (
+            ASSIGNED_SKELETON_JOINT_NAMES[source_index]
+            if 0 <= source_index < len(ASSIGNED_SKELETON_JOINT_NAMES)
+            else None
+        )
+        if source_name is None:
+            remapped.append(0)
+            changed += joint_index != 0
             continue
-        target_index = target_indices.get(ASSIGNED_SKELETON_JOINT_NAMES[joint_index])
+        target_index = target_indices.get(source_name)
         if target_index is None:
-            remapped.append(joint_index)
+            remapped.append(0)
+            changed += joint_index != 0
             continue
         remapped.append(target_index)
         changed += target_index != joint_index
+    return remapped, changed
+
+
+def uniform_source_skeleton_candidates() -> list[tuple[dict, str]]:
+    character_root = RAW_DATA_ROOT / "common" / "chr"
+    candidates = []
+    for stem in ("c000101", "c000201", "c000301", "c000401"):
+        paths = [
+            character_root / stem / f"{stem}.g4sk",
+            character_root / "_face" / "20_EDIT" / "_bodySK" / f"{stem}_edit" / f"{stem}_edit.g4sk",
+        ]
+        if stem == "c000101":
+            paths.append(character_root / "_test" / "c000101_test" / "c000101_test.g4sk")
+        for path in paths:
+            if path.is_file():
+                candidates.append((parse_g4sk(path.read_bytes()), str(path)))
+    rig_root = character_root / "_rig"
+    if rig_root.is_dir():
+        for path in sorted(rig_root.glob("tw*/tw*.g4sk")):
+            candidates.append((parse_g4sk(path.read_bytes()), str(path)))
+    return candidates
+
+
+def resolve_uniform_family_g4sk(path: Path) -> tuple[bytes | None, str | None]:
+    probe_model = uniform_family_probe_model(path)
+    if probe_model is None:
+        return None, None
+
+    cache_key = str(probe_model)
+    cached = UNIFORM_FAMILY_SKELETON_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        md_data, g4mg, _ = read_model_buffers(probe_model)
+        md_info = parse_g4md(md_data, g4mg)
+    except (FileNotFoundError, ValueError, struct.error):
+        UNIFORM_FAMILY_SKELETON_CACHE[cache_key] = (None, None)
+        return None, None
+
+    best: tuple[float, Path] | None = None
+    for skeleton_info, source in uniform_source_skeleton_candidates():
+        source_path = Path(source)
+        total_score = 0.0
+        total_vertices = 0
+        for record in md_info.get("records", []):
+            joint_palette = joint_palette_for_record(md_info, record)
+            if len(joint_palette) <= 1:
+                continue
+            influences = read_skin_influences(g4mg, md_info, record)
+            positions = [
+                struct.unpack_from(
+                    "<fff",
+                    g4mg,
+                    record["vertex_offset"] + vertex_index * record["vertex_stride"],
+                )
+                for vertex_index in range(record["vertex_count"])
+            ]
+            remapped, _ = remap_joint_palette_by_name(
+                joint_palette,
+                skeleton_info,
+                skeleton_info,
+            )
+            total_score += palette_spatial_error(
+                positions,
+                influences,
+                remapped,
+                skeleton_info,
+            ) * max(1, record["vertex_count"])
+            total_vertices += max(1, record["vertex_count"])
+        if total_vertices == 0:
+            continue
+        average_score = total_score / total_vertices
+        candidate = (average_score, source_path)
+        if best is None or candidate < best:
+            best = candidate
+
+    if best is None or not best[1].is_file():
+        UNIFORM_FAMILY_SKELETON_CACHE[cache_key] = (None, None)
+        return None, None
+
+    resolved = (
+        best[1].read_bytes(),
+        f"{best[1]} via {probe_model} ({CHARA_PARTS_JSON})",
+    )
+    UNIFORM_FAMILY_SKELETON_CACHE[cache_key] = resolved
+    return resolved
+
+
+def uniform_palette_source_skeleton_candidates_for_model(path: Path) -> list[tuple[dict, str]]:
+    candidates: list[tuple[dict, str]] = []
+    skeleton_data, skeleton_source = resolve_uniform_family_g4sk(path)
+    if skeleton_data is not None and skeleton_source is not None:
+        candidates.append((parse_g4sk(skeleton_data), skeleton_source))
+
+    seen_sources = {source for _, source in candidates}
+    for skeleton_info, source in uniform_source_skeleton_candidates():
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        candidates.append((skeleton_info, source))
+    return candidates
+
+
+def resolve_uniform_palette_source(
+    path: Path,
+    target_skeleton: dict | None,
+    palette_indices: set[int],
+    skeleton_source: str | None = None,
+) -> tuple[dict | None, str | None]:
+    if target_skeleton is None or "/_uniform/" not in path.as_posix().replace("\\", "/"):
+        return None, None
+    target_names = set(target_skeleton.get("names", []))
+    candidates = uniform_source_skeleton_candidates()
+    if target_skeleton.get("joint_count", 0) <= 200:
+        candidates.insert(0, (target_skeleton, "target skeleton"))
+
+    def score(candidate: tuple[dict, str]) -> tuple[int, int, int]:
+        skeleton, source = candidate
+        names = skeleton.get("names", [])
+        palette_names = [names[index] for index in palette_indices if index < len(names)]
+        palette_overlap = sum(bool(name) and name in target_names for name in palette_names)
+        body_overlap = sum(bool(name) and name in target_names for name in names)
+        target_bonus = int(source == "target skeleton")
+        return palette_overlap, body_overlap, target_bonus
+
+    return max(candidates, key=score, default=(None, None))
+
+
+def remap_joint_palette_by_name(
+    joint_palette: list[int],
+    source_skeleton: dict | None,
+    target_skeleton: dict | None,
+) -> tuple[list[int], int]:
+    if not joint_palette or source_skeleton is None or target_skeleton is None:
+        return joint_palette, 0
+    source_names = source_skeleton.get("names", [])
+    source_parents = source_skeleton.get("parent_indices", [])
+    target_indices = {name: index for index, name in enumerate(target_skeleton.get("names", [])) if name}
+    remapped = []
+    changed = 0
+    for joint_index in joint_palette:
+        source_index = joint_index
+        target_index = None
+        visited = set()
+        while source_index < len(source_names) and source_index not in visited:
+            visited.add(source_index)
+            source_name = source_names[source_index]
+            target_index = target_indices.get(source_name) if source_name else None
+            if target_index is None and source_name and source_name.endswith("_wgt_1_0"):
+                target_index = target_indices.get(source_name.removesuffix("_wgt_1_0"))
+            if target_index is not None:
+                break
+            parent = source_parents[source_index] if source_index < len(source_parents) else len(source_names)
+            if parent >= len(source_names) or parent == source_index:
+                break
+            source_index = parent
+        if target_index is None:
+            remapped.append(0)
+            changed += joint_index != 0
+            continue
+        remapped.append(target_index)
+        changed += target_index != joint_index
+    return remapped, changed
+
+
+def palette_spatial_error(
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    joint_palette: list[int],
+    target_skeleton: dict,
+) -> float:
+    bind_matrices = target_skeleton.get("bind_matrices", [])
+    if not positions or not influences or not bind_matrices:
+        return math.inf
+    total = 0.0
+    total_weight = 0.0
+    step = max(1, len(positions) // 2000)
+    for vertex_index in range(0, min(len(positions), len(influences)), step):
+        position = positions[vertex_index]
+        for local_index, weight in influences[vertex_index]:
+            if weight <= 0.0:
+                continue
+            if local_index >= len(joint_palette) or joint_palette[local_index] >= len(bind_matrices):
+                total += 100.0 * weight
+                total_weight += weight
+                continue
+            matrix = bind_matrices[joint_palette[local_index]]
+            total += sum((position[axis] - matrix[axis * 4 + 3]) ** 2 for axis in range(3)) * weight
+            total_weight += weight
+    return math.sqrt(total / total_weight) if total_weight else math.inf
+
+
+def palette_weighted_centroids(
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    palette_length: int,
+) -> list[tuple[float, float, float] | None]:
+    totals = [[0.0, 0.0, 0.0, 0.0] for _ in range(palette_length)]
+    for position, vertex_influences in zip(positions, influences):
+        for local_index, weight in vertex_influences:
+            if weight <= 0.0 or local_index >= palette_length:
+                continue
+            totals[local_index][0] += weight
+            for axis in range(3):
+                totals[local_index][axis + 1] += position[axis] * weight
+    return [
+        tuple(row[axis + 1] / row[0] for axis in range(3)) if row[0] else None
+        for row in totals
+    ]
+
+
+def minimum_cost_assignment(costs: list[list[float]]) -> list[int]:
+    """Rectangular Hungarian assignment; rows must not outnumber columns."""
+    if not costs:
+        return []
+    row_count = len(costs)
+    column_count = len(costs[0])
+    if row_count > column_count:
+        return []
+    u = [0.0] * (row_count + 1)
+    v = [0.0] * (column_count + 1)
+    matched_row = [0] * (column_count + 1)
+    previous = [0] * (column_count + 1)
+    for row in range(1, row_count + 1):
+        matched_row[0] = row
+        column = 0
+        minimum = [math.inf] * (column_count + 1)
+        used = [False] * (column_count + 1)
+        while True:
+            used[column] = True
+            active_row = matched_row[column]
+            delta = math.inf
+            next_column = 0
+            for candidate in range(1, column_count + 1):
+                if used[candidate]:
+                    continue
+                current = costs[active_row - 1][candidate - 1] - u[active_row] - v[candidate]
+                if current < minimum[candidate]:
+                    minimum[candidate] = current
+                    previous[candidate] = column
+                if minimum[candidate] < delta:
+                    delta = minimum[candidate]
+                    next_column = candidate
+            for candidate in range(column_count + 1):
+                if used[candidate]:
+                    u[matched_row[candidate]] += delta
+                    v[candidate] -= delta
+                else:
+                    minimum[candidate] -= delta
+            column = next_column
+            if matched_row[column] == 0:
+                break
+        while True:
+            next_column = previous[column]
+            matched_row[column] = matched_row[next_column]
+            column = next_column
+            if column == 0:
+                break
+    result = [-1] * row_count
+    for column in range(1, column_count + 1):
+        if matched_row[column]:
+            result[matched_row[column] - 1] = column - 1
+    return result
+
+
+def refine_palette_by_bind_names(
+    palette: list[int],
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    target_skeleton: dict,
+    compatibility_distance: float = 0.15,
+) -> tuple[list[int], int]:
+    """Repair compact-palette shifts while preserving spatially valid names."""
+    bind_matrices = target_skeleton.get("bind_matrices", [])
+    names = target_skeleton.get("names", [])
+    if not palette or not bind_matrices or len(names) != len(bind_matrices):
+        return palette, 0
+    centroids = palette_weighted_centroids(positions, influences, len(palette))
+
+    def distance(local_index: int, joint_index: int) -> float:
+        centroid = centroids[local_index]
+        if centroid is None or joint_index >= len(bind_matrices):
+            return math.inf
+        matrix = bind_matrices[joint_index]
+        return math.sqrt(sum(
+            (centroid[axis] - matrix[axis * 4 + 3]) ** 2
+            for axis in range(3)
+        ))
+
+    def semantic_match(local_index: int, joint_index: int) -> bool:
+        centroid = centroids[local_index]
+        name = names[joint_index] if joint_index < len(names) else ""
+        if centroid is None:
+            return True
+        side_matches = (
+            (name.startswith("l_") and centroid[0] >= -0.01)
+            or (name.startswith("r_") and centroid[0] <= 0.01)
+        )
+        limb_tokens = (
+            "_s_", "_a_", "_w_", "_slv", "_idx_", "_mid_", "_rng_",
+            "_thb_", "_pky_", "_soh_", "_fa_", "_l_", "_foot_", "_pnt_",
+        )
+        if side_matches and any(token in name for token in limb_tokens):
+            return True
+        if name.startswith("c_") and abs(centroid[0]) < 0.08:
+            return True
+        return distance(local_index, joint_index) <= compatibility_distance
+
+    bad_rows = [
+        local_index
+        for local_index, joint_index in enumerate(palette)
+        if not semantic_match(local_index, joint_index)
+    ]
+    if not bad_rows:
+        return palette, 0
+    shoe_palette = len(palette) <= 8 and all(
+        centroid is None or centroid[1] < 0.45
+        for centroid in centroids
+    )
+    if shoe_palette:
+        bad_rows = [index for index, centroid in enumerate(centroids) if centroid is not None]
+    locked = {joint_index for index, joint_index in enumerate(palette) if index not in bad_rows}
+    target_by_name = {name: index for index, name in enumerate(names) if name}
+    candidates = list(dict.fromkeys(
+        target_by_name[name]
+        for name in ASSIGNED_SKELETON_JOINT_NAMES
+        if name in target_by_name
+        and target_by_name[name] not in locked
+        and name not in {"output", "c_global_0_0", "c_ball_1_0"}
+        and (shoe_palette or "_pnt_" not in name)
+        and (not shoe_palette or re.fullmatch(r"[lr]_(?:l|foot|pnt)_\d+_\d+", name))
+    ))
+    if len(candidates) < len(bad_rows):
+        return palette, 0
+    costs = []
+    for local_index in bad_rows:
+        row = []
+        for joint_index in candidates:
+            value = distance(local_index, joint_index)
+            if joint_index == palette[local_index]:
+                value -= 0.06
+            row.append(value)
+        costs.append(row)
+    assignment = minimum_cost_assignment(costs)
+    if len(assignment) != len(bad_rows) or any(index < 0 for index in assignment):
+        return palette, 0
+    refined = palette[:]
+    for local_index, candidate_index in zip(bad_rows, assignment):
+        refined[local_index] = candidates[candidate_index]
+    return refined, sum(left != right for left, right in zip(palette, refined))
+
+
+BODY_JOINT_RE = re.compile(
+    r"(?:[lr]_(?:s|a|w|wph|idx|mid|rng|thb|soh|pky|fa|bnd|slv\d*|l|foot|pnt|mnt|pkt)_"
+    r"|c_(?:c|n|head|col|sht|til|ball|bst|mnt|ncl|hood))"
+)
+
+
+def remap_palette_by_target_segments(
+    joint_palette: list[int],
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    target_skeleton: dict,
+) -> tuple[list[int], int]:
+    """Resolve model-specific palette offsets independently for each body side."""
+    names = target_skeleton.get("names", [])
+    matrices = target_skeleton.get("bind_matrices", [])
+    if not joint_palette or len(names) != len(matrices):
+        return joint_palette, 0
+    centroids = palette_weighted_centroids(positions, influences, len(joint_palette))
+
+    def side(centroid: tuple[float, float, float] | None) -> str:
+        if centroid is None or abs(centroid[0]) <= 0.05:
+            return "c"
+        return "l" if centroid[0] > 0.0 else "r"
+
+    segments = []
+    start = 0
+    for index in range(1, len(joint_palette)):
+        numeric_gap = joint_palette[index] - joint_palette[index - 1] > 8
+        side_change = side(centroids[index]) != side(centroids[index - 1])
+        if numeric_gap or side_change:
+            segments.append(range(start, index))
+            start = index
+    segments.append(range(start, len(joint_palette)))
+
+    remapped = joint_palette[:]
+    resolved = 0
+    for segment in segments:
+        rows = list(segment)
+        segment_side = side(centroids[rows[0]])
+        best = None
+        minimum_offset = -min(joint_palette[index] for index in rows)
+        maximum_offset = len(names) - 1 - max(joint_palette[index] for index in rows)
+        for offset in range(minimum_offset, maximum_offset + 1):
+            score = 0.0
+            valid = True
+            candidate = []
+            for local_index in rows:
+                joint_index = joint_palette[local_index] + offset
+                name = names[joint_index]
+                centroid = centroids[local_index]
+                if (
+                    not name
+                    or "_wgt_" in name
+                    or BODY_JOINT_RE.match(name) is None
+                    or (segment_side == "l" and not name.startswith("l_"))
+                    or (segment_side == "r" and not name.startswith("r_"))
+                    or (segment_side == "c" and not name.startswith("c_"))
+                    or centroid is None
+                ):
+                    valid = False
+                    break
+                matrix = matrices[joint_index]
+                score += math.sqrt(sum(
+                    (centroid[axis] - matrix[axis * 4 + 3]) ** 2
+                    for axis in range(3)
+                ))
+                candidate.append(joint_index)
+            if not valid:
+                continue
+            result = (score / len(rows), abs(offset), candidate)
+            if best is None or result[:2] < best[:2]:
+                best = result
+        if best is None:
+            continue
+        for local_index, joint_index in zip(rows, best[2]):
+            remapped[local_index] = joint_index
+            resolved += 1
+    return remapped, resolved
+
+
+def remap_palette_by_body_assignment(
+    joint_palette: list[int],
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    target_skeleton: dict,
+) -> tuple[list[int], int]:
+    """Last-resort one-to-one body-name assignment for irregular palettes."""
+    names = target_skeleton.get("names", [])
+    matrices = target_skeleton.get("bind_matrices", [])
+    if not joint_palette or len(names) != len(matrices):
+        return joint_palette, 0
+    centroids = palette_weighted_centroids(positions, influences, len(joint_palette))
+    remapped = joint_palette[:]
+    assigned = 0
+    for side in ("l", "r", "c"):
+        rows = [
+            index for index, centroid in enumerate(centroids)
+            if centroid is not None
+            and (
+                (side == "l" and centroid[0] > 0.05)
+                or (side == "r" and centroid[0] < -0.05)
+                or (side == "c" and abs(centroid[0]) <= 0.05)
+            )
+        ]
+        candidates = [
+            index for index, name in enumerate(names)
+            if name
+            and not re.match(r"[lrc]_(?:mnt|pkt)_", name)
+            and BODY_JOINT_RE.match(name)
+            and (
+                (side == "l" and name.startswith("l_"))
+                or (side == "r" and name.startswith("r_"))
+                or (side == "c" and name.startswith("c_"))
+            )
+        ]
+        if not rows or len(candidates) < len(rows):
+            continue
+        costs = []
+        for local_index in rows:
+            centroid = centroids[local_index]
+            costs.append([
+                math.sqrt(sum(
+                    (centroid[axis] - matrices[joint_index][axis * 4 + 3]) ** 2
+                    for axis in range(3)
+                ))
+                for joint_index in candidates
+            ])
+        assignment = minimum_cost_assignment(costs)
+        if any(index < 0 for index in assignment):
+            continue
+        for local_index, candidate_index in zip(rows, assignment):
+            remapped[local_index] = candidates[candidate_index]
+            assigned += 1
+    return remapped, assigned
+
+
+def refine_arm_palette_by_centroids(
+    palette: list[int],
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    target_skeleton: dict,
+) -> tuple[list[int], int]:
+    """Resolve compact arm palettes that interleave terminal weight helpers."""
+    names = target_skeleton.get("names", [])
+    matrices = target_skeleton.get("bind_matrices", [])
+    if not palette or len(names) != len(matrices):
+        return palette, 0
+    centroids = palette_weighted_centroids(positions, influences, len(palette))
+    result = palette[:]
+    changed = 0
+    for side, direction in (("l", 1.0), ("r", -1.0)):
+        def preserve_assignment(index: int) -> bool:
+            if not 0 <= palette[index] < len(names):
+                return False
+            name = names[palette[index]]
+            return bool(
+                re.match(rf"^{side}_(?:s|a|wph)_", name)
+                or re.match(rf"^{side}_slv1_", name)
+            )
+
+        side_rows = [
+            index for index, centroid in enumerate(centroids)
+            if centroid is not None
+            and centroid[1] > 1.05
+            and centroid[0] * direction > 0.05
+        ]
+        locked = {
+            palette[index]
+            for index in side_rows
+            if preserve_assignment(index)
+        }
+        rows = [
+            index for index in side_rows
+            if not preserve_assignment(index)
+        ]
+        pattern = re.compile(
+            rf"^{side}_(?:s|a|w|wph|idx|mid|rng|thb|soh|pky|fa|bnd|slv\d*)_"
+        )
+        candidates = [
+            index for index, name in enumerate(names)
+            if pattern.match(name) and "_mnt_" not in name and index not in locked
+        ]
+        if not rows or len(candidates) < len(rows):
+            continue
+        costs = []
+        for local_index in rows:
+            centroid = centroids[local_index]
+            costs.append([
+                math.sqrt(sum(
+                    (centroid[axis] - matrices[joint_index][axis * 4 + 3]) ** 2
+                    for axis in range(3)
+                ))
+                for joint_index in candidates
+            ])
+        assignment = minimum_cost_assignment(costs)
+        if any(index < 0 for index in assignment):
+            continue
+        for local_index, candidate_index in zip(rows, assignment):
+            joint_index = candidates[candidate_index]
+            changed += result[local_index] != joint_index
+            result[local_index] = joint_index
+    return result, changed
+
+
+def sanitize_palette_body_names(
+    palette: list[int],
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    target_skeleton: dict,
+) -> tuple[list[int], int]:
+    """Remove residual facial/non-body and opposite-side bindings."""
+    names = target_skeleton.get("names", [])
+    matrices = target_skeleton.get("bind_matrices", [])
+    body_candidates = [
+        index for index, name in enumerate(names)
+        if name and "_wgt_" not in name and BODY_JOINT_RE.match(name)
+    ]
+    if len(body_candidates) < 20 or len(names) != len(matrices):
+        return palette, 0
+    centroids = palette_weighted_centroids(positions, influences, len(palette))
+    result = palette[:]
+    changed = 0
+    for local_index, joint_index in enumerate(palette):
+        centroid = centroids[local_index]
+        name = names[joint_index] if 0 <= joint_index < len(names) else ""
+        wrong_side = bool(
+            centroid
+            and (
+                (centroid[0] > 0.08 and name.startswith("r_"))
+                or (centroid[0] < -0.08 and name.startswith("l_"))
+            )
+        )
+        invalid = bool(
+            re.search(r"(?:eye|eld|ebw|lip|tng|jaw|chk|hir)", name, re.IGNORECASE)
+            or (name and BODY_JOINT_RE.match(name) is None and name not in {"output", "c_global_0_0", "boundingBox"})
+        )
+        if centroid is None or not (wrong_side or invalid):
+            continue
+        side = "l" if centroid[0] > 0.05 else "r" if centroid[0] < -0.05 else "c"
+        candidates = [
+            candidate for candidate in body_candidates
+            if (
+                (side == "l" and names[candidate].startswith("l_"))
+                or (side == "r" and names[candidate].startswith("r_"))
+                or (side == "c" and names[candidate].startswith("c_"))
+            )
+        ]
+        if not candidates:
+            continue
+        result[local_index] = min(candidates, key=lambda candidate: sum(
+            (centroid[axis] - matrices[candidate][axis * 4 + 3]) ** 2
+            for axis in range(3)
+        ))
+        changed += result[local_index] != joint_index
+    return result, changed
+
+
+def choose_uniform_joint_palette(
+    joint_palette: list[int],
+    positions: list[tuple[float, float, float]],
+    influences: list[list[tuple[int, float]]],
+    target_skeleton: dict,
+    source_skeletons: list[tuple[dict, str]],
+) -> tuple[list[int], int, str, float]:
+    candidates: list[tuple[list[int], int, str]] = [(joint_palette, 0, "target skeleton indices")]
+    if joint_palette and min(joint_palette) > 0 and max(joint_palette) <= len(ASSIGNED_SKELETON_JOINT_NAMES):
+        remapped, changed = remap_assigned_joint_palette(joint_palette, target_skeleton)
+        target_names = set(target_skeleton.get("names", []))
+        compact_names = [ASSIGNED_SKELETON_JOINT_NAMES[index - 1] for index in joint_palette]
+        # Uniform palettes use the stable shared-character order. When the
+        # actor contains every referenced joint this mapping is authoritative;
+        # geometric proximity must not reinterpret bone identity.
+        if all(name in target_names for name in compact_names):
+            return (
+                remapped,
+                changed,
+                "shared uniform skeleton indices",
+                palette_spatial_error(positions, influences, remapped, target_skeleton),
+            )
+    for source_skeleton, source in source_skeletons:
+        remapped, changed = remap_joint_palette_by_name(joint_palette, source_skeleton, target_skeleton)
+        candidates.append((remapped, changed, source))
+    segmented, segmented_count = remap_palette_by_target_segments(
+        joint_palette, positions, influences, target_skeleton
+    )
+    if segmented_count:
+        candidates.append((segmented, segmented_count, "target G4SK segmented body-name offsets"))
+
+    target_names = target_skeleton.get("names", [])
+    centroids = palette_weighted_centroids(positions, influences, len(joint_palette))
+
+    def semantic_quality(palette: list[int]) -> tuple[int, int, int]:
+        facial = 0
+        crossed = 0
+        non_body = 0
+        for local_index, joint_index in enumerate(palette):
+            name = target_names[joint_index] if 0 <= joint_index < len(target_names) else ""
+            centroid = centroids[local_index] if local_index < len(centroids) else None
+            facial += bool(re.search(r"(?:eye|eld|ebw|lip|tng|jaw|chk|hir)", name, re.IGNORECASE))
+            crossed += bool(
+                centroid
+                and (
+                    (centroid[0] > 0.08 and name.startswith("r_"))
+                    or (centroid[0] < -0.08 and name.startswith("l_"))
+                )
+            )
+            non_body += bool(
+                name
+                and BODY_JOINT_RE.match(name) is None
+                and name not in {"output", "c_global_0_0", "boundingBox"}
+            )
+        return facial, crossed, non_body
+
+    if not any(semantic_quality(palette) == (0, 0, 0) for palette, _, _ in candidates):
+        assigned, assigned_count = remap_palette_by_body_assignment(
+            joint_palette, positions, influences, target_skeleton
+        )
+        if assigned_count:
+            candidates.append((assigned, assigned_count, "target G4SK one-to-one body-name assignment"))
+
+    unique = {}
+    for palette, changed, source in candidates:
+        unique.setdefault(tuple(palette), (palette, changed, source))
+
+    scored = []
+    for palette, changed, source in unique.values():
+        score = palette_spatial_error(positions, influences, palette, target_skeleton)
+        scored.append((semantic_quality(palette), score, palette, changed, source))
+    _, score, palette, changed, source = min(scored, key=lambda item: (item[0], item[1]))
+    palette, sanitized = sanitize_palette_body_names(
+        palette, positions, influences, target_skeleton
+    )
+    if sanitized:
+        changed += sanitized
+        source += " + body-name sanitization"
+        score = palette_spatial_error(positions, influences, palette, target_skeleton)
+    return palette, changed, source, score
+
+
+def remap_shoe_point_helpers(joint_palette: list[int], target_skeleton: dict) -> tuple[list[int], int]:
+    names = target_skeleton.get("names", [])
+    indices = {name: index for index, name in enumerate(names) if name}
+    remapped = joint_palette[:]
+    changed = 0
+    for palette_index, joint_index in enumerate(joint_palette):
+        name = names[joint_index] if 0 <= joint_index < len(names) else ""
+        match = re.fullmatch(r"([lr])_pnt_1_0", name)
+        if match is None:
+            continue
+        replacement = indices.get(f"{match.group(1)}_foot_1_1_wgt_1_0")
+        if replacement is None:
+            replacement = indices.get(f"{match.group(1)}_foot_1_1")
+        if replacement is not None and replacement != joint_index:
+            remapped[palette_index] = replacement
+            changed += 1
     return remapped, changed
 
 
@@ -2604,7 +3517,19 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             skeleton_data, skeleton_source = resolve_g4sk_from_chara_model(path)
             if skeleton_data is not None:
                 skeleton_info = parse_g4sk(skeleton_data)
+    normalized_path = path.as_posix().replace("\\", "/")
+    if "/_uniform/" in normalized_path:
+        target_override = load_target_skeleton_override()
+        if target_override is not None:
+            skeleton_info = target_override
+            skeleton_source = f"{TARGET_SKELETON_OVERRIDE} via actor skeleton override"
     assigned_skeleton = skeleton_is_assigned(path, skeleton_source)
+    uniform_model = "/_uniform/" in normalized_path and skeleton_info is not None
+    uniform_palette_sources = (
+        uniform_palette_source_skeleton_candidates_for_model(path)
+        if uniform_model
+        else []
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     dae_path = out_dir / f"{path.stem}.dae"
 
@@ -2669,15 +3594,9 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             normal_source = "native_snorm16_offset_0x0c"
         normals = [component for normal in normals_tuples for component in normal]
         joint_palette = joint_palette_for_record(md_info, record)
-        palette_remap_count = 0
-        if assigned_skeleton:
-            joint_palette, palette_remap_count = remap_assigned_joint_palette(joint_palette, skeleton_info)
-        joint_palette_override = face_rigid_joint_override(path, skeleton_info, joint_palette)
-        if joint_palette_override is not None:
-            joint_palette = joint_palette_override
         if len(joint_palette) == 1:
             skin_influences = rigid_skin_influences(vertex_count)
-            skin_mode = "rigid_face_head_override" if joint_palette_override is not None else "rigid_single_palette"
+            skin_mode = "rigid_single_palette"
         else:
             skin_influences = read_skin_influences(g4mg, md_info, record)
             skin_mode = "vertex_weights"
@@ -2686,6 +3605,32 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 if invalid_influences > valid_influences:
                     skin_influences = rigid_skin_influences(vertex_count)
                     skin_mode = "rigid_invalid_palette_bytes"
+        palette_remap_count = 0
+        palette_remap_source = None
+        palette_spatial_score = None
+        if uniform_model and len(joint_palette) > 1:
+            joint_palette, palette_remap_count, palette_remap_source, palette_spatial_score = choose_uniform_joint_palette(
+                joint_palette,
+                position_tuples,
+                skin_influences,
+                skeleton_info,
+                uniform_palette_sources,
+            )
+            if path.stem.lower().startswith("s"):
+                joint_palette, shoe_remaps = remap_shoe_point_helpers(joint_palette, skeleton_info)
+                if shoe_remaps:
+                    palette_remap_count += shoe_remaps
+                    palette_remap_source += " + shoe point helpers"
+                    palette_spatial_score = palette_spatial_error(
+                        position_tuples, skin_influences, joint_palette, skeleton_info
+                    )
+        elif assigned_skeleton:
+            joint_palette, palette_remap_count = remap_assigned_joint_palette(joint_palette, skeleton_info)
+            palette_remap_source = "compact assigned skeleton order"
+        joint_palette_override = face_rigid_joint_override(path, skeleton_info, joint_palette)
+        if joint_palette_override is not None:
+            joint_palette = joint_palette_override
+            skin_mode = "rigid_face_head_override"
         p: list[int] = []
         for index in indices:
             p.extend((index, index, index))
@@ -2714,6 +3659,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "joint_palette": joint_palette,
                 "bind_shape_matrix": None,
                 "assigned_skeleton_palette_remaps": palette_remap_count,
+                "palette_remap_source": palette_remap_source,
+                "palette_spatial_score": palette_spatial_score,
                 "skin_mode": skin_mode,
                 "skin_influences": skin_influences,
                 "skin_summary": summarize_skin_influences(skin_influences),
@@ -2882,6 +3829,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "palette_length": payload["palette_length"],
                 "joint_palette": payload["joint_palette"],
                 "assigned_skeleton_palette_remaps": payload["assigned_skeleton_palette_remaps"],
+                "palette_remap_source": payload["palette_remap_source"],
+                "palette_spatial_score": payload["palette_spatial_score"],
                 "skin_mode": payload["skin_mode"],
                 "skin": payload["skin_summary"],
                 "controller": skin_reports.get(payload["name"]),

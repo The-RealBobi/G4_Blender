@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 2, 0),
+    "version": (0, 11, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -9,11 +9,13 @@ bl_info = {
 }
 
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import bpy
@@ -30,7 +32,13 @@ try:
 except ImportError:
     import g4_port_addon
 
+try:
+    from . import g4_animation_addon
+except ImportError:
+    import g4_animation_addon
+
 g4_port_addon.ADDON_ID = ADDON_ID
+g4_animation_addon.ADDON_ID = ADDON_ID
 
 
 def default_probe_script() -> str:
@@ -216,8 +224,30 @@ class G4ImporterPreferences(AddonPreferences):
     )
     apply_bone_orientation: BoolProperty(
         name="Apply Bone Orientation",
-        default=True,
-        description="Orient imported armature bones using G4SK section-1 rest quaternions",
+        default=False,
+        description="Orient bones for display; leave disabled when the rig will receive G4MT animation",
+    )
+    decoder_script: StringProperty(
+        name="G4MT Decoder",
+        subtype="FILE_PATH",
+        default=g4_animation_addon.default_decoder_script(),
+        description="Path to bundled or external g4mt_motion.py",
+    )
+    camera_decoder_script: StringProperty(
+        name="G4CM Decoder",
+        subtype="FILE_PATH",
+        default=g4_animation_addon.default_camera_decoder_script(),
+        description="Path to bundled or external g4cm_camera.py",
+    )
+    keep_decode_json: BoolProperty(
+        name="Keep Animation Decode JSON",
+        default=False,
+        description="Keep intermediate G4MT/G4CM JSON files for investigation",
+    )
+    event_character_parts: StringProperty(
+        default="{}",
+        options={"HIDDEN"},
+        description="Persistent body and shoes selections keyed by event actor ID",
     )
     port_script: StringProperty(
         name="G4 Port Script",
@@ -266,6 +296,12 @@ class G4ImporterPreferences(AddonPreferences):
         import_box.prop(self, "cleanup_import_cache")
         import_box.prop(self, "apply_bone_orientation")
 
+        animation_box = layout.box()
+        animation_box.label(text="Animation Import")
+        animation_box.prop(self, "decoder_script")
+        animation_box.prop(self, "camera_decoder_script")
+        animation_box.prop(self, "keep_decode_json")
+
         port_box = layout.box()
         port_box.label(text="Port Export")
         port_box.prop(self, "port_script")
@@ -275,7 +311,72 @@ class G4ImporterPreferences(AddonPreferences):
         port_box.prop(self, "keep_temporary_files")
 
 
-def run_exporter(model_path: str, prefs: G4ImporterPreferences) -> dict:
+def matrix_to_flat_list(matrix) -> list[float]:
+    return [float(matrix[row][column]) for row in range(4) for column in range(4)]
+
+
+def armature_skeleton_info(armature) -> dict | None:
+    if armature is None or armature.type != "ARMATURE":
+        return None
+    bones = list(armature.data.bones)
+    if not bones:
+        return None
+    index_by_name = {bone.name: index for index, bone in enumerate(bones)}
+    names = [bone.name for bone in bones]
+    joint_count = len(bones)
+    parent_indices = [
+        index_by_name.get(bone.parent.name, joint_count) if bone.parent is not None else joint_count
+        for bone in bones
+    ]
+    bind_matrices = [matrix_to_flat_list(bone.matrix_local) for bone in bones]
+    inverse_bind_matrices = [matrix_to_flat_list(bone.matrix_local.inverted_safe()) for bone in bones]
+    local_matrices = []
+    local_scales = []
+    local_rotations_xyzw = []
+    local_translations = []
+    for bone in bones:
+        local_matrix = (
+            bone.parent.matrix_local.inverted_safe() @ bone.matrix_local
+            if bone.parent is not None
+            else bone.matrix_local.copy()
+        )
+        local_matrices.append(matrix_to_flat_list(local_matrix))
+        local_scale = local_matrix.to_scale()
+        local_translation = local_matrix.to_translation()
+        local_rotation = local_matrix.to_quaternion()
+        local_scales.append([float(local_scale.x), float(local_scale.y), float(local_scale.z)])
+        local_rotations_xyzw.append(
+            [
+                float(local_rotation.x),
+                float(local_rotation.y),
+                float(local_rotation.z),
+                float(local_rotation.w),
+            ]
+        )
+        local_translations.append(
+            [
+                float(local_translation.x),
+                float(local_translation.y),
+                float(local_translation.z),
+            ]
+        )
+    return {
+        "magic": "BLENDER_ARMATURE",
+        "joint_count": joint_count,
+        "table_count": 0,
+        "section_offsets": [],
+        "parent_indices": parent_indices,
+        "names": names,
+        "bind_matrices": bind_matrices,
+        "inverse_bind_matrices": inverse_bind_matrices,
+        "local_matrices": local_matrices,
+        "local_scales": local_scales,
+        "local_rotations_xyzw": local_rotations_xyzw,
+        "local_translations": local_translations,
+    }
+
+
+def run_exporter(model_path: str, prefs: G4ImporterPreferences, target_armature=None) -> dict:
     python_path = Path(bpy.path.abspath(prefs.python_path or default_python()))
     probe_script = resolve_probe_script(prefs)
     export_dir = Path(bpy.path.abspath(prefs.export_dir))
@@ -291,7 +392,24 @@ def run_exporter(model_path: str, prefs: G4ImporterPreferences) -> dict:
         model_path,
     ]
     env = exporter_environment(prefs, export_dir)
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    skeleton_override_path: Path | None = None
+    skeleton_info = armature_skeleton_info(target_armature)
+    if skeleton_info is not None:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".json",
+            prefix="level5_g4_target_skeleton_",
+            delete=False,
+        ) as handle:
+            json.dump(skeleton_info, handle, separators=(",", ":"))
+            skeleton_override_path = Path(handle.name)
+        env["LEVEL5_G4_TARGET_SKELETON"] = str(skeleton_override_path)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+    finally:
+        if skeleton_override_path is not None:
+            skeleton_override_path.unlink(missing_ok=True)
     if completed.returncode != 0:
         raise RuntimeError(
             "G4 exporter failed\n"
@@ -555,6 +673,14 @@ def texture_role(path: Path) -> str:
         return "normal"
     if stem.endswith(".2") or stem.endswith("_n") or stem.endswith("_nm") or "_normal" in stem:
         return "normal"
+    if stem.endswith("spm"):
+        return "specular_mask"
+    if stem.endswith("sp"):
+        return "specular"
+    if stem.endswith("oc"):
+        return "occlusion"
+    if stem.endswith("line"):
+        return "line"
     return "base"
 
 
@@ -571,6 +697,8 @@ def texture_base_key(path: Path) -> str:
         return stem[:-2].strip("_")
     if role == "mask":
         return re.sub(r"(?:_?msk|_mask)$", "", stem).strip("_")
+    if role in {"specular_mask", "specular", "occlusion", "line"}:
+        return re.sub(r"(?:spm|sp|oc|line)$", "", stem).strip("_")
     return strip_texture_variant(stem).strip("_")
 
 
@@ -863,6 +991,230 @@ def connect_normal_map(material, principled, normal_path: Path, debug: list[str]
     return True
 
 
+def apply_level5_toon_shader(
+    material,
+    base_path: Path,
+    variants: dict[str, Path],
+    debug: list[str] | None = None,
+) -> bool:
+    base_image = load_image(base_path)
+    if base_image is None or material.node_tree is None:
+        return False
+    tree = material.node_tree
+    nodes = tree.nodes
+    links = tree.links
+    nodes.clear()
+
+    output = nodes.new("ShaderNodeOutputMaterial")
+    output.location = (1040, 120)
+    base = nodes.new("ShaderNodeTexImage")
+    base.name = "G4 Base"
+    base.label = base_path.name
+    base.image = base_image
+    base.interpolation = "Linear"
+    base.location = (-980, 280)
+
+    saturation = nodes.new("ShaderNodeHueSaturation")
+    saturation.name = "G4 Saturation"
+    saturation.location = (-760, 280)
+    # The source albedo is already authored at the in-game saturation.  The
+    # previous boost clipped reds and removed the pastel Level-5 palette.
+    saturation.inputs["Saturation"].default_value = 1.0
+    links.new(base.outputs["Color"], saturation.inputs["Color"])
+    base_color = saturation.outputs["Color"]
+
+    mask_path = first_variant_path(variants, "mask")
+    if mask_path is not None:
+        image = load_image(mask_path)
+        if image is not None:
+            image.colorspace_settings.name = "Non-Color"
+            mask = nodes.new("ShaderNodeTexImage")
+            mask.name = "G4 Recolor Mask"
+            mask.image = image
+            mask.location = (-980, 580)
+            channels = nodes.new("ShaderNodeSeparateColor")
+            channels.location = (-760, 580)
+            links.new(mask.outputs["Color"], channels.inputs["Color"])
+            for index, channel in enumerate(("Red", "Green", "Blue")):
+                tint = nodes.new("ShaderNodeMixRGB")
+                tint.name = f"G4 Mask {channel} Tint"
+                tint.label = f"G4 Mask {channel} Tint"
+                tint.blend_type = "MULTIPLY"
+                tint.location = (-520 + index * 180, 430)
+                tint.inputs[2].default_value = (1.0, 1.0, 1.0, 1.0)
+                links.new(channels.outputs[channel], tint.inputs[0])
+                links.new(base_color, tint.inputs[1])
+                base_color = tint.outputs["Color"]
+
+    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+    diffuse.location = (-720, -100)
+    diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    diffuse.inputs["Roughness"].default_value = 0.0
+    diffuse_rgb = nodes.new("ShaderNodeShaderToRGB")
+    diffuse_rgb.location = (-520, -100)
+    diffuse_bw = nodes.new("ShaderNodeRGBToBW")
+    diffuse_bw.location = (-340, -100)
+    light_ramp = nodes.new("ShaderNodeValToRGB")
+    light_ramp.name = "G4 Toon Light"
+    light_ramp.location = (-150, -100)
+    light_ramp.color_ramp.interpolation = "CONSTANT"
+    light_ramp.color_ramp.elements[0].position = 0.0
+    light_ramp.color_ramp.elements[0].color = (0.66, 0.61, 0.72, 1.0)
+    light_ramp.color_ramp.elements[1].position = 0.56
+    light_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+    links.new(diffuse.outputs["BSDF"], diffuse_rgb.inputs["Shader"])
+    links.new(diffuse_rgb.outputs["Color"], diffuse_bw.inputs["Color"])
+    links.new(diffuse_bw.outputs["Val"], light_ramp.inputs["Fac"])
+
+    lit = nodes.new("ShaderNodeMixRGB")
+    lit.name = "G4 Cel Diffuse"
+    lit.blend_type = "MULTIPLY"
+    lit.inputs[0].default_value = 1.0
+    lit.location = (60, 250)
+    links.new(base_color, lit.inputs[1])
+    links.new(light_ramp.outputs["Color"], lit.inputs[2])
+    color_output = lit.outputs["Color"]
+
+    occlusion_path = first_variant_path(variants, "occlusion")
+    if occlusion_path is not None:
+        image = load_image(occlusion_path)
+        if image is not None:
+            image.colorspace_settings.name = "Non-Color"
+            occlusion = nodes.new("ShaderNodeTexImage")
+            occlusion.name = "G4 Occlusion"
+            occlusion.image = image
+            occlusion.location = (-700, 520)
+            occlusion_bw = nodes.new("ShaderNodeRGBToBW")
+            occlusion_bw.location = (-500, 520)
+            occlusion_ramp = nodes.new("ShaderNodeValToRGB")
+            occlusion_ramp.location = (-310, 520)
+            occlusion_ramp.color_ramp.interpolation = "CONSTANT"
+            occlusion_ramp.color_ramp.elements[0].color = (0.78, 0.78, 0.78, 1.0)
+            occlusion_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+            occlusion_ramp.color_ramp.elements[1].position = 0.5
+            ao_multiply = nodes.new("ShaderNodeMixRGB")
+            ao_multiply.name = "G4 Shadow Map"
+            ao_multiply.blend_type = "MULTIPLY"
+            ao_multiply.inputs[0].default_value = 1.0
+            ao_multiply.location = (250, 280)
+            links.new(occlusion.outputs["Color"], occlusion_bw.inputs["Color"])
+            links.new(occlusion_bw.outputs["Val"], occlusion_ramp.inputs["Fac"])
+            links.new(color_output, ao_multiply.inputs[1])
+            links.new(occlusion_ramp.outputs["Color"], ao_multiply.inputs[2])
+            color_output = ao_multiply.outputs["Color"]
+
+    line_path = first_variant_path(variants, "line")
+    if line_path is not None:
+        image = load_image(line_path)
+        if image is not None:
+            line_texture = nodes.new("ShaderNodeTexImage")
+            line_texture.name = "G4 Line Parameter"
+            line_texture.image = image
+            line_texture.location = (-180, -520)
+
+    specular_mask_path = first_variant_path(variants, "specular_mask")
+    specular_path = first_variant_path(variants, "specular")
+    if specular_mask_path is not None:
+        image = load_image(specular_mask_path)
+        if image is not None:
+            image.colorspace_settings.name = "Non-Color"
+            specular_mask = nodes.new("ShaderNodeTexImage")
+            specular_mask.name = "G4 Specular Mask"
+            specular_mask.image = image
+            specular_mask.location = (-420, -760)
+            glossy = nodes.new("ShaderNodeBsdfGlossy")
+            glossy.location = (-200, -780)
+            glossy.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+            glossy.inputs["Roughness"].default_value = 0.28
+            glossy_rgb = nodes.new("ShaderNodeShaderToRGB")
+            glossy_rgb.location = (0, -780)
+            glossy_bw = nodes.new("ShaderNodeRGBToBW")
+            glossy_bw.location = (170, -780)
+            glossy_ramp = nodes.new("ShaderNodeValToRGB")
+            glossy_ramp.location = (340, -780)
+            glossy_ramp.color_ramp.interpolation = "CONSTANT"
+            glossy_ramp.color_ramp.elements[0].position = 0.0
+            glossy_ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
+            glossy_ramp.color_ramp.elements[1].position = 0.82
+            glossy_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+            links.new(glossy_rgb.outputs["Color"], glossy_bw.inputs["Color"])
+            links.new(glossy_bw.outputs["Val"], glossy_ramp.inputs["Fac"])
+            specular_output = glossy_ramp.outputs["Color"]
+            if specular_path is not None:
+                specular_image = load_image(specular_path)
+                if specular_image is not None:
+                    specular_image.colorspace_settings.name = "Non-Color"
+                    coordinates = nodes.new("ShaderNodeTexCoord")
+                    coordinates.location = (-620, -980)
+                    specular_shape = nodes.new("ShaderNodeTexImage")
+                    specular_shape.name = "G4 Specular Shape"
+                    specular_shape.image = specular_image
+                    specular_shape.projection = "SPHERE"
+                    specular_shape.location = (-420, -980)
+                    shape_multiply = nodes.new("ShaderNodeMixRGB")
+                    shape_multiply.blend_type = "MULTIPLY"
+                    shape_multiply.inputs[0].default_value = 1.0
+                    shape_multiply.location = (20, -940)
+                    links.new(coordinates.outputs["Normal"], specular_shape.inputs["Vector"])
+                    links.new(specular_output, shape_multiply.inputs[1])
+                    links.new(specular_shape.outputs["Color"], shape_multiply.inputs[2])
+                    specular_output = shape_multiply.outputs["Color"]
+            spec_multiply = nodes.new("ShaderNodeMixRGB")
+            spec_multiply.blend_type = "MULTIPLY"
+            spec_multiply.inputs[0].default_value = 1.0
+            spec_multiply.location = (230, -700)
+            spec_add = nodes.new("ShaderNodeMixRGB")
+            spec_add.blend_type = "ADD"
+            spec_add.inputs[0].default_value = 0.12
+            spec_add.location = (650, 160)
+            links.new(glossy.outputs["BSDF"], glossy_rgb.inputs["Shader"])
+            links.new(specular_output, spec_multiply.inputs[1])
+            links.new(specular_mask.outputs["Color"], spec_multiply.inputs[2])
+            links.new(color_output, spec_add.inputs[1])
+            links.new(spec_multiply.outputs["Color"], spec_add.inputs[2])
+            color_output = spec_add.outputs["Color"]
+
+    emission = nodes.new("ShaderNodeEmission")
+    emission.location = (820, 180)
+    emission.inputs["Strength"].default_value = 1.0
+    links.new(color_output, emission.inputs["Color"])
+    alpha_output = base.outputs.get("Alpha")
+    alpha_path = first_variant_path(variants, "alpha_red")
+    if alpha_path is not None:
+        image = load_image(alpha_path)
+        if image is not None:
+            image.colorspace_settings.name = "Non-Color"
+            alpha_texture = nodes.new("ShaderNodeTexImage")
+            alpha_texture.image = image
+            alpha_texture.location = (420, 600)
+            alpha_separate = nodes.new("ShaderNodeSeparateColor")
+            alpha_separate.location = (610, 600)
+            links.new(alpha_texture.outputs["Color"], alpha_separate.inputs["Color"])
+            alpha_output = alpha_separate.outputs["Red"]
+    if alpha_output is not None and (alpha_path is not None or name_implies_alpha(material.name, base_path)):
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        transparent.location = (820, 20)
+        mix_shader = nodes.new("ShaderNodeMixShader")
+        mix_shader.location = (1020, 100)
+        links.new(alpha_output, mix_shader.inputs[0])
+        links.new(transparent.outputs["BSDF"], mix_shader.inputs[1])
+        links.new(emission.outputs["Emission"], mix_shader.inputs[2])
+        links.new(mix_shader.outputs["Shader"], output.inputs["Surface"])
+        set_transparent_material(material)
+    else:
+        links.new(emission.outputs["Emission"], output.inputs["Surface"])
+    material["g4_level5_toon"] = True
+    material["g4_base_texture"] = str(base_path)
+    material["g4_recolor_mask"] = str(mask_path) if mask_path is not None else ""
+    if debug is not None:
+        debug.append(
+            f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
+            f"line={line_path and line_path.name} sp={specular_path and specular_path.name} "
+            f"spm={specular_mask_path and specular_mask_path.name}"
+        )
+    return True
+
+
 def apply_material_texture_variants(summary: dict, debug: list[str] | None = None) -> None:
     textures = [Path(path) for path in summary.get("textures", [])]
     if not textures:
@@ -1046,6 +1398,88 @@ def apply_auxiliary_textures_to_imported_materials(imported_names: set[str], sum
             connect_normal_map(material, principled, normal_path, debug)
         elif debug is not None:
             debug.append(f"[post-pass] {material.name}: no normal candidate")
+        apply_level5_toon_shader(material, base_path, variants, debug)
+
+
+def configure_level5_outlines(debug: list[str] | None = None) -> bool:
+    scene = bpy.context.scene
+    view_layer = bpy.context.view_layer
+    try:
+        scene.render.use_freestyle = True
+        settings = view_layer.freestyle_settings
+        for stale in tuple(settings.linesets):
+            if stale.linestyle is None:
+                settings.linesets.remove(stale)
+        line_set = settings.linesets.get("Level-5 G4 Outline")
+        if line_set is None or line_set.linestyle is None:
+            if line_set is not None:
+                settings.linesets.remove(line_set)
+            bpy.ops.scene.freestyle_lineset_add()
+            line_set = settings.linesets.active
+            line_set.name = "Level-5 G4 Outline"
+        line_style = line_set.linestyle
+        line_style.name = "Level-5 G4 Outline"
+        line_set.select_silhouette = True
+        line_set.select_border = True
+        line_set.select_crease = True
+        line_set.select_material_boundary = True
+        line_set.select_contour = True
+        line_set.edge_type_combination = "OR"
+        settings.crease_angle = math.radians(55.0)
+        line_style.color = (0.018, 0.012, 0.018)
+        line_style.thickness = 1.15
+        line_style.caps = "ROUND"
+    except (AttributeError, RuntimeError, TypeError):
+        if debug is not None:
+            debug.append("[outline] Freestyle is unavailable for the active render configuration")
+        return False
+    if debug is not None:
+        debug.append("[outline] depth/normal approximation enabled with silhouette, crease and material edges")
+    return True
+
+
+def configure_viewport_outlines(imported_names: set[str], debug: list[str] | None = None) -> int:
+    """Add a back-face hull so silhouettes are visible outside Freestyle renders."""
+    material = bpy.data.materials.get("Level-5 G4 Viewport Outline")
+    if material is None:
+        material = bpy.data.materials.new("Level-5 G4 Viewport Outline")
+        material.use_nodes = True
+        material.diffuse_color = (0.012, 0.006, 0.012, 1.0)
+        material.use_backface_culling = True
+        nodes = material.node_tree.nodes
+        nodes.clear()
+        output = nodes.new("ShaderNodeOutputMaterial")
+        emission = nodes.new("ShaderNodeEmission")
+        emission.inputs["Color"].default_value = (0.012, 0.006, 0.012, 1.0)
+        emission.inputs["Strength"].default_value = 1.0
+        material.node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+    configured = 0
+    for name in imported_names:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "MESH" or not obj.data.polygons:
+            continue
+        slot = obj.data.materials.get(material.name)
+        if slot is None:
+            obj.data.materials.append(material)
+        material_index = next(
+            (index for index, item in enumerate(obj.data.materials) if item == material),
+            len(obj.data.materials) - 1,
+        )
+        modifier = obj.modifiers.get("Level-5 G4 Viewport Outline")
+        if modifier is None:
+            modifier = obj.modifiers.new("Level-5 G4 Viewport Outline", "SOLIDIFY")
+        modifier.thickness = 0.0007
+        modifier.offset = 1.0
+        modifier.use_flip_normals = True
+        modifier.use_rim = False
+        modifier.material_offset = material_index
+        modifier.show_in_editmode = False
+        obj["g4_viewport_outline"] = True
+        configured += 1
+    if debug is not None:
+        debug.append(f"[outline] viewport back-face hulls={configured}")
+    return configured
 
 
 def pack_images(paths_before: set[str], texture_paths: set[str], enabled: bool) -> None:
@@ -1081,19 +1515,45 @@ def cleanup_generated_files(summary: dict, enabled: bool) -> None:
             shutil.rmtree(directory, ignore_errors=True)
 
 
-def import_g4_model(path: Path, prefs: G4ImporterPreferences, create_report_text: bool) -> tuple[dict, set[str]]:
+def discard_secondary_lods(imported_names: set[str]) -> int:
+    removed = 0
+    for object_name in tuple(imported_names):
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or obj.type != "MESH" or not re.search(r"_LOD[1-9](?:\.\d+)?$", obj.name, re.IGNORECASE):
+            continue
+        imported_names.discard(object_name)
+        bpy.data.objects.remove(obj, do_unlink=True)
+        removed += 1
+    return removed
+
+
+def import_g4_model(
+    path: Path,
+    prefs: G4ImporterPreferences,
+    create_report_text: bool,
+    target_armature=None,
+) -> tuple[dict, set[str]]:
     debug = [f"[import] input={path}"]
+    if target_armature is not None and target_armature.type == "ARMATURE":
+        debug.append(
+            f"[target-armature] name={target_armature.name} "
+            f"bones={len(target_armature.data.bones)} "
+            f"first={list(target_armature.data.bones.keys())[:16]}"
+        )
     images_before = image_paths()
-    summary = run_exporter(str(path), prefs)
+    summary = run_exporter(str(path), prefs, target_armature)
     debug.append(f"[exporter] resolved={summary.get('resolved_model')}")
     debug.append(f"[exporter] dae={summary.get('dae')}")
+    debug.append(f"[exporter] skeleton_source={summary.get('skeleton_source')}")
     debug.append(f"[exporter] textures={len(summary.get('textures', []))} materials={len(summary.get('materials', {}))}")
     debug.append(f"[exporter] texture_sources={summary.get('texture_sources', [])}")
     dae_path = Path(summary["dae"]).resolve()
     if not dae_path.exists():
         raise RuntimeError(f"Generated DAE not found: {dae_path}")
     imported_names = import_collada(dae_path)
+    removed_lods = discard_secondary_lods(imported_names)
     debug.append(f"[collada] imported_objects={sorted(imported_names)}")
+    debug.append(f"[collada] secondary_lods_removed={removed_lods}")
     orientation = apply_g4_bone_orientation(
         imported_names,
         summary,
@@ -1105,6 +1565,8 @@ def import_g4_model(path: Path, prefs: G4ImporterPreferences, create_report_text
     collapse_duplicate_materials(imported_names)
     apply_material_texture_variants(summary, debug)
     apply_auxiliary_textures_to_imported_materials(imported_names, summary, debug)
+    configure_level5_outlines(debug)
+    configure_viewport_outlines(imported_names, debug)
     texture_paths = {str(Path(path).resolve()) for path in summary.get("textures", [])}
     pack_images(images_before, texture_paths, getattr(prefs, "pack_imported_textures", True))
     write_debug_log(summary, debug)
@@ -1113,6 +1575,175 @@ def import_g4_model(path: Path, prefs: G4ImporterPreferences, create_report_text
         make_debug_text(summary, debug)
     cleanup_generated_files(summary, getattr(prefs, "cleanup_import_cache", True))
     return summary, imported_names
+
+
+def model_data_roots(path: Path, prefs: G4ImporterPreferences) -> list[Path]:
+    roots = []
+    configured = bpy.path.abspath(getattr(prefs, "raw_data_root", "") or "")
+    if configured:
+        roots.append(Path(configured))
+    for parent in path.parents:
+        if parent.name == "data" and parent.parent.name in {"raw", "readable"}:
+            roots.append(parent)
+            work_root = parent.parent.parent
+            roots.extend((work_root / "raw" / "data", work_root / "readable" / "data"))
+            break
+    return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
+
+
+def load_model_lookup(prefs: G4ImporterPreferences) -> dict:
+    lookup_path = Path(bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or ""))
+    if not lookup_path.is_file():
+        return {}
+    try:
+        return json.loads(lookup_path.read_text(encoding="utf-8")).get("models") or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def body_stem_from_row(row: dict | None) -> str | None:
+    body_path = str((row or {}).get("body_path") or "").replace("\\", "/")
+    match = re.search(r"(?:^|/)(c\d{6,8})(?:\.objbin)?$", body_path, re.IGNORECASE)
+    return match.group(1).lower() if match else None
+
+
+def lookup_body_stem_for_identifier(identifier: str, models: dict) -> str | None:
+    identifier = identifier.lower()
+    rows = (
+        row
+        for model_path, row in models.items()
+        if Path(model_path).stem.lower() == identifier
+    )
+    return next((stem for row in rows if (stem := body_stem_from_row(row))), None)
+
+
+def lookup_body_stem(path: Path, prefs: G4ImporterPreferences, models: dict | None = None) -> str | None:
+    models = load_model_lookup(prefs) if models is None else models
+    relative = None
+    parts = path.parts
+    for index in range(len(parts) - 2):
+        if parts[index:index + 2] == ("common", "chr"):
+            relative = Path(*parts[index + 2:]).as_posix()
+            break
+    row = None
+    if relative:
+        row = models.get(relative)
+        if row is None:
+            row = models.get(Path(relative).with_suffix(".objbin").as_posix())
+    return body_stem_from_row(row)
+
+
+def find_character_part(
+    path: Path,
+    prefix: str,
+    prefs: G4ImporterPreferences,
+    character_part_stem: str = "",
+) -> Path | None:
+    match = re.fullmatch(r"c(\d{6,8})", path.stem, re.IGNORECASE)
+    if match is None:
+        return None
+    stems = []
+    models = load_model_lookup(prefs)
+    override = re.fullmatch(r"c(\d{6,8})", character_part_stem, re.IGNORECASE)
+    if override:
+        override_body = lookup_body_stem_for_identifier(override.group(0), models)
+        if override_body:
+            stems.append(f"{prefix}{override_body[1:]}")
+        stems.append(f"{prefix}{override.group(1)}")
+    stems.append(f"{prefix}{match.group(1)}")
+    body_stem = lookup_body_stem(path, prefs, models)
+    if body_stem:
+        stems.append(f"{prefix}{body_stem[1:]}")
+    for data_root in model_data_roots(path, prefs):
+        uniform_root = data_root / "common" / "chr" / "_uniform"
+        for stem in dict.fromkeys(stems):
+            for extension in (".g4pkm", ".g4md"):
+                candidate = uniform_root / stem / f"{stem}{extension}"
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
+def attach_part_to_armature(
+    path: Path,
+    target_armature,
+    prefs: G4ImporterPreferences,
+    create_report_text: bool,
+    preserve_part_armatures: bool = False,
+) -> int:
+    _, imported_names = import_g4_model(
+        path,
+        prefs,
+        create_report_text,
+        target_armature=target_armature,
+    )
+    imported_objects = [bpy.data.objects.get(name) for name in imported_names]
+    imported_objects = [obj for obj in imported_objects if obj is not None]
+    part_armatures = {obj for obj in imported_objects if obj.type == "ARMATURE" and obj != target_armature}
+
+    attached = 0
+    for obj in imported_objects:
+        if obj.type != "MESH":
+            continue
+        armature_modifiers = [modifier for modifier in obj.modifiers if modifier.type == "ARMATURE"]
+        if not armature_modifiers:
+            raise RuntimeError(f"Character part mesh has no armature modifier: {path}::{obj.name}")
+        for modifier in armature_modifiers:
+            if modifier.object in part_armatures:
+                modifier.object = target_armature
+        if not any(modifier.object == target_armature for modifier in armature_modifiers):
+            raise RuntimeError(f"Character part mesh could not be bound to {target_armature.name}: {path}::{obj.name}")
+        if obj.parent in part_armatures:
+            obj.parent = target_armature
+            obj.matrix_parent_inverse = Matrix.Identity(4)
+            obj.matrix_basis = Matrix.Identity(4)
+        obj["g4_character_part_source"] = str(path)
+        obj["g4_character_part_group_remaps"] = 0
+        obj["g4_character_part_actor"] = target_armature.name
+        obj["g4_character_part_preserve_armature"] = False
+        attached += 1
+
+    for source_armature in part_armatures:
+        bpy.data.objects.remove(source_armature, do_unlink=True)
+    return attached
+
+
+def import_character_parts_for_armature(
+    model_path: Path,
+    target_armature,
+    prefs: G4ImporterPreferences,
+    automatic: bool,
+    body_path: str,
+    shoes_path: str,
+    create_report_text: bool,
+    character_part_stem: str = "",
+    preserve_part_armatures: bool = False,
+) -> tuple[int, list[Path]]:
+    if automatic:
+        paths = [
+            find_character_part(model_path, "u", prefs, character_part_stem),
+            find_character_part(model_path, "s", prefs, character_part_stem),
+        ]
+    else:
+        paths = [Path(bpy.path.abspath(value)) if value else None for value in (body_path, shoes_path)]
+    selected = []
+    for path in paths:
+        if path is None:
+            continue
+        if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS:
+            raise RuntimeError(f"Character part not found or unsupported: {path}")
+        selected.append(path)
+    attached = sum(
+        attach_part_to_armature(
+            path,
+            target_armature,
+            prefs,
+            create_report_text,
+            preserve_part_armatures=preserve_part_armatures,
+        )
+        for path in selected
+    )
+    return attached, selected
 
 
 class IMPORT_OT_level5_g4(Operator, ImportHelper):
@@ -1138,6 +1769,46 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         default=True,
         description="Create a Blender text block with the exporter summary",
     )
+    import_character_parts: BoolProperty(
+        name="Import Body and Shoes",
+        default=True,
+        description="Attach manually selected u* body and s* shoes to the character rig",
+    )
+    auto_character_parts: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    body_model: StringProperty(
+        name="Body Model",
+        subtype="FILE_PATH",
+        description="Optional u*.g4md/.g4pkm body selected manually",
+    )
+    shoes_model: StringProperty(
+        name="Shoes Model",
+        subtype="FILE_PATH",
+        description="Optional s*.g4md/.g4pkm shoes selected manually",
+    )
+    character_part_stem: StringProperty(
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    preserve_character_part_armatures: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+
+    def invoke(self, context, event):
+        self.auto_character_parts = False
+        return ImportHelper.invoke(self, context, event)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "create_report_text")
+        is_character = bool(re.fullmatch(r"c\d{6,8}", Path(self.filepath).stem, re.IGNORECASE))
+        if is_character:
+            layout.prop(self, "import_character_parts")
+        if is_character and self.import_character_parts:
+            layout.prop(self, "body_model")
+            layout.prop(self, "shoes_model")
 
     def execute(self, context):
         base_path = Path(self.filepath)
@@ -1158,12 +1829,29 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
 
         prefs = addon_preferences()
         imported_total = 0
+        part_mesh_total = 0
+        imported_parts = []
         summaries = []
         try:
             for path in paths:
                 summary, imported_names = import_g4_model(path, prefs, self.create_report_text)
                 summaries.append(summary)
                 imported_total += len(imported_names)
+                armatures = imported_armatures(imported_names)
+                if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
+                    attached, part_paths = import_character_parts_for_armature(
+                        path,
+                        armatures[0],
+                        prefs,
+                        False,
+                        self.body_model,
+                        self.shoes_model,
+                        self.create_report_text,
+                        self.character_part_stem,
+                        self.preserve_character_part_armatures,
+                    )
+                    part_mesh_total += attached
+                    imported_parts.extend(part_paths)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -1183,6 +1871,8 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
             message = f"Imported {len(summaries)} G4 models: {imported_total} objects"
         if missing:
             message += f"; missing: {', '.join(missing[:4])}"
+        if imported_parts:
+            message += f"; parts {len(imported_parts)} ({part_mesh_total} meshes)"
         self.report({"INFO"}, message)
         return {"FINISHED"}
 
@@ -1230,10 +1920,34 @@ class IMPORT_OT_level5_g4_folder(Operator):
         default=True,
         description="Create Blender text blocks with exporter summaries",
     )
+    import_character_parts: BoolProperty(
+        name="Import Body and Shoes",
+        default=False,
+    )
+    auto_character_parts: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
+    body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
+    shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
+    preserve_character_part_armatures: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
 
     def invoke(self, context, event):
+        self.auto_character_parts = False
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "recursive")
+        layout.prop(self, "create_report_text")
+        layout.prop(self, "import_character_parts")
+        if self.import_character_parts:
+            layout.prop(self, "body_model")
+            layout.prop(self, "shoes_model")
 
     def execute(self, context):
         directory = Path(bpy.path.abspath(self.directory or ""))
@@ -1252,6 +1966,19 @@ class IMPORT_OT_level5_g4_folder(Operator):
             for path in paths:
                 _, imported_names = import_g4_model(path, prefs, self.create_report_text)
                 imported_total += len(imported_names)
+                armatures = imported_armatures(imported_names)
+                if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
+                    attached, _ = import_character_parts_for_armature(
+                        path,
+                        armatures[0],
+                        prefs,
+                        False,
+                        self.body_model,
+                        self.shoes_model,
+                        self.create_report_text,
+                        preserve_part_armatures=self.preserve_character_part_armatures,
+                    )
+                    imported_total += attached
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -1260,15 +1987,61 @@ class IMPORT_OT_level5_g4_folder(Operator):
         return {"FINISHED"}
 
 
+class IMPORT_OT_level5_g4_character_parts(Operator):
+    bl_idname = "import_scene.level5_g4_character_parts"
+    bl_label = "Attach Level-5 G4 Body and Shoes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
+    shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and context.active_object.type == "ARMATURE"
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=620)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text=f"Target rig: {context.active_object.name}")
+        layout.prop(self, "body_model")
+        layout.prop(self, "shoes_model")
+
+    def execute(self, context):
+        target = context.active_object
+        paths = [Path(bpy.path.abspath(value)) for value in (self.body_model, self.shoes_model) if value]
+        if not paths:
+            self.report({"WARNING"}, "No body or shoes model selected")
+            return {"CANCELLED"}
+        invalid = [path for path in paths if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS]
+        if invalid:
+            self.report({"ERROR"}, f"Character part not found or unsupported: {invalid[0]}")
+            return {"CANCELLED"}
+        prefs = addon_preferences()
+        try:
+            attached = sum(attach_part_to_armature(path, target, prefs, False) for path in paths)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Attached {len(paths)} character parts: {attached} meshes")
+        return {"FINISHED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_level5_g4.bl_idname, text="Level-5 G4 Model (.g4md/.g4pkm)")
     self.layout.operator(IMPORT_OT_level5_g4_folder.bl_idname, text="Level-5 G4 Model Folder")
+    self.layout.operator(
+        IMPORT_OT_level5_g4_character_parts.bl_idname,
+        text="Attach Level-5 G4 Body and Shoes",
+    )
 
 
 classes = [
     G4ImporterPreferences,
     IMPORT_OT_level5_g4,
     IMPORT_OT_level5_g4_folder,
+    IMPORT_OT_level5_g4_character_parts,
 ]
 
 
@@ -1290,11 +2063,13 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    g4_animation_addon.register()
     g4_port_addon.register()
 
 
 def unregister():
     g4_port_addon.unregister()
+    g4_animation_addon.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
