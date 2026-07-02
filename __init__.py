@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 11, 2),
+    "version": (0, 11, 8),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, StringProperty
 from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
@@ -36,6 +36,11 @@ try:
     from . import g4_animation_addon
 except ImportError:
     import g4_animation_addon
+
+try:
+    from .g4_model_probe import map_scene_placements
+except ImportError:
+    from g4_model_probe import map_scene_placements
 
 g4_port_addon.ADDON_ID = ADDON_ID
 g4_animation_addon.ADDON_ID = ADDON_ID
@@ -136,6 +141,7 @@ def addon_preferences() -> "G4ImporterPreferences":
         pack_imported_textures = True
         cleanup_import_cache = True
         apply_bone_orientation = True
+        outline_mode = "OFF"
 
     return Defaults()
 
@@ -227,6 +233,23 @@ class G4ImporterPreferences(AddonPreferences):
         default=False,
         description="Orient bones for display; leave disabled when the rig will receive G4MT animation",
     )
+    outline_mode: EnumProperty(
+        name="Character Outline",
+        items=(
+            (
+                "SIMPLE",
+                "Simple",
+                "Non-destructive object silhouette in the viewport and render",
+            ),
+            (
+                "HULL",
+                "Detailed Viewport",
+                "Add a view-dependent material edge for small details such as nails; does not use Solidify",
+            ),
+            ("OFF", "Off", "Do not add render or viewport outlines"),
+        ),
+        default="SIMPLE",
+    )
     decoder_script: StringProperty(
         name="G4MT Decoder",
         subtype="FILE_PATH",
@@ -295,6 +318,7 @@ class G4ImporterPreferences(AddonPreferences):
         import_box.prop(self, "pack_imported_textures")
         import_box.prop(self, "cleanup_import_cache")
         import_box.prop(self, "apply_bone_orientation")
+        import_box.prop(self, "outline_mode")
 
         animation_box = layout.box()
         animation_box.label(text="Animation Import")
@@ -661,6 +685,8 @@ def strip_texture_variant(name: str) -> str:
 
 def texture_role(path: Path) -> str:
     stem = path.stem.lower()
+    if "cubemap" in stem or re.search(r"(?:^|_)cm\d+_tex$", stem):
+        return "environment"
     if stem.endswith("_a.1"):
         return "transparent_base"
     if stem.endswith(".a"):
@@ -1329,7 +1355,12 @@ def apply_material_texture_variants(summary: dict, debug: list[str] | None = Non
                 )
 
 
-def apply_auxiliary_textures_to_imported_materials(imported_names: set[str], summary: dict, debug: list[str] | None = None) -> None:
+def apply_auxiliary_textures_to_imported_materials(
+    imported_names: set[str],
+    summary: dict,
+    debug: list[str] | None = None,
+    apply_styling: bool = True,
+) -> None:
     materials = []
     seen = set()
     for object_name in imported_names:
@@ -1398,7 +1429,48 @@ def apply_auxiliary_textures_to_imported_materials(imported_names: set[str], sum
             connect_normal_map(material, principled, normal_path, debug)
         elif debug is not None:
             debug.append(f"[post-pass] {material.name}: no normal candidate")
-        apply_level5_toon_shader(material, base_path, variants, debug)
+        if apply_styling:
+            apply_level5_toon_shader(material, base_path, variants, debug)
+
+
+def configure_environment_cubemap(summary: dict, debug: list[str] | None = None) -> bool:
+    candidates = [Path(path) for path in summary.get("textures", []) if texture_role(Path(path)) == "environment"]
+    if not candidates:
+        return False
+    path = next((item for item in candidates if "global" in item.stem.lower()), candidates[0])
+    image = load_image(path)
+    if image is None:
+        if debug is not None:
+            debug.append(f"[cubemap] failed to load converted environment {path.name}")
+        return False
+
+    world = bpy.context.scene.world
+    if world is None:
+        world = bpy.data.worlds.new("Level-5 G4 Environment")
+        bpy.context.scene.world = world
+    world.use_nodes = True
+    tree = world.node_tree
+    if tree is None:
+        return False
+    nodes = tree.nodes
+    links = tree.links
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputWorld")
+    output.location = (520, 0)
+    background = nodes.new("ShaderNodeBackground")
+    background.location = (260, 0)
+    background.inputs["Strength"].default_value = 0.35
+    environment = nodes.new("ShaderNodeTexEnvironment")
+    environment.name = "G4 Environment Cubemap"
+    environment.label = path.name
+    environment.image = image
+    environment.projection = "EQUIRECTANGULAR"
+    links.new(environment.outputs["Color"], background.inputs["Color"])
+    links.new(background.outputs["Background"], output.inputs["Surface"])
+    world["g4_environment_cubemap"] = str(path)
+    if debug is not None:
+        debug.append(f"[cubemap] world environment={path.name} strength=0.35")
+    return True
 
 
 def configure_level5_outlines(debug: list[str] | None = None) -> bool:
@@ -1421,65 +1493,69 @@ def configure_level5_outlines(debug: list[str] | None = None) -> bool:
         line_style.name = "Level-5 G4 Outline"
         line_set.select_silhouette = True
         line_set.select_border = True
-        line_set.select_crease = True
-        line_set.select_material_boundary = True
-        line_set.select_contour = True
+        line_set.select_crease = False
+        line_set.select_material_boundary = False
+        line_set.select_contour = False
         line_set.edge_type_combination = "OR"
         settings.crease_angle = math.radians(55.0)
         line_style.color = (0.018, 0.012, 0.018)
-        line_style.thickness = 1.15
+        line_style.thickness = 0.72
         line_style.caps = "ROUND"
     except (AttributeError, RuntimeError, TypeError):
         if debug is not None:
             debug.append("[outline] Freestyle is unavailable for the active render configuration")
         return False
     if debug is not None:
-        debug.append("[outline] depth/normal approximation enabled with silhouette, crease and material edges")
+        debug.append("[outline] render lines limited to silhouette and border edges")
     return True
 
 
-def configure_viewport_outlines(imported_names: set[str], debug: list[str] | None = None) -> int:
-    """Add a back-face hull so silhouettes are visible outside Freestyle renders."""
-    material = bpy.data.materials.get("Level-5 G4 Viewport Outline")
-    if material is None:
-        material = bpy.data.materials.new("Level-5 G4 Viewport Outline")
-        material.use_nodes = True
-        material.diffuse_color = (0.012, 0.006, 0.012, 1.0)
-        material.use_backface_culling = True
-        nodes = material.node_tree.nodes
-        nodes.clear()
-        output = nodes.new("ShaderNodeOutputMaterial")
-        emission = nodes.new("ShaderNodeEmission")
-        emission.inputs["Color"].default_value = (0.012, 0.006, 0.012, 1.0)
-        emission.inputs["Strength"].default_value = 1.0
-        material.node_tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
-
-    configured = 0
+def configure_viewport_outlines(
+    imported_names: set[str],
+    detailed: bool = False,
+    debug: list[str] | None = None,
+) -> int:
+    """Enable Blender's screen-space object outline without duplicating geometry."""
     for name in imported_names:
         obj = bpy.data.objects.get(name)
-        if obj is None or obj.type != "MESH" or not obj.data.polygons:
-            continue
-        slot = obj.data.materials.get(material.name)
-        if slot is None:
-            obj.data.materials.append(material)
-        material_index = next(
-            (index for index, item in enumerate(obj.data.materials) if item == material),
-            len(obj.data.materials) - 1,
-        )
-        modifier = obj.modifiers.get("Level-5 G4 Viewport Outline")
-        if modifier is None:
-            modifier = obj.modifiers.new("Level-5 G4 Viewport Outline", "SOLIDIFY")
-        modifier.thickness = 0.0007
-        modifier.offset = 1.0
-        modifier.use_flip_normals = True
-        modifier.use_rim = False
-        modifier.material_offset = material_index
-        modifier.show_in_editmode = False
-        obj["g4_viewport_outline"] = True
-        configured += 1
+        if obj is not None and obj.type == "MESH":
+            obj["g4_viewport_outline"] = "SCREEN_SPACE"
+
+    configured = 0
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for space in area.spaces:
+                if space.type != "VIEW_3D":
+                    continue
+                space.shading.show_object_outline = True
+                space.shading.object_outline_color = (0.018, 0.012, 0.018)
+                if detailed:
+                    space.shading.show_cavity = True
+                    space.shading.cavity_type = "BOTH"
+                    space.shading.cavity_ridge_factor = 1.0
+                    space.shading.cavity_valley_factor = 1.0
+                configured += 1
     if debug is not None:
-        debug.append(f"[outline] viewport back-face hulls={configured}")
+        detail = " with cavity detail" if detailed else ""
+        debug.append(f"[outline] non-destructive viewport spaces={configured}{detail}")
     return configured
+
+
+def preserve_outline_vertex_parameters(imported_names: set[str], debug: list[str] | None = None) -> int:
+    preserved = 0
+    for name in imported_names:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "MESH" or not obj.data.color_attributes:
+            continue
+        attribute = obj.data.color_attributes.active_color or obj.data.color_attributes[0]
+        attribute.name = "G4 Outline Parameters"
+        obj["g4_outline_vertex_parameters"] = attribute.name
+        preserved += 1
+    if debug is not None:
+        debug.append(f"[outline] preserved vertex parameter meshes={preserved}")
+    return preserved
 
 
 def pack_images(paths_before: set[str], texture_paths: set[str], enabled: bool) -> None:
@@ -1532,7 +1608,10 @@ def import_g4_model(
     prefs: G4ImporterPreferences,
     create_report_text: bool,
     target_armature=None,
+    apply_styling: bool | None = None,
 ) -> tuple[dict, set[str]]:
+    if apply_styling is None:
+        apply_styling = is_character_model(path)
     debug = [f"[import] input={path}"]
     if target_armature is not None and target_armature.type == "ARMATURE":
         debug.append(
@@ -1551,6 +1630,7 @@ def import_g4_model(
     if not dae_path.exists():
         raise RuntimeError(f"Generated DAE not found: {dae_path}")
     imported_names = import_collada(dae_path)
+    preserve_outline_vertex_parameters(imported_names, debug)
     removed_lods = discard_secondary_lods(imported_names)
     debug.append(f"[collada] imported_objects={sorted(imported_names)}")
     debug.append(f"[collada] secondary_lods_removed={removed_lods}")
@@ -1564,9 +1644,26 @@ def import_g4_model(
     compact_skeleton_summary(summary)
     collapse_duplicate_materials(imported_names)
     apply_material_texture_variants(summary, debug)
-    apply_auxiliary_textures_to_imported_materials(imported_names, summary, debug)
-    configure_level5_outlines(debug)
-    configure_viewport_outlines(imported_names, debug)
+    outline_mode = getattr(prefs, "outline_mode", "SIMPLE") if apply_styling else "OFF"
+    apply_auxiliary_textures_to_imported_materials(
+        imported_names,
+        summary,
+        debug,
+        apply_styling=apply_styling,
+    )
+    if apply_styling:
+        if outline_mode != "OFF":
+            configure_level5_outlines(debug)
+            configure_viewport_outlines(imported_names, outline_mode == "HULL", debug)
+        if outline_mode == "HULL":
+            debug.append("[outline] detailed viewport cavity edges enabled")
+        elif outline_mode == "SIMPLE":
+            debug.append("[outline] simple viewport silhouette; geometry left unchanged")
+        else:
+            debug.append("[outline] disabled")
+    else:
+        debug.append("[styling] using classic material mapping without toon shader or outlines")
+    configure_environment_cubemap(summary, debug)
     texture_paths = {str(Path(path).resolve()) for path in summary.get("textures", [])}
     pack_images(images_before, texture_paths, getattr(prefs, "pack_imported_textures", True))
     write_debug_log(summary, debug)
@@ -1900,6 +1997,85 @@ def collect_model_paths_auto(directory: Path, recursive: bool) -> list[Path]:
     return collect_model_paths(directory, True)
 
 
+def is_character_model(path: Path) -> bool:
+    parents = {part.lower() for part in path.parent.parts}
+    if "map" in parents:
+        return False
+    return "chr" in parents
+
+
+def auto_hide_map_parts(imported_names: set[str]) -> int:
+    hidden = 0
+    for object_name in imported_names:
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or not any(
+            token in obj.name.lower()
+            for token in ("sdw", "shadow", "culling", "lv1", "lv2")
+        ):
+            continue
+        obj.hide_viewport = True
+        obj.hide_render = True
+        obj.hide_set(True)
+        obj["g4_map_auto_hidden"] = True
+        hidden += 1
+    return hidden
+
+
+G4_TO_BLENDER = Matrix(
+    (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, -1.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+)
+
+
+def placement_matrix(values: list[float]) -> Matrix:
+    native = Matrix(tuple(tuple(values[row * 4 : row * 4 + 4]) for row in range(4)))
+    return G4_TO_BLENDER @ native @ G4_TO_BLENDER.inverted()
+
+
+def duplicate_imported_objects(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
+    copies = {source: source.copy() for source in objects}
+    for source, duplicate in copies.items():
+        for collection in source.users_collection:
+            collection.objects.link(duplicate)
+        if source.parent in copies:
+            duplicate.parent = copies[source.parent]
+        for modifier in duplicate.modifiers:
+            if hasattr(modifier, "object") and modifier.object in copies:
+                modifier.object = copies[modifier.object]
+        for constraint in duplicate.constraints:
+            if hasattr(constraint, "target") and constraint.target in copies:
+                constraint.target = copies[constraint.target]
+    return list(copies.values())
+
+
+def apply_map_placements(
+    source_path: Path,
+    imported_names: set[str],
+    placements: list[dict],
+) -> int:
+    if not placements:
+        return 0
+    source_objects = [bpy.data.objects.get(name) for name in imported_names]
+    source_objects = [obj for obj in source_objects if obj is not None]
+    placed = 0
+    for placement_index, placement in enumerate(placements):
+        objects = source_objects if placement_index == 0 else duplicate_imported_objects(source_objects)
+        object_set = set(objects)
+        matrix = placement_matrix(placement["matrix"])
+        for obj in objects:
+            if obj.parent not in object_set:
+                obj.matrix_world = matrix @ obj.matrix_world
+            obj["g4_map_asset"] = source_path.stem
+            obj["g4_map_node"] = placement["node_name"]
+            obj["g4_map_node_index"] = placement["node_index"]
+        placed += 1
+    return placed
+
+
 class IMPORT_OT_level5_g4_folder(Operator):
     bl_idname = "import_scene.level5_g4_folder"
     bl_label = "Import Level-5 G4 Model Folder"
@@ -1962,10 +2138,27 @@ class IMPORT_OT_level5_g4_folder(Operator):
 
         prefs = addon_preferences()
         imported_total = 0
+        stems = {path.stem.lower() for path in paths}
+        placements_by_asset = map_scene_placements(directory, stems)
+        placed_total = 0
+        hidden_total = 0
         try:
             for path in paths:
-                _, imported_names = import_g4_model(path, prefs, self.create_report_text)
+                character_model = is_character_model(path)
+                _, imported_names = import_g4_model(
+                    path,
+                    prefs,
+                    self.create_report_text,
+                    apply_styling=character_model,
+                )
                 imported_total += len(imported_names)
+                if not character_model:
+                    hidden_total += auto_hide_map_parts(imported_names)
+                placed_total += apply_map_placements(
+                    path,
+                    imported_names,
+                    placements_by_asset.get(path.stem.lower(), []),
+                )
                 armatures = imported_armatures(imported_names)
                 if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
                     attached, _ = import_character_parts_for_armature(
@@ -1983,7 +2176,12 @@ class IMPORT_OT_level5_g4_folder(Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
-        self.report({"INFO"}, f"Imported {len(paths)} G4 models from folder: {imported_total} objects")
+        message = f"Imported {len(paths)} G4 models from folder: {imported_total} objects"
+        if placements_by_asset:
+            message += f"; reconstructed {placed_total} map placements"
+        if hidden_total:
+            message += f"; hidden {hidden_total} auxiliary map objects"
+        self.report({"INFO"}, message)
         return {"FINISHED"}
 
 

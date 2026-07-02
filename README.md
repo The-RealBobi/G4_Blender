@@ -24,6 +24,7 @@ The importer automatically converts G4 assets into Blender-compatible data, recr
 * Shared skeleton resolution.
 * G4SK rest bone orientation reconstruction.
 * Full map importing.
+* Automatic map placement and instancing from the world G4PK/G4SK hierarchy.
 * Batch processing support.
 * Automatic scene reconstruction.
 * Direct G4MT and animation G4PK import.
@@ -149,13 +150,40 @@ regions. RGB channels from `msk` are exposed as neutral `G4 Mask ... Tint`
 nodes so recolour and skin parameters can be applied without using the mask as
 alpha. Source-painted line work remains in the base texture.
 
-The add-on also enables one Freestyle line set using silhouette, crease,
-contour and material-boundary edges. This approximates the engine's global
-depth/normal edge pass. Executable analysis identifies that pass through the
-global parameters `edge2OutlineScale`, `edge2OutlineDepthScaleOffset`,
-`edge2OutlineDepthScaleMax` and `charaRimOutlineMax`; consequently the `line`
-texture is retained as a material parameter rather than misused as a UV-space
-outline mask.
+The **Character Outline** preference controls character contours. **Simple**
+(the default) combines a restrained Freestyle silhouette with Blender's
+screen-space viewport outline. **Detailed Viewport** adds a view-dependent
+screen-space cavity pass for small relief details such as nails. Neither mode
+adds shader-facing masks, geometry or Solidify, while **Off** disables both outline paths. The `line` texture
+remains a material parameter rather than being misused as a UV-space mask.
+The source vertex `COLOR` channel used by the game's edge shaders is preserved
+as **G4 Outline Parameters** instead of being discarded during DAE conversion.
+
+## Map Reconstruction
+
+Folder import reads the world-level `<world>.g4pk` beside the model folders.
+Its embedded G4SK is the static scene hierarchy: `model_r_*` branches contain
+directly rendered assets, while `instance` branches contain repeated objects
+named like `ao042_00_003`. The importer matches those nodes to their G4PKM
+assets, composes parent transforms, converts the G4 Y-up matrices to Blender
+Z-up space and creates linked object-data instances where an asset is reused.
+Map objects containing `sdw`, `shadow`, `culling`, `lv1` or `lv2` in their
+names are hidden in both the viewport and render as soon as they are imported.
+
+Models are classified from their source hierarchy rather than their filename:
+an ancestor directory named `chr` selects character styling, while `map`
+selects the classic Principled mapping for base, alpha/mask and normal textures.
+The character toon shader and viewport/render outlines are never added to map
+assets.
+
+Single-model imports use the same ID-based material decision as folder imports.
+Native half-float DDS cubemaps are detected from their DDS flags, converted to
+equirectangular Radiance HDR and used as a restrained Blender world environment
+when the map has a matching `<world>_cubemap.g4tx` container.
+
+Select the world folder itself, such as `w10`, `w11` or `w12`, with recursive
+folder import enabled. Assets absent from the render hierarchy are still
+imported unchanged; the importer does not guess placements for them.
 
 ## Event Animation
 

@@ -1108,6 +1108,80 @@ def parse_g4sk(data: bytes) -> dict:
     return asdict(info)
 
 
+def map_asset_name(node_name: str, model_stems: set[str]) -> str | None:
+    """Resolve a map hierarchy node to the model asset it instances."""
+    lowered = node_name.lower()
+    if lowered in model_stems:
+        return lowered
+    match = re.fullmatch(r"(.+)_\d{2}_\d{3}", lowered)
+    if match and match.group(1) in model_stems:
+        return match.group(1)
+    return None
+
+
+def map_scene_placements(directory: Path, model_stems: Iterable[str]) -> dict[str, list[dict]]:
+    """Read static asset placements from the world's G4SK scene hierarchy."""
+    stems = {stem.lower() for stem in model_stems}
+    scene_path = directory / f"{directory.name}.g4pk"
+    if not scene_path.is_file() or not stems:
+        return {}
+
+    data = scene_path.read_bytes()
+    if data[:4] != b"G4PK":
+        return {}
+    pack = parse_g4pk(data)
+    entry = next((item for item in pack["entries"] if item["magic"] == "G4SK"), None)
+    if entry is None:
+        return {}
+    skeleton = parse_g4sk(data[entry["offset"] : entry["offset"] + entry["size"]])
+    names = skeleton["names"]
+    parents = skeleton["parent_indices"]
+    local_matrices = skeleton.get("local_srt_matrices") or skeleton["local_matrices"]
+    joint_count = min(len(names), len(local_matrices))
+
+    world_matrices: list[list[float] | None] = [None] * joint_count
+
+    def world_matrix(index: int, visiting: set[int] | None = None) -> list[float]:
+        cached = world_matrices[index]
+        if cached is not None:
+            return cached
+        visiting = set() if visiting is None else visiting
+        if index in visiting:
+            return local_matrices[index]
+        visiting.add(index)
+        parent = parents[index] if index < len(parents) else joint_count
+        if 0 <= parent < joint_count and parent != index:
+            result = matrix_mul(world_matrix(parent, visiting), local_matrices[index])
+        else:
+            result = local_matrices[index]
+        world_matrices[index] = result
+        visiting.remove(index)
+        return result
+
+    def belongs_to_render_hierarchy(index: int) -> bool:
+        while 0 <= index < joint_count:
+            name = names[index].lower()
+            if name == "instance" or name.startswith("model_r_"):
+                return True
+            if name.startswith("model_a_") or name.startswith("model_i_"):
+                return False
+            parent = parents[index] if index < len(parents) else joint_count
+            if parent == index:
+                break
+            index = parent
+        return False
+
+    placements: dict[str, list[dict]] = {}
+    for index, node_name in enumerate(names[:joint_count]):
+        asset_name = map_asset_name(node_name, stems)
+        if asset_name is None or not belongs_to_render_hierarchy(index):
+            continue
+        placements.setdefault(asset_name, []).append(
+            {"node_index": index, "node_name": node_name, "matrix": world_matrix(index)}
+        )
+    return placements
+
+
 def normalize_skeleton_info(info: dict | None) -> dict | None:
     if not isinstance(info, dict):
         return None
@@ -1676,6 +1750,8 @@ def find_texture_containers_for_model(path: Path) -> list[Path]:
             local_dir = RAW_DATA_ROOT / "dx11" / Path(*parts[1:-1])
             if local_dir.exists():
                 candidates.extend(sorted(local_dir.glob("*.g4tx")))
+            world = parts[3]
+            candidates.append(RAW_DATA_ROOT / "dx11" / "map" / "cubemap" / f"{world}_cubemap.g4tx")
 
     seen = set()
     unique: list[Path] = []
@@ -1735,6 +1811,9 @@ def find_shared_texture_containers_for_materials(path: Path, material_names: Ite
             continue
         stem = match.group(1)
         candidates.append(RAW_DATA_ROOT / "dx11" / "chr" / stem / f"{stem}.g4tx")
+        mirror_dir = RAW_DATA_ROOT / "dx11" / Path(*rel.parts[1:-1])
+        if mirror_dir.is_dir():
+            candidates.extend(sorted(mirror_dir.glob(f"{stem}*.g4tx")))
 
     seen = set()
     unique: list[Path] = []
@@ -1758,8 +1837,13 @@ def extract_g4tx(path: Path, out_dir: Path) -> list[Path]:
         size = texture["size"]
         payload = data[offset : offset + size]
         if payload.startswith(b"DDS "):
-            ext = ".dds"
-            out_data = payload
+            cubemap = dds_half_float_cubemap(payload)
+            if cubemap is not None:
+                ext = ".hdr"
+                out_data = cubemap_to_radiance_hdr(payload, *cubemap)
+            else:
+                ext = ".dds"
+                out_data = payload
         elif payload.startswith(b"NXTCH000"):
             ext = ".nxtch"
             out_data = payload
@@ -1770,6 +1854,62 @@ def extract_g4tx(path: Path, out_dir: Path) -> list[Path]:
         out_path.write_bytes(out_data)
         written.append(out_path)
     return written
+
+
+def dds_half_float_cubemap(data: bytes) -> tuple[int, int, int] | None:
+    if len(data) < 128 or data[:4] != b"DDS ":
+        return None
+    height, width = struct.unpack_from("<II", data, 12)
+    mip_count = max(1, u32(data, 28))
+    pixel_format = u32(data, 84)
+    caps2 = u32(data, 112)
+    if pixel_format != 113 or not caps2 & 0x200 or not width or width != height:
+        return None
+    face_size = sum(max(1, width >> level) * max(1, height >> level) * 8 for level in range(mip_count))
+    if 128 + face_size * 6 > len(data):
+        return None
+    return width, mip_count, face_size
+
+
+def cubemap_to_radiance_hdr(data: bytes, face_width: int, mip_count: int, face_size: int) -> bytes:
+    del mip_count
+    width = face_width * 4
+    height = face_width * 2
+
+    def sample(direction: tuple[float, float, float]) -> tuple[float, float, float]:
+        x, y, z = direction
+        ax, ay, az = abs(x), abs(y), abs(z)
+        if ax >= ay and ax >= az:
+            face, u, v = (0, -z / ax, -y / ax) if x >= 0 else (1, z / ax, -y / ax)
+        elif ay >= ax and ay >= az:
+            face, u, v = (2, x / ay, z / ay) if y >= 0 else (3, x / ay, -z / ay)
+        else:
+            face, u, v = (4, x / az, -y / az) if z >= 0 else (5, -x / az, -y / az)
+        px = min(face_width - 1, max(0, int((u * 0.5 + 0.5) * face_width)))
+        py = min(face_width - 1, max(0, int((v * 0.5 + 0.5) * face_width)))
+        offset = 128 + face * face_size + (py * face_width + px) * 8
+        r, g, b, _ = struct.unpack_from("<4e", data, offset)
+        return max(0.0, r), max(0.0, g), max(0.0, b)
+
+    def rgbe(rgb: tuple[float, float, float]) -> bytes:
+        maximum = max(rgb)
+        if maximum < 1e-32:
+            return b"\0\0\0\0"
+        mantissa, exponent = math.frexp(maximum)
+        scale = mantissa * 256.0 / maximum
+        return bytes((min(255, int(rgb[0] * scale)), min(255, int(rgb[1] * scale)), min(255, int(rgb[2] * scale)), exponent + 128))
+
+    pixels = bytearray()
+    for row in range(height):
+        latitude = (0.5 - (row + 0.5) / height) * math.pi
+        cos_latitude = math.cos(latitude)
+        y = math.sin(latitude)
+        for column in range(width):
+            longitude = ((column + 0.5) / width * 2.0 - 1.0) * math.pi
+            direction = (cos_latitude * math.cos(longitude), y, cos_latitude * math.sin(longitude))
+            pixels.extend(rgbe(sample(direction)))
+    header = f"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y {height} +X {width}\n".encode("ascii")
+    return header + pixels
 
 
 def extract_texture_containers(paths: list[Path], out_dir: Path) -> list[Path]:
@@ -2120,6 +2260,8 @@ def material_name_for_mesh(
 
 def texture_usage_from_name(name: str) -> str:
     lower = name.lower()
+    if "cubemap" in lower or re.search(r"(?:^|_)cm\d+_tex$", lower):
+        return "environment"
     if lower.endswith("_a.1"):
         return "transparent_base"
     if lower.endswith(".a"):
@@ -2247,6 +2389,7 @@ def texture_variant_score(path: Path, model_stem: str) -> tuple[int, int, str]:
     usage = texture_usage_from_name(stem)
     variant = stem.rsplit(".", 1)[1] if "." in stem else ""
     usage_score = {
+        "environment": 3,
         "base": 0,
         "transparent_base": 1,
         "normal_or_packed": 9,
@@ -3577,12 +3720,19 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         positions: list[float] = []
         position_tuples: list[tuple[float, float, float]] = []
         texcoords: list[float] = []
+        vertex_colors: list[float] = []
+        color_element = layout_element(layout_for_record(md_info, record), 8)
+        color_offset = color_element.get("value_offset") if color_element is not None else None
         for vertex_index in range(vertex_count):
             off = vertex_offset + vertex_index * vertex_stride
             position = struct.unpack_from("<fff", g4mg, off)
             position_tuples.append(position)
             positions.extend(position)
             texcoords.extend(read_uv0(g4mg, md_info, record, vertex_index))
+            if color_offset is not None and off + color_offset + 4 <= len(g4mg):
+                vertex_colors.extend(value / 255.0 for value in g4mg[off + color_offset : off + color_offset + 4])
+            else:
+                vertex_colors.extend((1.0, 1.0, 1.0, 1.0))
 
         indices = list(struct.unpack_from("<" + "H" * index_count, g4mg, index_base + index_offset))
         native_normals = read_native_normals_for_record(g4mg, md_info, record)
@@ -3633,7 +3783,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             skin_mode = "rigid_face_head_override"
         p: list[int] = []
         for index in indices:
-            p.extend((index, index, index))
+            p.extend((index, index, index, index))
 
         mesh_payloads.append(
             {
@@ -3648,6 +3798,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "positions": positions,
                 "normals": normals,
                 "texcoords": texcoords,
+                "vertex_colors": vertex_colors,
+                "color_offset": color_offset,
                 "indices": p,
                 "vertex_count": vertex_count,
                 "triangle_count": index_count // 3,
@@ -3711,6 +3863,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         positions = payload["positions"]
         normals = payload["normals"]
         texcoords = payload["texcoords"]
+        vertex_colors = payload["vertex_colors"]
         indices = payload["indices"]
         vcount = payload["vertex_count"]
         triangles = payload["triangle_count"]
@@ -3732,11 +3885,18 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             f'<accessor source="#{gid}_normals_array" count="{vcount}" stride="3">'
             f'<param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>'
             f"</accessor></technique_common></source>"
+            f'<source id="{gid}_colors"><float_array id="{gid}_colors_array" count="{len(vertex_colors)}">'
+            f"{dae_float_array(vertex_colors)}</float_array><technique_common>"
+            f'<accessor source="#{gid}_colors_array" count="{vcount}" stride="4">'
+            f'<param name="R" type="float"/><param name="G" type="float"/>'
+            f'<param name="B" type="float"/><param name="A" type="float"/>'
+            f"</accessor></technique_common></source>"
             f'<vertices id="{gid}_vertices"><input semantic="POSITION" source="#{gid}_positions"/></vertices>'
             f'<triangles material="{mat_id}" count="{triangles}">'
             f'<input semantic="VERTEX" source="#{gid}_vertices" offset="0"/>'
             f'<input semantic="NORMAL" source="#{gid}_normals" offset="1"/>'
             f'<input semantic="TEXCOORD" source="#{gid}_texcoords" offset="2" set="0"/>'
+            f'<input semantic="COLOR" source="#{gid}_colors" offset="3" set="0"/>'
             f"<p>{dae_int_array(indices)}</p></triangles>"
             f"</mesh></geometry>"
         )
@@ -3808,6 +3968,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             "normal": "snorm16x4 @ 0x0c",
             "tangent_or_binormal_a": "snorm16x4 @ 0x14",
             "tangent_or_binormal_b": "snorm16x4 @ 0x1c",
+            "outline_parameters": "normalized uint8x4 attribute type 8; preserved as vertex COLOR",
             "blend_weights": "uint16[8] normalized @ 0x24 when stride >= 0x3c",
             "blend_indices": "uint8[8] local palette indices @ 0x34 when stride >= 0x3c",
             "uv0": "layout-declared attribute type 10; V is inverted for DAE/DDS texture origin",
@@ -3824,6 +3985,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "texture": str(used_materials.get(payload["material"])) if used_materials.get(payload["material"]) else None,
                 "vertex_stride": f"0x{payload['vertex_stride']:x}",
                 "uv0_offset": None if payload["uv0_offset"] is None else f"0x{payload['uv0_offset']:x}",
+                "color_offset": None if payload["color_offset"] is None else f"0x{payload['color_offset']:x}",
                 "normal_source": payload["normal_source"],
                 "palette_offset": payload["palette_base"],
                 "palette_length": payload["palette_length"],
