@@ -142,22 +142,58 @@ whose bone CRC/name matches a motion target. Uniform-only helpers such as
 `_wgt_1_0`, sleeves and accessories remain unkeyed and inherit motion through
 their native hierarchy. No vertex weights or part-specific bones are remapped.
 
-Imported materials use a Level-5-style Eevee node graph with one hard light
-transition instead of conventional smooth shading. The base texture receives
-the stronger saturation used by the game; `oc` supplies a second baked shadow
-region, `sp` shapes the directional highlight, and `spm` masks its affected
-regions. RGB channels from `msk` are exposed as neutral `G4 Mask ... Tint`
+Imported materials use a Level-5-style Eevee node graph with two hard shadow
+regions instead of conventional smooth shading. The base texture keeps its
+authored palette under Blender's Standard display transform with a restrained
+saturation/value correction measured from the game reference. Cool authored
+regions receive a channel-aware correction, keeping uniforms and ribbons blue
+instead of turning grey while leaving skin and hair untouched. The RGB channels
+of `oc` respectively darken and shift the primary region, release the secondary
+shadow and restore painted albedo. `sp` is
+projected from the view-space normal and `spm` masks the resulting matcap.
+Character normal maps are decoded from the game's DXT5nm alpha/green layout and
+drive both cel bands and view projection. Restrained light-facing and opposing
+edge contributions approximate the original highlight/under-light pair without
+washing out the painted albedo. Colored Blender lights tint the lit result
+without moving the authored toon thresholds. A neutral **G4 Wetness** control
+reconstructs the original runtime wet diffuse/specular response and defaults to
+zero, so ordinary imports remain unchanged. RGB channels from `msk` are exposed as neutral `G4 Mask ... Tint`
 nodes so recolour and skin parameters can be applied without using the mask as
 alpha. Source-painted line work remains in the base texture.
 
 The **Character Outline** preference controls character contours. **Simple**
-(the default) combines a restrained Freestyle silhouette with Blender's
-screen-space viewport outline. **Detailed Viewport** adds a view-dependent
-screen-space cavity pass for small relief details such as nails. Neither mode
-adds shader-facing masks, geometry or Solidify, while **Off** disables both outline paths. The `line` texture
-remains a material parameter rather than being misused as a UV-space mask.
+(the default) combines a filtered Freestyle silhouette with Blender's
+screen-space viewport outline. **Detailed** adds selected structural edge marks
+and a screen-space cavity pass in the viewport. Both modes exclude auxiliary
+eye and mouth planes, preventing those submeshes from producing false contours.
+Changing the preference refreshes an existing G4 scene immediately; saved G4
+scenes are also refreshed safely when opened or rendered in background mode.
+**Outline Thickness** controls the main render silhouette in pixels (default
+`1.65`, matched to the game reference); thin and internal lines follow it at
+restrained proportional weights.
+Hard modelled folds and material seams are marked selectively for a thinner
+internal render line, preserving details such as ears, neck folds, fingers and
+nails without exposing the mesh triangulation. Objects whose source `COLOR.B` weight is low receive a
+second, thinner silhouette style. Character `line` textures larger than the
+uniform 8x8 default are detected as authored UV outline controls and select the
+same restrained silhouette style. Their blue channel also masks a narrow,
+view-dependent inner edge, so black regions suppress outlines around eyes or
+other authored details. Uniform blue defaults still enable a narrower inner
+edge, reproducing features such as the ear contour in the viewport as well as
+the render. A broader warm under-rim compensates for the deliberately
+camera-oriented facial normals and restores the ear/side-plane shading visible
+in the game. The original image remains exposed as **G4 Line
+Parameter** without being baked destructively into the albedo. **Off**
+disables both outline paths.
 The source vertex `COLOR` channel used by the game's edge shaders is preserved
-as **G4 Outline Parameters** instead of being discarded during DAE conversion.
+as **G4 Outline Parameters** without an interchange-format conversion.
+
+Character geometry now enters Blender through the add-on's native
+`level5-g4-native-mesh` payload. Positions, native normals, UVs, vertex `COLOR`,
+joint palettes and all decoded skin influences are constructed with Blender's
+data API instead of passing through `bpy.ops.wm.collada_import`. This is the
+default path on Blender 4.x and 5.x; Collada is retained only as a compatibility
+fallback for an old cache that does not contain the native payload.
 
 ## Map Reconstruction
 

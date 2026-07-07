@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 11, 8),
+    "version": (0, 12, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -19,7 +19,8 @@ import tempfile
 from pathlib import Path
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, StringProperty
+from bpy.app.handlers import persistent
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, StringProperty
 from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
@@ -44,6 +45,12 @@ except ImportError:
 
 g4_port_addon.ADDON_ID = ADDON_ID
 g4_animation_addon.ADDON_ID = ADDON_ID
+
+
+def outline_mode_changed(preferences, _context) -> None:
+    refresh = globals().get("refresh_existing_level5_outlines")
+    if refresh is not None:
+        refresh(preferences.outline_mode)
 
 
 def default_probe_script() -> str:
@@ -198,7 +205,7 @@ class G4ImporterPreferences(AddonPreferences):
         name="Export Cache",
         subtype="DIR_PATH",
         default=default_export_dir(),
-        description="Directory where temporary DAE, textures and reports are generated",
+        description="Directory where native mesh caches, textures and reports are generated",
     )
     raw_data_root: StringProperty(
         name="Raw Data Root",
@@ -226,7 +233,7 @@ class G4ImporterPreferences(AddonPreferences):
     cleanup_import_cache: BoolProperty(
         name="Clean Temporary Imports",
         default=True,
-        description="Delete generated DAE/report/texture files after Blender has loaded and packed them",
+        description="Delete generated native mesh cache, report and textures after Blender has loaded and packed them",
     )
     apply_bone_orientation: BoolProperty(
         name="Apply Bone Orientation",
@@ -243,12 +250,23 @@ class G4ImporterPreferences(AddonPreferences):
             ),
             (
                 "HULL",
-                "Detailed Viewport",
-                "Add a view-dependent material edge for small details such as nails; does not use Solidify",
+                "Detailed",
+                "Use source-weighted silhouettes and add depth/normal cavity detail in the viewport",
             ),
             ("OFF", "Off", "Do not add render or viewport outlines"),
         ),
         default="SIMPLE",
+        update=outline_mode_changed,
+    )
+    outline_thickness: FloatProperty(
+        name="Outline Thickness",
+        description="Main character silhouette thickness in render pixels; internal lines scale proportionally",
+        default=1.65,
+        min=0.25,
+        max=6.0,
+        step=5,
+        precision=2,
+        update=outline_mode_changed,
     )
     decoder_script: StringProperty(
         name="G4MT Decoder",
@@ -319,6 +337,9 @@ class G4ImporterPreferences(AddonPreferences):
         import_box.prop(self, "cleanup_import_cache")
         import_box.prop(self, "apply_bone_orientation")
         import_box.prop(self, "outline_mode")
+        thickness_row = import_box.row()
+        thickness_row.enabled = self.outline_mode != "OFF"
+        thickness_row.prop(self, "outline_thickness")
 
         animation_box = layout.box()
         animation_box.label(text="Animation Import")
@@ -461,6 +482,7 @@ def run_exporter(model_path: str, prefs: G4ImporterPreferences, target_armature=
             "material_records",
             "g4md_texture_hashes",
             "meshes",
+            "native_mesh",
             "skeleton_source",
             "skeleton",
             "bone_orientation",
@@ -475,6 +497,139 @@ def import_collada(dae_path: Path) -> set[str]:
     bpy.ops.wm.collada_import(filepath=str(dae_path))
     after = set(bpy.data.objects)
     return {obj.name for obj in after - before}
+
+
+def matrix_from_flat(values: list[float]) -> Matrix:
+    if len(values) != 16:
+        return Matrix.Identity(4)
+    return Matrix((values[0:4], values[4:8], values[8:12], values[12:16]))
+
+
+def import_native_g4_mesh(native_path: Path) -> set[str]:
+    payload = json.loads(native_path.read_text(encoding="utf-8"))
+    if payload.get("format") != "level5-g4-native-mesh" or payload.get("version") != 1:
+        raise RuntimeError(f"Unsupported native G4 mesh payload: {native_path}")
+
+    imported: set[str] = set()
+    conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
+    conversion_inverse = conversion.inverted()
+    skeleton = payload.get("skeleton") or {}
+    names = skeleton.get("names") or []
+    parents = skeleton.get("parent_indices") or []
+    bind_matrices = skeleton.get("bind_matrices") or []
+    armature = None
+    if names and bind_matrices:
+        armature_data = bpy.data.armatures.new("skeleton_root")
+        armature = bpy.data.objects.new("skeleton_root", armature_data)
+        bpy.context.collection.objects.link(armature)
+        imported.add(armature.name)
+        bpy.context.view_layer.objects.active = armature
+        armature.select_set(True)
+        bpy.ops.object.mode_set(mode="EDIT")
+        global_matrices = [
+            conversion @ matrix_from_flat(values) @ conversion_inverse
+            for values in bind_matrices[: len(names)]
+        ]
+        edit_bones = []
+        for index, name in enumerate(names):
+            bone = armature_data.edit_bones.new(name or f"joint_{index:03d}")
+            matrix = global_matrices[index] if index < len(global_matrices) else Matrix.Identity(4)
+            bone.head = matrix.translation
+            child_index = next(
+                (child for child, parent in enumerate(parents) if parent == index and child < len(global_matrices)),
+                None,
+            )
+            if child_index is not None:
+                tail = global_matrices[child_index].translation
+            else:
+                tail = matrix @ Vector((0.0, 0.02, 0.0))
+            if (tail - bone.head).length < 1e-5:
+                tail = bone.head + Vector((0.0, 0.02, 0.0))
+            bone.tail = tail
+            try:
+                bone.align_roll(matrix.to_3x3() @ Vector((0.0, 0.0, 1.0)))
+            except ValueError:
+                pass
+            edit_bones.append(bone)
+        for index, bone in enumerate(edit_bones):
+            parent = parents[index] if index < len(parents) else len(edit_bones)
+            if 0 <= parent < len(edit_bones) and parent != index:
+                bone.parent = edit_bones[parent]
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    materials: dict[str, bpy.types.Material] = {}
+    for material_name in payload.get("materials", {}):
+        materials[material_name] = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
+
+    for mesh_payload in payload.get("meshes", []):
+        name = mesh_payload.get("name") or "G4 Mesh"
+        flat_positions = mesh_payload.get("positions") or []
+        positions = [
+            conversion @ Vector(flat_positions[index : index + 3])
+            for index in range(0, len(flat_positions) - 2, 3)
+        ]
+        indices = mesh_payload.get("indices") or []
+        faces = [tuple(indices[index : index + 3]) for index in range(0, len(indices) - 2, 3)]
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata(positions, [], faces)
+        mesh.update()
+
+        flat_uvs = mesh_payload.get("texcoords") or []
+        if len(flat_uvs) >= len(positions) * 2:
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            for loop in mesh.loops:
+                offset = loop.vertex_index * 2
+                uv_layer.data[loop.index].uv = flat_uvs[offset : offset + 2]
+
+        flat_colors = mesh_payload.get("vertex_colors") or []
+        if len(flat_colors) >= len(positions) * 4:
+            colors = mesh.color_attributes.new(
+                name="G4 Outline Parameters", type="BYTE_COLOR", domain="CORNER"
+            )
+            for loop in mesh.loops:
+                offset = loop.vertex_index * 4
+                colors.data[loop.index].color = flat_colors[offset : offset + 4]
+
+        flat_normals = mesh_payload.get("normals") or []
+        if len(flat_normals) >= len(positions) * 3 and hasattr(mesh, "normals_split_custom_set_from_vertices"):
+            normal_rotation = conversion.to_3x3()
+            normals = [
+                (normal_rotation @ Vector(flat_normals[index : index + 3])).normalized()
+                for index in range(0, len(flat_normals) - 2, 3)
+            ]
+            for polygon in mesh.polygons:
+                polygon.use_smooth = True
+            mesh.normals_split_custom_set_from_vertices(normals)
+
+        obj = bpy.data.objects.new(name, mesh)
+        bpy.context.collection.objects.link(obj)
+        imported.add(obj.name)
+        material_name = mesh_payload.get("material")
+        if material_name in materials:
+            mesh.materials.append(materials[material_name])
+
+        if armature is not None:
+            palette = mesh_payload.get("joint_palette") or []
+            palette_base = int(mesh_payload.get("palette_base") or 0)
+            influences = mesh_payload.get("skin_influences") or []
+            groups: dict[int, bpy.types.VertexGroup] = {}
+            for vertex_index, vertex_influences in enumerate(influences[: len(positions)]):
+                for local_index, weight in vertex_influences:
+                    if weight <= 0.0:
+                        continue
+                    global_index = palette[local_index] if local_index < len(palette) else palette_base + local_index
+                    if not 0 <= global_index < len(names):
+                        continue
+                    group = groups.get(global_index)
+                    if group is None:
+                        group = obj.vertex_groups.new(name=names[global_index] or f"joint_{global_index:03d}")
+                        groups[global_index] = group
+                    group.add([vertex_index], float(weight), "REPLACE")
+            modifier = obj.modifiers.new(name="Armature", type="ARMATURE")
+            modifier.object = armature
+            obj.parent = armature
+
+    return imported
 
 
 def blender_base_name(name: str) -> str:
@@ -1043,11 +1198,109 @@ def apply_level5_toon_shader(
     saturation = nodes.new("ShaderNodeHueSaturation")
     saturation.name = "G4 Saturation"
     saturation.location = (-760, 280)
-    # The source albedo is already authored at the in-game saturation.  The
-    # previous boost clipped reds and removed the pastel Level-5 palette.
-    saturation.inputs["Saturation"].default_value = 1.0
+    # Standard display transform preserves the authored palette; this small
+    # correction matches the in-game red-hair reference without clipping it.
+    saturation.inputs["Saturation"].default_value = 1.10
+    saturation.inputs["Value"].default_value = 1.04
     links.new(base.outputs["Color"], saturation.inputs["Color"])
-    base_color = saturation.outputs["Color"]
+
+    # Cool authored regions (uniforms, ribbons and cyan accents) need a
+    # channel-aware correction: a global exposure that fixes skin and hair
+    # otherwise washes their red channel towards grey.
+    palette_channels = nodes.new("ShaderNodeSeparateColor")
+    palette_channels.name = "G4 Palette Channels"
+    palette_channels.location = (-760, 500)
+    cool_delta = nodes.new("ShaderNodeMath")
+    cool_delta.name = "G4 Cool Color Delta"
+    cool_delta.operation = "SUBTRACT"
+    cool_delta.location = (-570, 500)
+    cool_mask = nodes.new("ShaderNodeMath")
+    cool_mask.name = "G4 Cool Palette Mask"
+    cool_mask.operation = "GREATER_THAN"
+    cool_mask.inputs[1].default_value = 0.08
+    cool_mask.location = (-380, 500)
+    cool_correction = nodes.new("ShaderNodeMixRGB")
+    cool_correction.name = "G4 Cool Palette Correction"
+    cool_correction.blend_type = "MULTIPLY"
+    cool_correction.inputs[2].default_value = (0.60, 0.90, 0.94, 1.0)
+    cool_correction.location = (-170, 360)
+    links.new(base.outputs["Color"], palette_channels.inputs["Color"])
+    links.new(palette_channels.outputs["Blue"], cool_delta.inputs[0])
+    links.new(palette_channels.outputs["Red"], cool_delta.inputs[1])
+    links.new(cool_delta.outputs[0], cool_mask.inputs[0])
+    links.new(cool_mask.outputs[0], cool_correction.inputs[0])
+    links.new(saturation.outputs["Color"], cool_correction.inputs[1])
+    base_color = cool_correction.outputs["Color"]
+
+    surface_normal = None
+    normal_path = first_variant_path(variants, "normal")
+    if normal_path is not None:
+        image = load_image(normal_path)
+        if image is not None:
+            image.colorspace_settings.name = "Non-Color"
+            normal_texture = nodes.new("ShaderNodeTexImage")
+            normal_texture.name = "G4 Normal"
+            normal_texture.image = image
+            normal_texture.location = (-980, -160)
+            normal_channels = nodes.new("ShaderNodeSeparateColor")
+            normal_channels.name = "G4 DXT5nm Channels"
+            normal_channels.location = (-780, -160)
+            normal_x = nodes.new("ShaderNodeMath")
+            normal_x.operation = "MULTIPLY_ADD"
+            normal_x.inputs[1].default_value = 2.0
+            normal_x.inputs[2].default_value = -1.0
+            normal_x.location = (-580, -200)
+            normal_y = nodes.new("ShaderNodeMath")
+            normal_y.operation = "MULTIPLY_ADD"
+            normal_y.inputs[1].default_value = 2.0
+            normal_y.inputs[2].default_value = -1.0
+            normal_y.location = (-580, -280)
+            normal_x2 = nodes.new("ShaderNodeMath")
+            normal_x2.operation = "MULTIPLY"
+            normal_x2.location = (-390, -200)
+            normal_y2 = nodes.new("ShaderNodeMath")
+            normal_y2.operation = "MULTIPLY"
+            normal_y2.location = (-390, -280)
+            normal_xy2 = nodes.new("ShaderNodeMath")
+            normal_xy2.operation = "ADD"
+            normal_xy2.location = (-210, -240)
+            normal_z2 = nodes.new("ShaderNodeMath")
+            normal_z2.operation = "SUBTRACT"
+            normal_z2.inputs[0].default_value = 1.0
+            normal_z2.location = (-30, -240)
+            normal_z2.use_clamp = True
+            normal_z = nodes.new("ShaderNodeMath")
+            normal_z.operation = "SQRT"
+            normal_z.location = (150, -240)
+            encoded_z = nodes.new("ShaderNodeMath")
+            encoded_z.operation = "MULTIPLY_ADD"
+            encoded_z.inputs[1].default_value = 0.5
+            encoded_z.inputs[2].default_value = 0.5
+            encoded_z.location = (330, -240)
+            packed_normal = nodes.new("ShaderNodeCombineColor")
+            packed_normal.name = "G4 Reconstructed Normal"
+            packed_normal.location = (510, -180)
+            normal_map = nodes.new("ShaderNodeNormalMap")
+            normal_map.name = "G4 Surface Normal"
+            normal_map.location = (700, -180)
+            normal_map.inputs["Strength"].default_value = 1.0
+            links.new(normal_texture.outputs["Color"], normal_channels.inputs["Color"])
+            links.new(normal_channels.outputs["Alpha"], normal_x.inputs[0])
+            links.new(normal_channels.outputs["Green"], normal_y.inputs[0])
+            links.new(normal_x.outputs[0], normal_x2.inputs[0])
+            links.new(normal_x.outputs[0], normal_x2.inputs[1])
+            links.new(normal_y.outputs[0], normal_y2.inputs[0])
+            links.new(normal_y.outputs[0], normal_y2.inputs[1])
+            links.new(normal_x2.outputs[0], normal_xy2.inputs[0])
+            links.new(normal_y2.outputs[0], normal_xy2.inputs[1])
+            links.new(normal_xy2.outputs[0], normal_z2.inputs[1])
+            links.new(normal_z2.outputs[0], normal_z.inputs[0])
+            links.new(normal_z.outputs[0], encoded_z.inputs[0])
+            links.new(normal_channels.outputs["Alpha"], packed_normal.inputs["Red"])
+            links.new(normal_channels.outputs["Green"], packed_normal.inputs["Green"])
+            links.new(encoded_z.outputs[0], packed_normal.inputs["Blue"])
+            links.new(packed_normal.outputs["Color"], normal_map.inputs["Color"])
+            surface_normal = normal_map.outputs["Normal"]
 
     mask_path = first_variant_path(variants, "mask")
     if mask_path is not None:
@@ -1072,35 +1325,7 @@ def apply_level5_toon_shader(
                 links.new(base_color, tint.inputs[1])
                 base_color = tint.outputs["Color"]
 
-    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
-    diffuse.location = (-720, -100)
-    diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-    diffuse.inputs["Roughness"].default_value = 0.0
-    diffuse_rgb = nodes.new("ShaderNodeShaderToRGB")
-    diffuse_rgb.location = (-520, -100)
-    diffuse_bw = nodes.new("ShaderNodeRGBToBW")
-    diffuse_bw.location = (-340, -100)
-    light_ramp = nodes.new("ShaderNodeValToRGB")
-    light_ramp.name = "G4 Toon Light"
-    light_ramp.location = (-150, -100)
-    light_ramp.color_ramp.interpolation = "CONSTANT"
-    light_ramp.color_ramp.elements[0].position = 0.0
-    light_ramp.color_ramp.elements[0].color = (0.66, 0.61, 0.72, 1.0)
-    light_ramp.color_ramp.elements[1].position = 0.56
-    light_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
-    links.new(diffuse.outputs["BSDF"], diffuse_rgb.inputs["Shader"])
-    links.new(diffuse_rgb.outputs["Color"], diffuse_bw.inputs["Color"])
-    links.new(diffuse_bw.outputs["Val"], light_ramp.inputs["Fac"])
-
-    lit = nodes.new("ShaderNodeMixRGB")
-    lit.name = "G4 Cel Diffuse"
-    lit.blend_type = "MULTIPLY"
-    lit.inputs[0].default_value = 1.0
-    lit.location = (60, 250)
-    links.new(base_color, lit.inputs[1])
-    links.new(light_ramp.outputs["Color"], lit.inputs[2])
-    color_output = lit.outputs["Color"]
-
+    occlusion_channels = None
     occlusion_path = first_variant_path(variants, "occlusion")
     if occlusion_path is not None:
         image = load_image(occlusion_path)
@@ -1109,96 +1334,391 @@ def apply_level5_toon_shader(
             occlusion = nodes.new("ShaderNodeTexImage")
             occlusion.name = "G4 Occlusion"
             occlusion.image = image
-            occlusion.location = (-700, 520)
-            occlusion_bw = nodes.new("ShaderNodeRGBToBW")
-            occlusion_bw.location = (-500, 520)
-            occlusion_ramp = nodes.new("ShaderNodeValToRGB")
-            occlusion_ramp.location = (-310, 520)
-            occlusion_ramp.color_ramp.interpolation = "CONSTANT"
-            occlusion_ramp.color_ramp.elements[0].color = (0.78, 0.78, 0.78, 1.0)
-            occlusion_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
-            occlusion_ramp.color_ramp.elements[1].position = 0.5
-            ao_multiply = nodes.new("ShaderNodeMixRGB")
-            ao_multiply.name = "G4 Shadow Map"
-            ao_multiply.blend_type = "MULTIPLY"
-            ao_multiply.inputs[0].default_value = 1.0
-            ao_multiply.location = (250, 280)
-            links.new(occlusion.outputs["Color"], occlusion_bw.inputs["Color"])
-            links.new(occlusion_bw.outputs["Val"], occlusion_ramp.inputs["Fac"])
-            links.new(color_output, ao_multiply.inputs[1])
-            links.new(occlusion_ramp.outputs["Color"], ao_multiply.inputs[2])
-            color_output = ao_multiply.outputs["Color"]
+            occlusion.location = (-980, 760)
+            occlusion_channels = nodes.new("ShaderNodeSeparateColor")
+            occlusion_channels.name = "G4 Occlusion Channels"
+            occlusion_channels.location = (-760, 760)
+            links.new(occlusion.outputs["Color"], occlusion_channels.inputs["Color"])
+
+    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+    diffuse.location = (-720, -100)
+    diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    diffuse.inputs["Roughness"].default_value = 0.0
+    if surface_normal is not None:
+        links.new(surface_normal, diffuse.inputs["Normal"])
+    diffuse_rgb = nodes.new("ShaderNodeShaderToRGB")
+    diffuse_rgb.location = (-520, -100)
+    diffuse_bw = nodes.new("ShaderNodeRGBToBW")
+    diffuse_bw.location = (-340, -100)
+    light_floor = nodes.new("ShaderNodeMath")
+    light_floor.name = "G4 Toon Ambient"
+    light_floor.operation = "MULTIPLY_ADD"
+    light_floor.inputs[1].default_value = 0.88
+    light_floor.inputs[2].default_value = 0.12
+    light_floor.use_clamp = True
+    light_floor.location = (-160, -100)
+    links.new(diffuse.outputs["BSDF"], diffuse_rgb.inputs["Shader"])
+    links.new(diffuse_rgb.outputs["Color"], diffuse_bw.inputs["Color"])
+    links.new(diffuse_bw.outputs["Val"], light_floor.inputs[0])
+
+    safe_brightness = nodes.new("ShaderNodeMath")
+    safe_brightness.operation = "MAXIMUM"
+    safe_brightness.inputs[1].default_value = 0.001
+    safe_brightness.location = (-330, -250)
+    light_chroma = nodes.new("ShaderNodeVectorMath")
+    light_chroma.operation = "DIVIDE"
+    light_chroma.location = (-140, -250)
+    light_chroma_limit = nodes.new("ShaderNodeVectorMath")
+    light_chroma_limit.operation = "MINIMUM"
+    light_chroma_limit.inputs[1].default_value = (1.5, 1.5, 1.5)
+    light_chroma_limit.location = (40, -250)
+    light_tint = nodes.new("ShaderNodeMixRGB")
+    light_tint.name = "G4 Point Light Color"
+    light_tint.inputs[0].default_value = 0.18
+    light_tint.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
+    light_tint.location = (220, -250)
+    links.new(diffuse_bw.outputs["Val"], safe_brightness.inputs[0])
+    links.new(diffuse_rgb.outputs["Color"], light_chroma.inputs[0])
+    links.new(safe_brightness.outputs[0], light_chroma.inputs[1])
+    links.new(light_chroma.outputs["Vector"], light_chroma_limit.inputs[0])
+    links.new(light_chroma_limit.outputs["Vector"], light_tint.inputs[2])
+
+    toon_factor = light_floor.outputs[0]
+    if occlusion_channels is not None:
+        occlusion_offset = nodes.new("ShaderNodeMath")
+        occlusion_offset.operation = "MULTIPLY_ADD"
+        occlusion_offset.inputs[1].default_value = 0.18
+        occlusion_offset.inputs[2].default_value = -0.18
+        occlusion_offset.location = (-520, 680)
+        occlusion_add = nodes.new("ShaderNodeMath")
+        occlusion_add.name = "G4 Occlusion Threshold"
+        occlusion_add.operation = "ADD"
+        occlusion_add.use_clamp = True
+        occlusion_add.location = (-320, 680)
+        links.new(occlusion_channels.outputs["Red"], occlusion_offset.inputs[0])
+        links.new(toon_factor, occlusion_add.inputs[0])
+        links.new(occlusion_offset.outputs[0], occlusion_add.inputs[1])
+        toon_factor = occlusion_add.outputs[0]
+
+    shadow_primary = nodes.new("ShaderNodeValToRGB")
+    shadow_primary.name = "G4 Shadow Color 0"
+    shadow_primary.location = (20, -80)
+    shadow_primary.color_ramp.interpolation = "CONSTANT"
+    shadow_primary.color_ramp.elements[0].color = (0.58, 0.58, 0.58, 1.0)
+    shadow_primary.color_ramp.elements[1].position = 0.32
+    shadow_primary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+    links.new(toon_factor, shadow_primary.inputs["Fac"])
+
+    secondary_factor = toon_factor
+    if occlusion_channels is not None:
+        inverse_light = nodes.new("ShaderNodeMath")
+        inverse_light.operation = "SUBTRACT"
+        inverse_light.inputs[0].default_value = 1.0
+        inverse_light.location = (-300, 580)
+        secondary_offset = nodes.new("ShaderNodeMath")
+        secondary_offset.operation = "MULTIPLY"
+        secondary_offset.location = (-120, 580)
+        secondary_add = nodes.new("ShaderNodeMath")
+        secondary_add.operation = "ADD"
+        secondary_add.use_clamp = True
+        secondary_add.location = (60, 580)
+        links.new(toon_factor, inverse_light.inputs[1])
+        links.new(inverse_light.outputs[0], secondary_offset.inputs[0])
+        links.new(occlusion_channels.outputs["Green"], secondary_offset.inputs[1])
+        links.new(toon_factor, secondary_add.inputs[0])
+        links.new(secondary_offset.outputs[0], secondary_add.inputs[1])
+        secondary_factor = secondary_add.outputs[0]
+
+    shadow_secondary = nodes.new("ShaderNodeValToRGB")
+    shadow_secondary.name = "G4 Shadow Color 1"
+    shadow_secondary.location = (240, -80)
+    shadow_secondary.color_ramp.interpolation = "CONSTANT"
+    shadow_secondary.color_ramp.elements[0].color = (0.82, 0.82, 0.82, 1.0)
+    shadow_secondary.color_ramp.elements[1].position = 0.46
+    shadow_secondary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+    links.new(secondary_factor, shadow_secondary.inputs["Fac"])
+
+    shadow_mix = nodes.new("ShaderNodeMixRGB")
+    shadow_mix.name = "G4 Dual Toon Ramp"
+    shadow_mix.blend_type = "MIX"
+    shadow_mix.inputs[0].default_value = 0.18
+    shadow_mix.location = (450, -40)
+    links.new(shadow_primary.outputs["Color"], shadow_mix.inputs[1])
+    links.new(shadow_secondary.outputs["Color"], shadow_mix.inputs[2])
+
+    lit = nodes.new("ShaderNodeMixRGB")
+    lit.name = "G4 Cel Diffuse"
+    lit.blend_type = "MULTIPLY"
+    lit.inputs[0].default_value = 1.0
+    lit.location = (60, 250)
+    links.new(base_color, lit.inputs[1])
+    links.new(shadow_mix.outputs["Color"], lit.inputs[2])
+    color_output = lit.outputs["Color"]
+
+    if occlusion_channels is not None:
+        base_luminance = nodes.new("ShaderNodeRGBToBW")
+        base_luminance.location = (40, 700)
+        luminance_scale = nodes.new("ShaderNodeMath")
+        luminance_scale.operation = "MULTIPLY"
+        luminance_scale.inputs[1].default_value = 0.2
+        luminance_scale.location = (220, 700)
+        recovery = nodes.new("ShaderNodeMath")
+        recovery.name = "G4 Albedo Recovery"
+        recovery.operation = "ADD"
+        recovery.use_clamp = True
+        recovery.location = (400, 700)
+        recovery_mix = nodes.new("ShaderNodeMixRGB")
+        recovery_mix.name = "G4 Occlusion Composite"
+        recovery_mix.location = (590, 500)
+        links.new(base_color, base_luminance.inputs["Color"])
+        links.new(base_luminance.outputs["Val"], luminance_scale.inputs[0])
+        links.new(luminance_scale.outputs[0], recovery.inputs[0])
+        links.new(occlusion_channels.outputs["Blue"], recovery.inputs[1])
+        links.new(recovery.outputs[0], recovery_mix.inputs[0])
+        links.new(color_output, recovery_mix.inputs[1])
+        links.new(base_color, recovery_mix.inputs[2])
+        color_output = recovery_mix.outputs["Color"]
+
+        painted_occlusion = nodes.new("ShaderNodeValToRGB")
+        painted_occlusion.name = "G4 Painted Occlusion"
+        painted_occlusion.color_ramp.interpolation = "EASE"
+        painted_occlusion.color_ramp.elements[0].position = 0.0
+        painted_occlusion.color_ramp.elements[0].color = (0.48, 0.48, 0.48, 1.0)
+        middle = painted_occlusion.color_ramp.elements.new(0.4)
+        # 0.4 is the authored neutral plateau used across character hair and
+        # clothing, not a 37% cavity shadow. Preserve it while keeping true
+        # zero-valued creases visibly occluded.
+        middle.color = (0.90, 0.90, 0.90, 1.0)
+        painted_occlusion.color_ramp.elements[-1].position = 0.62
+        painted_occlusion.color_ramp.elements[-1].color = (1.0, 1.0, 1.0, 1.0)
+        painted_occlusion.location = (570, 680)
+        occlusion_multiply = nodes.new("ShaderNodeMixRGB")
+        occlusion_multiply.name = "G4 Painted Occlusion Composite"
+        occlusion_multiply.blend_type = "MULTIPLY"
+        occlusion_multiply.inputs[0].default_value = 1.0
+        occlusion_multiply.location = (760, 520)
+        links.new(occlusion_channels.outputs["Red"], painted_occlusion.inputs["Fac"])
+        links.new(color_output, occlusion_multiply.inputs[1])
+        links.new(painted_occlusion.outputs["Color"], occlusion_multiply.inputs[2])
+        color_output = occlusion_multiply.outputs["Color"]
+
+    colored_light = nodes.new("ShaderNodeMixRGB")
+    colored_light.name = "G4 Colored Light Composite"
+    colored_light.blend_type = "MULTIPLY"
+    colored_light.inputs[0].default_value = 1.0
+    colored_light.location = (760, 440)
+    links.new(color_output, colored_light.inputs[1])
+    links.new(light_tint.outputs["Color"], colored_light.inputs[2])
+    color_output = colored_light.outputs["Color"]
 
     line_path = first_variant_path(variants, "line")
+    line_informative = False
     if line_path is not None:
         image = load_image(line_path)
         if image is not None:
+            image.colorspace_settings.name = "Non-Color"
             line_texture = nodes.new("ShaderNodeTexImage")
             line_texture.name = "G4 Line Parameter"
+            line_texture.label = line_path.name
             line_texture.image = image
             line_texture.location = (-180, -520)
+            line_informative = max(image.size) > 8
+            line_channels = nodes.new("ShaderNodeSeparateColor")
+            line_channels.name = "G4 Line Channels"
+            line_channels.location = (20, -520)
+            line_facing = nodes.new("ShaderNodeLayerWeight")
+            line_facing.name = "G4 Line Facing"
+            line_facing.location = (20, -620)
+            line_edge = nodes.new("ShaderNodeMath")
+            line_edge.name = "G4 UV Outline Width"
+            line_edge.operation = "POWER"
+            line_edge.inputs[1].default_value = 4.0 if line_informative else 10.0
+            line_edge.location = (210, -620)
+            line_weight = nodes.new("ShaderNodeMath")
+            line_weight.name = "G4 UV Outline Mask"
+            line_weight.operation = "MULTIPLY"
+            line_weight.location = (390, -560)
+            contour_edge = nodes.new("ShaderNodeMath")
+            contour_edge.name = "G4 Under Rim Width"
+            contour_edge.operation = "POWER"
+            contour_edge.inputs[1].default_value = 2.5
+            contour_edge.location = (210, -700)
+            contour_mask = nodes.new("ShaderNodeMath")
+            contour_mask.name = "G4 Under Rim Mask"
+            contour_mask.operation = "MULTIPLY"
+            contour_mask.location = (390, -680)
+            contour_strength = nodes.new("ShaderNodeMath")
+            contour_strength.operation = "MULTIPLY"
+            contour_strength.inputs[1].default_value = 0.48 if line_informative else 0.12
+            contour_strength.location = (570, -680)
+            contour_shadow = nodes.new("ShaderNodeMixRGB")
+            contour_shadow.name = "G4 Warm Under Rim"
+            contour_shadow.blend_type = "MULTIPLY"
+            contour_shadow.inputs[2].default_value = (0.68, 0.52, 0.48, 1.0)
+            contour_shadow.location = (570, 440)
+            line_composite = nodes.new("ShaderNodeMixRGB")
+            line_composite.name = "G4 UV Outline Composite"
+            line_composite.inputs[2].default_value = (0.018, 0.012, 0.018, 1.0)
+            line_composite.location = (570, 360)
+            links.new(line_texture.outputs["Color"], line_channels.inputs["Color"])
+            links.new(line_facing.outputs["Fresnel"], line_edge.inputs[0])
+            links.new(line_facing.outputs["Fresnel"], contour_edge.inputs[0])
+            links.new(line_edge.outputs[0], line_weight.inputs[0])
+            links.new(line_channels.outputs["Blue"], line_weight.inputs[1])
+            links.new(contour_edge.outputs[0], contour_mask.inputs[0])
+            links.new(line_channels.outputs["Blue"], contour_mask.inputs[1])
+            links.new(contour_mask.outputs[0], contour_strength.inputs[0])
+            links.new(contour_strength.outputs[0], contour_shadow.inputs[0])
+            links.new(color_output, contour_shadow.inputs[1])
+            links.new(line_weight.outputs[0], line_composite.inputs[0])
+            links.new(contour_shadow.outputs["Color"], line_composite.inputs[1])
+            color_output = line_composite.outputs["Color"]
 
     specular_mask_path = first_variant_path(variants, "specular_mask")
     specular_path = first_variant_path(variants, "specular")
-    if specular_mask_path is not None:
+    if specular_mask_path is not None and specular_path is not None:
         image = load_image(specular_mask_path)
-        if image is not None:
+        specular_image = load_image(specular_path)
+        if image is not None and specular_image is not None:
             image.colorspace_settings.name = "Non-Color"
+            specular_image.colorspace_settings.name = "Non-Color"
             specular_mask = nodes.new("ShaderNodeTexImage")
             specular_mask.name = "G4 Specular Mask"
             specular_mask.image = image
             specular_mask.location = (-420, -760)
-            glossy = nodes.new("ShaderNodeBsdfGlossy")
-            glossy.location = (-200, -780)
-            glossy.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-            glossy.inputs["Roughness"].default_value = 0.28
-            glossy_rgb = nodes.new("ShaderNodeShaderToRGB")
-            glossy_rgb.location = (0, -780)
-            glossy_bw = nodes.new("ShaderNodeRGBToBW")
-            glossy_bw.location = (170, -780)
-            glossy_ramp = nodes.new("ShaderNodeValToRGB")
-            glossy_ramp.location = (340, -780)
-            glossy_ramp.color_ramp.interpolation = "CONSTANT"
-            glossy_ramp.color_ramp.elements[0].position = 0.0
-            glossy_ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
-            glossy_ramp.color_ramp.elements[1].position = 0.82
-            glossy_ramp.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
-            links.new(glossy_rgb.outputs["Color"], glossy_bw.inputs["Color"])
-            links.new(glossy_bw.outputs["Val"], glossy_ramp.inputs["Fac"])
-            specular_output = glossy_ramp.outputs["Color"]
-            if specular_path is not None:
-                specular_image = load_image(specular_path)
-                if specular_image is not None:
-                    specular_image.colorspace_settings.name = "Non-Color"
-                    coordinates = nodes.new("ShaderNodeTexCoord")
-                    coordinates.location = (-620, -980)
-                    specular_shape = nodes.new("ShaderNodeTexImage")
-                    specular_shape.name = "G4 Specular Shape"
-                    specular_shape.image = specular_image
-                    specular_shape.projection = "SPHERE"
-                    specular_shape.location = (-420, -980)
-                    shape_multiply = nodes.new("ShaderNodeMixRGB")
-                    shape_multiply.blend_type = "MULTIPLY"
-                    shape_multiply.inputs[0].default_value = 1.0
-                    shape_multiply.location = (20, -940)
-                    links.new(coordinates.outputs["Normal"], specular_shape.inputs["Vector"])
-                    links.new(specular_output, shape_multiply.inputs[1])
-                    links.new(specular_shape.outputs["Color"], shape_multiply.inputs[2])
-                    specular_output = shape_multiply.outputs["Color"]
+            coordinates = nodes.new("ShaderNodeNewGeometry")
+            coordinates.location = (-660, -980)
+            view_normal = nodes.new("ShaderNodeVectorTransform")
+            view_normal.name = "G4 View Normal"
+            view_normal.vector_type = "NORMAL"
+            view_normal.convert_from = "WORLD"
+            view_normal.convert_to = "CAMERA"
+            view_normal.location = (-460, -980)
+            sphere_mapping = nodes.new("ShaderNodeMapping")
+            sphere_mapping.name = "G4 Sphere Projection"
+            sphere_mapping.inputs["Location"].default_value = (0.5, 0.5, 0.0)
+            sphere_mapping.inputs["Scale"].default_value = (0.5, 0.5, 1.0)
+            sphere_mapping.location = (-260, -980)
+            specular_shape = nodes.new("ShaderNodeTexImage")
+            specular_shape.name = "G4 Specular Shape"
+            specular_shape.image = specular_image
+            specular_shape.extension = "CLIP"
+            specular_shape.location = (-40, -980)
+            shape_multiply = nodes.new("ShaderNodeMixRGB")
+            shape_multiply.name = "G4 Matcap Mask"
+            shape_multiply.blend_type = "MULTIPLY"
+            shape_multiply.inputs[0].default_value = 1.0
+            shape_multiply.location = (180, -820)
+            lit_specular = nodes.new("ShaderNodeMixRGB")
+            lit_specular.name = "G4 Lit Matcap"
+            lit_specular.blend_type = "MULTIPLY"
+            lit_specular.inputs[0].default_value = 1.0
+            lit_specular.location = (380, -720)
+            normal_source = surface_normal if surface_normal is not None else coordinates.outputs["Normal"]
+            links.new(normal_source, view_normal.inputs["Vector"])
+            links.new(view_normal.outputs["Vector"], sphere_mapping.inputs["Vector"])
+            links.new(sphere_mapping.outputs["Vector"], specular_shape.inputs["Vector"])
+            links.new(specular_shape.outputs["Color"], shape_multiply.inputs[1])
+            links.new(specular_mask.outputs["Color"], shape_multiply.inputs[2])
+            links.new(shape_multiply.outputs["Color"], lit_specular.inputs[1])
+            links.new(shadow_mix.outputs["Color"], lit_specular.inputs[2])
             spec_multiply = nodes.new("ShaderNodeMixRGB")
+            spec_multiply.name = "G4 Specular Strength"
             spec_multiply.blend_type = "MULTIPLY"
-            spec_multiply.inputs[0].default_value = 1.0
-            spec_multiply.location = (230, -700)
+            spec_multiply.inputs[0].default_value = 0.22
+            spec_multiply.inputs[2].default_value = (0.42, 0.42, 0.42, 1.0)
+            spec_multiply.location = (560, -680)
             spec_add = nodes.new("ShaderNodeMixRGB")
+            spec_add.name = "G4 Specular Composite"
             spec_add.blend_type = "ADD"
-            spec_add.inputs[0].default_value = 0.12
-            spec_add.location = (650, 160)
-            links.new(glossy.outputs["BSDF"], glossy_rgb.inputs["Shader"])
-            links.new(specular_output, spec_multiply.inputs[1])
-            links.new(specular_mask.outputs["Color"], spec_multiply.inputs[2])
+            spec_add.inputs[0].default_value = 1.0
+            spec_add.location = (760, 80)
+            links.new(lit_specular.outputs["Color"], spec_multiply.inputs[1])
             links.new(color_output, spec_add.inputs[1])
             links.new(spec_multiply.outputs["Color"], spec_add.inputs[2])
             color_output = spec_add.outputs["Color"]
+
+    layer_weight = nodes.new("ShaderNodeLayerWeight")
+    layer_weight.name = "G4 View Facing"
+    layer_weight.location = (260, -430)
+    grazing = nodes.new("ShaderNodeMath")
+    grazing.name = "G4 Grazing Angle"
+    grazing.operation = "SUBTRACT"
+    grazing.inputs[0].default_value = 1.0
+    grazing.location = (440, -430)
+    inverse_toon = nodes.new("ShaderNodeMath")
+    inverse_toon.operation = "SUBTRACT"
+    inverse_toon.inputs[0].default_value = 1.0
+    inverse_toon.location = (440, -520)
+    highlight_factor = nodes.new("ShaderNodeMath")
+    highlight_factor.name = "G4 Highlight Factor"
+    highlight_factor.operation = "MULTIPLY"
+    highlight_factor.location = (620, -390)
+    underlight_factor = nodes.new("ShaderNodeMath")
+    underlight_factor.name = "G4 Underlight Factor"
+    underlight_factor.operation = "MULTIPLY"
+    underlight_factor.location = (620, -500)
+    highlight_add = nodes.new("ShaderNodeMixRGB")
+    highlight_add.name = "G4 Highlight"
+    highlight_add.blend_type = "ADD"
+    highlight_add.inputs[2].default_value = (0.16, 0.12, 0.09, 1.0)
+    highlight_add.location = (800, 250)
+    underlight_add = nodes.new("ShaderNodeMixRGB")
+    underlight_add.name = "G4 Under Light"
+    underlight_add.blend_type = "ADD"
+    underlight_add.inputs[2].default_value = (0.05, 0.025, 0.022, 1.0)
+    underlight_add.location = (980, 250)
+    links.new(layer_weight.outputs["Facing"], grazing.inputs[1])
+    links.new(toon_factor, inverse_toon.inputs[1])
+    links.new(grazing.outputs[0], highlight_factor.inputs[0])
+    links.new(toon_factor, highlight_factor.inputs[1])
+    links.new(grazing.outputs[0], underlight_factor.inputs[0])
+    links.new(inverse_toon.outputs[0], underlight_factor.inputs[1])
+    links.new(highlight_factor.outputs[0], highlight_add.inputs[0])
+    links.new(color_output, highlight_add.inputs[1])
+    links.new(underlight_factor.outputs[0], underlight_add.inputs[0])
+    links.new(highlight_add.outputs["Color"], underlight_add.inputs[1])
+    color_output = underlight_add.outputs["Color"]
+
+    wetness = nodes.new("ShaderNodeValue")
+    wetness.name = "G4 Wetness"
+    wetness.label = "G4 Wetness"
+    wetness.outputs[0].default_value = 0.0
+    wetness.location = (620, -610)
+    wet_diffuse = nodes.new("ShaderNodeMixRGB")
+    wet_diffuse.name = "G4 Wet Diffuse"
+    wet_diffuse.blend_type = "MULTIPLY"
+    wet_diffuse.inputs[2].default_value = (0.82, 0.85, 0.88, 1.0)
+    wet_diffuse.location = (1160, 250)
+    wet_glossy = nodes.new("ShaderNodeBsdfGlossy")
+    wet_glossy.inputs["Roughness"].default_value = 0.16
+    wet_glossy.location = (800, -610)
+    if surface_normal is not None:
+        links.new(surface_normal, wet_glossy.inputs["Normal"])
+    wet_glossy_rgb = nodes.new("ShaderNodeShaderToRGB")
+    wet_glossy_rgb.location = (980, -610)
+    wet_glossy_bw = nodes.new("ShaderNodeRGBToBW")
+    wet_glossy_bw.location = (1160, -610)
+    wet_glossy_ramp = nodes.new("ShaderNodeValToRGB")
+    wet_glossy_ramp.name = "G4 Wet Specular"
+    wet_glossy_ramp.color_ramp.interpolation = "CONSTANT"
+    wet_glossy_ramp.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
+    wet_glossy_ramp.color_ramp.elements[1].position = 0.72
+    wet_glossy_ramp.color_ramp.elements[1].color = (0.22, 0.26, 0.30, 1.0)
+    wet_glossy_ramp.location = (1340, -610)
+    wet_add = nodes.new("ShaderNodeMixRGB")
+    wet_add.name = "G4 Wet Composite"
+    wet_add.blend_type = "ADD"
+    wet_add.location = (1520, 250)
+    links.new(wetness.outputs[0], wet_diffuse.inputs[0])
+    links.new(color_output, wet_diffuse.inputs[1])
+    links.new(wet_glossy.outputs["BSDF"], wet_glossy_rgb.inputs["Shader"])
+    links.new(wet_glossy_rgb.outputs["Color"], wet_glossy_bw.inputs["Color"])
+    links.new(wet_glossy_bw.outputs["Val"], wet_glossy_ramp.inputs["Fac"])
+    links.new(wetness.outputs[0], wet_add.inputs[0])
+    links.new(wet_diffuse.outputs["Color"], wet_add.inputs[1])
+    links.new(wet_glossy_ramp.outputs["Color"], wet_add.inputs[2])
+    color_output = wet_add.outputs["Color"]
 
     emission = nodes.new("ShaderNodeEmission")
     emission.location = (820, 180)
@@ -1232,11 +1752,15 @@ def apply_level5_toon_shader(
     material["g4_level5_toon"] = True
     material["g4_base_texture"] = str(base_path)
     material["g4_recolor_mask"] = str(mask_path) if mask_path is not None else ""
+    material["g4_normal_texture"] = str(normal_path) if normal_path is not None else ""
+    material["g4_line_texture"] = str(line_path) if line_path is not None else ""
+    material["g4_line_informative"] = line_informative
     if debug is not None:
         debug.append(
             f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
             f"line={line_path and line_path.name} sp={specular_path and specular_path.name} "
-            f"spm={specular_mask_path and specular_mask_path.name}"
+            f"spm={specular_mask_path and specular_mask_path.name} "
+            f"nrm={normal_path and normal_path.name} line_map={line_informative}"
         )
     return True
 
@@ -1473,14 +1997,55 @@ def configure_environment_cubemap(summary: dict, debug: list[str] | None = None)
     return True
 
 
-def configure_level5_outlines(debug: list[str] | None = None) -> bool:
+def configure_character_color_management(debug: list[str] | None = None) -> None:
+    view = bpy.context.scene.view_settings
+    view.view_transform = "Standard"
+    view.look = "None"
+    view.exposure = 0.0
+    view.gamma = 1.0
+    if debug is not None:
+        debug.append("[color] character display transform=Standard exposure=0 gamma=1")
+
+
+def mark_level5_internal_edges(obj, angle: float = math.radians(48.0)) -> int:
+    """Mark authored hard folds without enabling Freestyle on every triangle."""
+    mesh = obj.data
+    polygons_by_edge: dict[tuple[int, int], list] = {}
+    for polygon in mesh.polygons:
+        for edge_key in polygon.edge_keys:
+            polygons_by_edge.setdefault(tuple(sorted(edge_key)), []).append(polygon)
+
+    marked = 0
+    for edge in mesh.edges:
+        edge.use_freestyle_mark = False
+        polygons = polygons_by_edge.get(tuple(sorted(edge.key)), ())
+        if len(polygons) != 2:
+            continue
+        first, second = polygons
+        material_seam = first.material_index != second.material_index
+        hard_fold = first.normal.angle(second.normal) >= angle
+        start, end = (mesh.vertices[index].co for index in edge.vertices)
+        direction = obj.matrix_world.to_3x3() @ (end - start)
+        vertical_fold = direction.length > 1e-8 and abs(direction.normalized().z) >= 0.55
+        if vertical_fold and (material_seam or hard_fold):
+            edge.use_freestyle_mark = True
+            marked += 1
+    return marked
+
+
+def configure_level5_outlines(
+    imported_names: set[str],
+    detailed: bool = False,
+    debug: list[str] | None = None,
+) -> bool:
     scene = bpy.context.scene
     view_layer = bpy.context.view_layer
     try:
         scene.render.use_freestyle = True
+        outline_thickness = max(0.25, float(getattr(addon_preferences(), "outline_thickness", 1.65)))
         settings = view_layer.freestyle_settings
         for stale in tuple(settings.linesets):
-            if stale.linestyle is None:
+            if stale.linestyle is None or stale.name == "LineSet":
                 settings.linesets.remove(stale)
         line_set = settings.linesets.get("Level-5 G4 Outline")
         if line_set is None or line_set.linestyle is None:
@@ -1491,23 +2056,162 @@ def configure_level5_outlines(debug: list[str] | None = None) -> bool:
             line_set.name = "Level-5 G4 Outline"
         line_style = line_set.linestyle
         line_style.name = "Level-5 G4 Outline"
+        source_collection = bpy.data.collections.get("Level-5 G4 Outline Sources")
+        if source_collection is None:
+            source_collection = bpy.data.collections.new("Level-5 G4 Outline Sources")
+            scene.collection.children.link(source_collection)
+        thin_collection = bpy.data.collections.get("Level-5 G4 Thin Outline Sources")
+        if thin_collection is None:
+            thin_collection = bpy.data.collections.new("Level-5 G4 Thin Outline Sources")
+            scene.collection.children.link(thin_collection)
+        detail_collection = bpy.data.collections.get("Level-5 G4 Internal Detail Sources")
+        if detail_collection is None:
+            detail_collection = bpy.data.collections.new("Level-5 G4 Internal Detail Sources")
+            scene.collection.children.link(detail_collection)
+        excluded = re.compile(r"(?:^|_)(?:eye|mouth|teeth|tongue|pupil|eyelash)(?:_|$)", re.IGNORECASE)
+        marked_edges = 0
+        for name in imported_names:
+            obj = bpy.data.objects.get(name)
+            if obj is None or obj.type != "MESH" or excluded.search(obj.name):
+                continue
+            attribute = obj.data.color_attributes.get("G4 Outline Parameters")
+            blue = (
+                sum(value.color[2] for value in attribute.data) / len(attribute.data)
+                if attribute is not None and attribute.data
+                else 0.5
+            )
+            has_line_map = any(
+                slot.material is not None and slot.material.get("g4_line_informative", False)
+                for slot in obj.material_slots
+            )
+            collection = thin_collection if blue < 0.35 or has_line_map else source_collection
+            if collection.objects.get(obj.name) is None:
+                collection.objects.link(obj)
+            if detail_collection.objects.get(obj.name) is None:
+                detail_collection.objects.link(obj)
+            if detailed:
+                marked_edges += mark_level5_internal_edges(obj)
+        line_set.select_by_collection = True
+        line_set.select_by_edge_types = True
+        line_set.collection = source_collection
+        line_set.collection_negation = "INCLUSIVE"
         line_set.select_silhouette = True
-        line_set.select_border = True
+        line_set.select_border = False
         line_set.select_crease = False
         line_set.select_material_boundary = False
         line_set.select_contour = False
         line_set.edge_type_combination = "OR"
         settings.crease_angle = math.radians(55.0)
         line_style.color = (0.018, 0.012, 0.018)
-        line_style.thickness = 0.72
+        line_style.thickness = outline_thickness
         line_style.caps = "ROUND"
+
+        thin_set = settings.linesets.get("Level-5 G4 Thin Outline")
+        if thin_collection.objects:
+            if thin_set is None or thin_set.linestyle is None:
+                if thin_set is not None:
+                    settings.linesets.remove(thin_set)
+                bpy.ops.scene.freestyle_lineset_add()
+                thin_set = settings.linesets.active
+                thin_set.name = "Level-5 G4 Thin Outline"
+            thin_style = thin_set.linestyle
+            thin_style.name = "Level-5 G4 Thin Outline"
+            thin_set.select_by_collection = True
+            thin_set.select_by_edge_types = True
+            thin_set.collection = thin_collection
+            thin_set.collection_negation = "INCLUSIVE"
+            thin_set.select_silhouette = True
+            thin_set.select_border = False
+            thin_set.select_crease = False
+            thin_set.select_material_boundary = False
+            thin_set.select_contour = False
+            thin_set.edge_type_combination = "OR"
+            thin_style.color = (0.025, 0.016, 0.021)
+            thin_style.thickness = outline_thickness * 0.70
+            thin_style.caps = "ROUND"
+        elif thin_set is not None:
+            settings.linesets.remove(thin_set)
+
+        detail_set = settings.linesets.get("Level-5 G4 Internal Detail")
+        if marked_edges:
+            if detail_set is None or detail_set.linestyle is None:
+                if detail_set is not None:
+                    settings.linesets.remove(detail_set)
+                bpy.ops.scene.freestyle_lineset_add()
+                detail_set = settings.linesets.active
+                detail_set.name = "Level-5 G4 Internal Detail"
+            detail_style = detail_set.linestyle
+            detail_style.name = "Level-5 G4 Internal Detail"
+            detail_set.select_by_collection = True
+            detail_set.select_by_edge_types = True
+            detail_set.collection = detail_collection
+            detail_set.collection_negation = "INCLUSIVE"
+            detail_set.select_silhouette = False
+            detail_set.select_border = False
+            detail_set.select_crease = False
+            detail_set.select_material_boundary = False
+            detail_set.select_contour = False
+            detail_set.select_edge_mark = True
+            detail_set.edge_type_combination = "OR"
+            detail_style.color = (0.055, 0.025, 0.028)
+            detail_style.thickness = outline_thickness * 0.44
+            detail_style.caps = "ROUND"
+        elif detail_set is not None:
+            settings.linesets.remove(detail_set)
     except (AttributeError, RuntimeError, TypeError):
         if debug is not None:
             debug.append("[outline] Freestyle is unavailable for the active render configuration")
         return False
     if debug is not None:
-        debug.append("[outline] render lines limited to silhouette and border edges")
+        mode = "filtered silhouette with viewport depth/normal detail" if detailed else "filtered silhouette"
+        debug.append(f"[outline] render lines use {mode}; marked internal edges={marked_edges}")
     return True
+
+
+def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
+    view_layer = bpy.context.view_layer
+    scene = bpy.context.scene
+    if view_layer is None or scene is None:
+        return False
+    settings = getattr(view_layer, "freestyle_settings", None)
+    if settings is None:
+        return False
+    managed = {
+        "Level-5 G4 Outline",
+        "Level-5 G4 Thin Outline",
+        "Level-5 G4 Internal Detail",
+    }
+    has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
+    if not has_level5_lines:
+        return False
+
+    if mode is None:
+        mode = getattr(addon_preferences(), "outline_mode", "SIMPLE")
+    if mode == "OFF":
+        for line_set in tuple(settings.linesets):
+            if line_set.name in managed:
+                settings.linesets.remove(line_set)
+        if not settings.linesets:
+            scene.render.use_freestyle = False
+        return True
+
+    names: set[str] = set()
+    for collection_name in (
+        "Level-5 G4 Outline Sources",
+        "Level-5 G4 Thin Outline Sources",
+        "Level-5 G4 Internal Detail Sources",
+    ):
+        collection = bpy.data.collections.get(collection_name)
+        if collection is not None:
+            names.update(obj.name for obj in collection.objects if obj.type == "MESH")
+    if not names:
+        return False
+    return configure_level5_outlines(names, detailed=mode == "HULL")
+
+
+@persistent
+def refresh_level5_outlines_on_load(_unused) -> None:
+    refresh_existing_level5_outlines()
 
 
 def configure_viewport_outlines(
@@ -1579,10 +2283,9 @@ def pack_images(paths_before: set[str], texture_paths: set[str], enabled: bool) 
 def cleanup_generated_files(summary: dict, enabled: bool) -> None:
     if not enabled:
         return
-    dae = Path(summary.get("dae", ""))
-    report = Path(summary.get("report", ""))
-    for file_path in (dae, report):
-        if file_path.exists():
+    generated = [Path(value) for key in ("dae", "native_mesh", "report") if (value := summary.get(key))]
+    for file_path in generated:
+        if file_path.is_file():
             file_path.unlink()
 
     texture_dirs = {Path(path).parent for path in summary.get("textures", [])}
@@ -1622,18 +2325,26 @@ def import_g4_model(
     images_before = image_paths()
     summary = run_exporter(str(path), prefs, target_armature)
     debug.append(f"[exporter] resolved={summary.get('resolved_model')}")
-    debug.append(f"[exporter] dae={summary.get('dae')}")
+    debug.append(f"[exporter] native_mesh={summary.get('native_mesh')}")
     debug.append(f"[exporter] skeleton_source={summary.get('skeleton_source')}")
     debug.append(f"[exporter] textures={len(summary.get('textures', []))} materials={len(summary.get('materials', {}))}")
     debug.append(f"[exporter] texture_sources={summary.get('texture_sources', [])}")
-    dae_path = Path(summary["dae"]).resolve()
-    if not dae_path.exists():
-        raise RuntimeError(f"Generated DAE not found: {dae_path}")
-    imported_names = import_collada(dae_path)
+    native_value = summary.get("native_mesh")
+    native_path = Path(native_value).resolve() if native_value else None
+    if native_path is not None and native_path.is_file():
+        imported_names = import_native_g4_mesh(native_path)
+        import_method = "native"
+    else:
+        dae_path = Path(summary.get("dae", "")).resolve()
+        collada_import = getattr(bpy.ops.wm, "collada_import", None)
+        if not dae_path.exists() or collada_import is None:
+            raise RuntimeError("Native G4 mesh payload was not generated and Collada fallback is unavailable")
+        imported_names = import_collada(dae_path)
+        import_method = "collada_fallback"
     preserve_outline_vertex_parameters(imported_names, debug)
     removed_lods = discard_secondary_lods(imported_names)
-    debug.append(f"[collada] imported_objects={sorted(imported_names)}")
-    debug.append(f"[collada] secondary_lods_removed={removed_lods}")
+    debug.append(f"[geometry] method={import_method} imported_objects={sorted(imported_names)}")
+    debug.append(f"[geometry] secondary_lods_removed={removed_lods}")
     orientation = apply_g4_bone_orientation(
         imported_names,
         summary,
@@ -1652,11 +2363,12 @@ def import_g4_model(
         apply_styling=apply_styling,
     )
     if apply_styling:
+        configure_character_color_management(debug)
         if outline_mode != "OFF":
-            configure_level5_outlines(debug)
+            configure_level5_outlines(imported_names, outline_mode == "HULL", debug)
             configure_viewport_outlines(imported_names, outline_mode == "HULL", debug)
         if outline_mode == "HULL":
-            debug.append("[outline] detailed viewport cavity edges enabled")
+            debug.append("[outline] detailed render and viewport cavity edges enabled")
         elif outline_mode == "SIMPLE":
             debug.append("[outline] simple viewport silhouette; geometry left unchanged")
         else:
@@ -2263,9 +2975,13 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     g4_animation_addon.register()
     g4_port_addon.register()
+    if refresh_level5_outlines_on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(refresh_level5_outlines_on_load)
 
 
 def unregister():
+    if refresh_level5_outlines_on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(refresh_level5_outlines_on_load)
     g4_port_addon.unregister()
     g4_animation_addon.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)

@@ -3801,6 +3801,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "vertex_colors": vertex_colors,
                 "color_offset": color_offset,
                 "indices": p,
+                "triangle_indices": indices,
                 "vertex_count": vertex_count,
                 "triangle_count": index_count // 3,
                 "vertex_stride": vertex_stride,
@@ -3818,6 +3819,40 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "skin_summary": summarize_skin_influences(skin_influences),
             }
         )
+
+    native_path = dae_path.with_suffix(".g4mesh.json")
+    native_payload = {
+        "format": "level5-g4-native-mesh",
+        "version": 1,
+        "source": str(path),
+        "materials": {name: str(texture) if texture else None for name, texture in used_materials.items()},
+        "meshes": [
+            {
+                "name": payload["name"],
+                "material": payload["material"],
+                "positions": payload["positions"],
+                "normals": payload["normals"],
+                "texcoords": payload["texcoords"],
+                "vertex_colors": payload["vertex_colors"],
+                "indices": payload["triangle_indices"],
+                "joint_palette": payload["joint_palette"],
+                "palette_base": payload["palette_base"],
+                "skin_influences": payload["skin_influences"],
+            }
+            for payload in mesh_payloads
+        ],
+        "skeleton": None
+        if skeleton_info is None
+        else {
+            "names": skeleton_info.get("names", []),
+            "parent_indices": skeleton_info.get("parent_indices", []),
+            "bind_matrices": skeleton_info.get("bind_matrices", []),
+            "inverse_bind_matrices": skeleton_info.get("inverse_bind_matrices", []),
+            "local_matrices": skeleton_info.get("local_matrices", []),
+            "local_rotations_xyzw": skeleton_info.get("local_rotations_xyzw", []),
+        },
+    }
+    native_path.write_text(json.dumps(native_payload, separators=(",", ":")), encoding="utf-8")
 
     images = []
     effects = []
@@ -3944,6 +3979,7 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
     report = {
         "source": str(path),
         "dae": str(dae_path),
+        "native_mesh": str(native_path),
         "texture_source": str(texture_containers[0]) if texture_containers else None,
         "texture_sources": [str(texture) for texture in texture_containers],
         "textures": [str(texture) for texture in texture_paths],
@@ -4044,6 +4080,7 @@ def export_model_auto(value: Path, out_dir: Path) -> dict:
         "input": str(value),
         "resolved_model": str(path),
         "dae": str(dae_path),
+        "native_mesh": report.get("native_mesh"),
         "report": str(report_path),
         "mesh_count": report.get("mesh_count", 0),
         "texture_sources": report.get("texture_sources", []),
