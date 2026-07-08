@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -13,6 +14,72 @@ EVENT_ATTACH_POINT_COMMAND = -1563297470
 ACTOR_RE = re.compile(r"^([a-z]{1,3}\d{4,10}(?:_[a-z0-9]+)*?)(?:_s\d+_p\d+)?$", re.IGNORECASE)
 ACTOR_INSTANCE_RE = ACTOR_RE
 MODEL_RE = re.compile(r"^[a-z]{1,3}\d{4,10}$", re.IGNORECASE)
+
+
+def raw_cfg_entries(path: Path) -> list[list[object]]:
+    data = path.read_bytes()
+    if len(data) < 16:
+        raise ValueError(f"truncated cfg.bin: {path}")
+    entry_count, string_offset = struct.unpack_from("<II", data, 0)
+    if entry_count > 1_000_000 or string_offset > len(data):
+        raise ValueError(f"invalid cfg.bin header: {path}")
+    pos = 16
+    encoded = []
+    for _ in range(entry_count):
+        if pos + 5 > len(data):
+            raise ValueError(f"truncated cfg.bin entry: {path}")
+        _, value_count = struct.unpack_from("<IB", data, pos)
+        pos += 5
+        type_bytes = (value_count + 3) // 4
+        packed_types = data[pos:pos + type_bytes]
+        pos = (pos + type_bytes + 3) & ~3
+        values = struct.unpack_from(f"<{value_count}i", data, pos) if value_count else ()
+        pos += value_count * 4
+        types = [packed_types[index // 4] >> ((index % 4) * 2) & 3 for index in range(value_count)]
+        encoded.append((types, values))
+
+    entries = []
+    for types, values in encoded:
+        decoded = []
+        for value_type, value in zip(types, values):
+            if value_type == 0:
+                if value < 0:
+                    decoded.append(None)
+                    continue
+                start = string_offset + value
+                end = data.find(b"\0", start)
+                decoded.append(data[start:end].decode("shift_jis", errors="replace"))
+            elif value_type == 1:
+                decoded.append(value)
+            elif value_type == 2:
+                decoded.append(struct.unpack("<f", struct.pack("<i", value))[0])
+            else:
+                decoded.append(value)
+        entries.append(decoded)
+    return entries
+
+
+def event_light_parameters(path: Path) -> dict[str, list[float]]:
+    if path.suffix.lower() == ".json":
+        entries = [
+            [value.get("Value") for value in entry.get("Values") or ()]
+            for entry in json.loads(path.read_text(encoding="utf-8")).get("Entries") or ()
+        ]
+    elif path.suffix.lower() == ".xml":
+        entries = [
+            [value.get("Value") for value in entry.get("Values") or ()]
+            for entry in entries_from_xml(path)
+        ]
+    else:
+        entries = raw_cfg_entries(path)
+    result = {}
+    for values in entries:
+        if not values or not isinstance(values[0], str):
+            continue
+        numeric = [float(value) for value in values[1:] if isinstance(value, (int, float))]
+        if values[0].startswith("chara") and numeric:
+            result[values[0]] = numeric
+    return result
 
 
 def actor_models_from_entries(entries: list[dict]) -> dict[str, str]:

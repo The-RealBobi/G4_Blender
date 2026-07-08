@@ -3,6 +3,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,13 +22,13 @@ try:
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
     from .g4cm_camera import decode_camera, parse_g4cm
-    from .g4_event import load_event_actor_models, load_event_actor_points
+    from .g4_event import event_light_parameters, load_event_actor_models, load_event_actor_points
 except ImportError:
     from g4pk_extract_g4mt import select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
     from g4cm_camera import decode_camera, parse_g4cm
-    from g4_event import load_event_actor_models, load_event_actor_points
+    from g4_event import event_light_parameters, load_event_actor_models, load_event_actor_points
 
 
 ADDON_ID = __name__
@@ -208,21 +209,6 @@ def resolve_model_path(g4mt_path: Path, configured_root: str) -> Path | None:
                     matches = sorted(model_root.rglob(f"{identifier}{extension}"))
                     if matches:
                         return matches[0]
-        for identifier in model_identifiers(g4mt_path):
-            match = re.fullmatch(r"c(\d{6,8})", identifier, re.IGNORECASE)
-            if match is None:
-                continue
-            width = len(match.group(1))
-            value = int(match.group(1))
-            for delta in (1, -1, 2, -2):
-                nearby = f"c{value + delta:0{width}d}"
-                for model_root in model_roots:
-                    if not model_root.is_dir():
-                        continue
-                    for extension in (".g4pkm", ".g4md"):
-                        matches = sorted(model_root.rglob(f"{nearby}{extension}"))
-                        if matches:
-                            return matches[0]
     return None
 
 
@@ -1242,13 +1228,19 @@ def collect_event_packages(directory: Path) -> dict[str, list[Path]]:
     by_actor_slot: dict[tuple[str, str], list[Path]] = defaultdict(list)
     for path in sorted(directory.glob("*.g4pk")):
         prefix = f"{directory.name}_"
-        match = re.search(r"_(s\d+)_p\d+_(c\d+)$", path.stem, re.IGNORECASE)
-        if not path.stem.lower().startswith(prefix.lower()) or match is None:
+        if not path.stem.lower().startswith(prefix.lower()):
             continue
-        actor = path.stem[len(prefix):match.start()].lower()
-        if not actor or actor in {"point", "camera"}:
+        payload = path.stem[len(prefix):]
+        cut_match = re.search(r"_(c\d+)$", payload, re.IGNORECASE)
+        if cut_match is None:
             continue
-        by_actor_slot[(actor, match.group(1).lower())].append(path)
+        actor_spec = payload[:cut_match.start()].lower()
+        slot_match = re.search(r"_(s\d+)_p\d+$", actor_spec, re.IGNORECASE)
+        slot = slot_match.group(1).lower() if slot_match else ""
+        actor = actor_spec[:slot_match.start()] if slot_match else actor_spec
+        if not actor or actor == "camera" or actor.startswith("point"):
+            continue
+        by_actor_slot[(actor, slot)].append(path)
     slot_count = defaultdict(int)
     for actor, _ in by_actor_slot:
         slot_count[actor] += 1
@@ -1305,6 +1297,41 @@ def resolve_event_point_skeleton(directory: Path, prefs) -> Path | None:
     return None
 
 
+def discover_event_effects(directory: Path, prefs) -> list[dict]:
+    family_match = re.match(r"(ev\d+)", directory.name, re.IGNORECASE)
+    if family_match is None:
+        return []
+    family = family_match.group(1).lower()
+    results = []
+    for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
+        effect_root = data_root / "common" / "effect" / "event" / family
+        if not effect_root.is_dir():
+            continue
+        for asset_directory in sorted(path for path in effect_root.iterdir() if path.is_dir()):
+            model = next(asset_directory.glob("*.g4pkm"), None)
+            particle = next(asset_directory.glob("*.ptlb"), None)
+            if model is None and particle is None:
+                continue
+            shader_names = set()
+            for source in (particle, next(asset_directory.glob("*.objbin"), None)):
+                if source is None:
+                    continue
+                data = source.read_bytes()
+                shader_names.update(
+                    match.decode("ascii", errors="ignore")
+                    for match in re.findall(rb"[A-Za-z0-9_./-]+\.(?:vfxo|pfxo|cfxo|gfxo)", data)
+                )
+            results.append({
+                "name": asset_directory.name,
+                "model": str(model) if model else "",
+                "particle": str(particle) if particle else "",
+                "shaders": sorted(shader_names),
+            })
+        if results:
+            break
+    return results
+
+
 def decode_event_point_motions(
     directory: Path,
     prefs,
@@ -1332,6 +1359,60 @@ SOURCE_TO_BLENDER = Matrix(
         (0.0, 0.0, 0.0, 1.0),
     )
 )
+
+
+def import_event_character_lighting(directory: Path, cut_starts: dict[str, int]):
+    light_directory = directory / f"{directory.name}_light"
+    if not light_directory.is_dir():
+        return None
+    keyed = []
+    for path in sorted(light_directory.glob("EventMap_fix_c*.cfg.bin")):
+        cut_match = re.search(r"_(c\d+)\.cfg\.bin$", path.name, re.IGNORECASE)
+        cut = cut_match.group(1).lower() if cut_match else None
+        if cut not in cut_starts:
+            continue
+        try:
+            parameters = event_light_parameters(path)
+        except (OSError, ValueError, struct.error):
+            continue
+        if parameters:
+            keyed.append((cut, cut_starts[cut], parameters))
+    if not keyed:
+        return None
+
+    scene = bpy.context.scene
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new(f"{directory.name} World")
+    light_data = bpy.data.lights.new(f"{directory.name} Character Light", "SUN")
+    light_object = bpy.data.objects.new(light_data.name, light_data)
+    scene.collection.objects.link(light_object)
+    for cut, frame, parameters in keyed:
+        direction = parameters.get("charaLightDir")
+        if direction and len(direction) >= 3:
+            vector = SOURCE_TO_BLENDER.to_3x3() @ Vector(direction[:3])
+            if vector.length_squared > 1e-8:
+                light_object.rotation_euler = vector.normalized().to_track_quat("-Z", "Y").to_euler()
+                light_object.keyframe_insert("rotation_euler", frame=frame)
+        highlight = parameters.get("charaHighLightColor")
+        if highlight and len(highlight) >= 3:
+            light_data.color = tuple(max(0.0, value) for value in highlight[:3])
+            light_data.energy = max(0.0, highlight[3] if len(highlight) > 3 else 1.0)
+            light_data.keyframe_insert("color", frame=frame)
+            light_data.keyframe_insert("energy", frame=frame)
+        ambient = parameters.get("charaAmbient")
+        if ambient and len(ambient) >= 3:
+            scene.world.color = tuple(max(0.0, value) for value in ambient[:3])
+            scene.world.keyframe_insert("color", frame=frame)
+    for owner in (light_object, light_data, scene.world):
+        animation = owner.animation_data
+        if animation and animation.action:
+            for curve in animation.action.fcurves:
+                for point in curve.keyframe_points:
+                    point.interpolation = "CONSTANT"
+    scene["g4_event_light_parameters"] = json.dumps(
+        {cut: parameters for cut, _, parameters in keyed}, sort_keys=True
+    )
+    return light_object
 
 
 def point_global_samples(motion: dict, target_name: str) -> list[Matrix]:
@@ -1557,6 +1638,9 @@ def import_event_actor(
         action["g4_source_frame_origin"] = frame_origin
         duration = len(motion["frames"])
         strip_start = cut_starts.get(cut, 1 + clip["start_frame"] - frame_origin)
+        following_starts = [start for start in cut_starts.values() if start > strip_start]
+        if following_starts:
+            duration = min(duration, min(following_starts) - strip_start)
         try:
             add_nla_strip(armature, track, action, cut, strip_start, duration)
         except RuntimeError as exc:
@@ -1674,6 +1758,7 @@ def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
 
 class G4EventCharacterPart(PropertyGroup):
     actor_id: StringProperty()
+    actor_ids: StringProperty()
     head_model: StringProperty(name="Head", subtype="FILE_PATH")
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
@@ -1696,9 +1781,28 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             saved = {}
         directory = Path(bpy.path.abspath(self.directory))
         self.parts.clear()
-        for actor in json.loads(self.actors_json or "[]"):
+        actors = json.loads(self.actors_json or "[]")
+        explicit_models = resolve_event_actor_models(directory, prefs)
+        generic_actors = [
+            actor for actor in actors
+            if re.fullmatch(r"c0{2,}\d{3,5}", event_actor_base_id(actor), re.IGNORECASE)
+            and actor not in explicit_models
+            and event_actor_base_id(actor) not in explicit_models
+        ]
+        if generic_actors:
+            item = self.parts.add()
+            item.actor_id = "Generic character"
+            item.actor_ids = json.dumps(generic_actors)
+            generic_saved = saved.get("__generic__") or {}
+            item.head_model = generic_saved.get("head", "")
+            item.body_model = generic_saved.get("body", "")
+            item.shoes_model = generic_saved.get("shoes", "")
+        for actor in actors:
+            if actor in generic_actors:
+                continue
             item = self.parts.add()
             item.actor_id = actor
+            item.actor_ids = json.dumps([actor])
             actor_parts = event_part_defaults(directory, actor, prefs)
             actor_parts.update(saved.get(actor) or {})
             item.head_model = actor_parts.get("head", "")
@@ -1712,6 +1816,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
         for item in self.parts:
             box = layout.box()
             box.label(text=item.actor_id, icon="ARMATURE_DATA")
+            actor_ids = json.loads(item.actor_ids or "[]")
+            if len(actor_ids) > 1:
+                box.label(text=f"Shared by {len(actor_ids)} generic animation variants")
             box.prop(item, "head_model")
             box.prop(item, "body_model")
             box.prop(item, "shoes_model")
@@ -1729,7 +1836,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 if path is not None and (not path.is_file() or path.suffix.lower() not in {".g4md", ".g4pkm"}):
                     self.report({"ERROR"}, f"Character part not found or unsupported: {path}")
                     return {"CANCELLED"}
-            selected[item.actor_id] = actor_parts
+            actor_ids = json.loads(item.actor_ids or "[]") or [item.actor_id]
+            for actor_id in actor_ids:
+                selected[actor_id] = actor_parts
 
         prefs = addon_preferences()
         try:
@@ -1737,6 +1846,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
         except json.JSONDecodeError:
             saved = {}
         saved.update(selected)
+        generic_item = next((item for item in self.parts if len(json.loads(item.actor_ids or "[]")) > 1), None)
+        if generic_item is not None:
+            saved["__generic__"] = selected[json.loads(generic_item.actor_ids)[0]]
         prefs.event_character_parts = json.dumps(saved, sort_keys=True)
         try:
             bpy.ops.wm.save_userpref()
@@ -1830,6 +1942,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         prefs = addon_preferences()
         actor_models = resolve_event_actor_models(directory, prefs)
         actor_points = resolve_event_actor_points(directory, prefs)
+        effect_candidates = discover_event_effects(directory, prefs)
         actors = []
         skipped_actors = {}
         cut_frames = {}
@@ -1842,6 +1955,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                     temporary_directory,
                     camera_paths[0] if camera_paths else None,
                 )
+                import_event_character_lighting(directory, cut_starts)
                 point_motions = decode_event_point_motions(directory, prefs, temporary_directory)
                 for actor, actor_packages in sorted(packages.items()):
                     actor_parts = character_parts.get(actor) or {}
@@ -1891,6 +2005,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 scene.timeline_markers.new(cut, frame=frame)
             scene.frame_set(1)
             scene["g4_event_skipped_actors"] = json.dumps(skipped_actors, sort_keys=True)
+            scene["g4_event_effect_candidates"] = json.dumps(effect_candidates, sort_keys=True)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}

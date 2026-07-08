@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 12, 2),
+    "version": (0, 13, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -127,7 +127,7 @@ def default_chara_model_lookup() -> str:
 
 
 def default_python() -> str:
-    for candidate in (sys.executable, "python3"):
+    for candidate in ("/usr/bin/python3", "/opt/homebrew/bin/python3", sys.executable, "python3"):
         if candidate and Path(candidate).exists():
             return candidate
     return "python3"
@@ -512,7 +512,6 @@ def import_native_g4_mesh(native_path: Path) -> set[str]:
 
     imported: set[str] = set()
     conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
-    conversion_inverse = conversion.inverted()
     skeleton = payload.get("skeleton") or {}
     names = skeleton.get("names") or []
     parents = skeleton.get("parent_indices") or []
@@ -522,34 +521,26 @@ def import_native_g4_mesh(native_path: Path) -> set[str]:
         armature_data = bpy.data.armatures.new("skeleton_root")
         armature = bpy.data.objects.new("skeleton_root", armature_data)
         bpy.context.collection.objects.link(armature)
+        armature.matrix_world = conversion
         imported.add(armature.name)
         bpy.context.view_layer.objects.active = armature
         armature.select_set(True)
         bpy.ops.object.mode_set(mode="EDIT")
-        global_matrices = [
-            conversion @ matrix_from_flat(values) @ conversion_inverse
-            for values in bind_matrices[: len(names)]
-        ]
+        global_matrices = [matrix_from_flat(values) for values in bind_matrices[: len(names)]]
         edit_bones = []
         for index, name in enumerate(names):
             bone = armature_data.edit_bones.new(name or f"joint_{index:03d}")
             matrix = global_matrices[index] if index < len(global_matrices) else Matrix.Identity(4)
-            bone.head = matrix.translation
+            bone.matrix = matrix
             child_index = next(
                 (child for child, parent in enumerate(parents) if parent == index and child < len(global_matrices)),
                 None,
             )
             if child_index is not None:
-                tail = global_matrices[child_index].translation
+                length = (global_matrices[child_index].translation - matrix.translation).length
             else:
-                tail = matrix @ Vector((0.0, 0.02, 0.0))
-            if (tail - bone.head).length < 1e-5:
-                tail = bone.head + Vector((0.0, 0.02, 0.0))
-            bone.tail = tail
-            try:
-                bone.align_roll(matrix.to_3x3() @ Vector((0.0, 0.0, 1.0)))
-            except ValueError:
-                pass
+                length = 0.02
+            bone.length = max(length, 0.005)
             edit_bones.append(bone)
         for index, bone in enumerate(edit_bones):
             parent = parents[index] if index < len(parents) else len(edit_bones)
@@ -559,13 +550,17 @@ def import_native_g4_mesh(native_path: Path) -> set[str]:
 
     materials: dict[str, bpy.types.Material] = {}
     for material_name in payload.get("materials", {}):
-        materials[material_name] = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
+        existing = bpy.data.materials.get(material_name)
+        if existing is not None and existing.users == 0:
+            bpy.data.materials.remove(existing)
+            existing = None
+        materials[material_name] = existing or bpy.data.materials.new(material_name)
 
     for mesh_payload in payload.get("meshes", []):
         name = mesh_payload.get("name") or "G4 Mesh"
         flat_positions = mesh_payload.get("positions") or []
         positions = [
-            conversion @ Vector(flat_positions[index : index + 3])
+            Vector(flat_positions[index : index + 3])
             for index in range(0, len(flat_positions) - 2, 3)
         ]
         indices = mesh_payload.get("indices") or []
@@ -592,9 +587,8 @@ def import_native_g4_mesh(native_path: Path) -> set[str]:
 
         flat_normals = mesh_payload.get("normals") or []
         if len(flat_normals) >= len(positions) * 3 and hasattr(mesh, "normals_split_custom_set_from_vertices"):
-            normal_rotation = conversion.to_3x3()
             normals = [
-                (normal_rotation @ Vector(flat_normals[index : index + 3])).normalized()
+                Vector(flat_normals[index : index + 3]).normalized()
                 for index in range(0, len(flat_normals) - 2, 3)
             ]
             for polygon in mesh.polygons:
@@ -1285,7 +1279,7 @@ def apply_level5_toon_shader(
             normal_map.location = (700, -180)
             normal_map.inputs["Strength"].default_value = 1.0
             links.new(normal_texture.outputs["Color"], normal_channels.inputs["Color"])
-            links.new(normal_channels.outputs["Alpha"], normal_x.inputs[0])
+            links.new(normal_texture.outputs["Alpha"], normal_x.inputs[0])
             links.new(normal_channels.outputs["Green"], normal_y.inputs[0])
             links.new(normal_x.outputs[0], normal_x2.inputs[0])
             links.new(normal_x.outputs[0], normal_x2.inputs[1])
@@ -1296,7 +1290,7 @@ def apply_level5_toon_shader(
             links.new(normal_xy2.outputs[0], normal_z2.inputs[1])
             links.new(normal_z2.outputs[0], normal_z.inputs[0])
             links.new(normal_z.outputs[0], encoded_z.inputs[0])
-            links.new(normal_channels.outputs["Alpha"], packed_normal.inputs["Red"])
+            links.new(normal_texture.outputs["Alpha"], packed_normal.inputs["Red"])
             links.new(normal_channels.outputs["Green"], packed_normal.inputs["Green"])
             links.new(encoded_z.outputs[0], packed_normal.inputs["Blue"])
             links.new(packed_normal.outputs["Color"], normal_map.inputs["Color"])
@@ -1573,6 +1567,49 @@ def apply_level5_toon_shader(
             links.new(line_weight.outputs[0], line_composite.inputs[0])
             links.new(contour_shadow.outputs["Color"], line_composite.inputs[1])
             color_output = line_composite.outputs["Color"]
+
+    outline_parameters = nodes.new("ShaderNodeVertexColor")
+    outline_parameters.name = "G4 Outline Parameters"
+    outline_parameters.layer_name = "G4 Outline Parameters"
+    outline_parameters.location = (180, -800)
+    outline_channels = nodes.new("ShaderNodeSeparateColor")
+    outline_channels.name = "G4 Outline Parameter Channels"
+    outline_channels.location = (360, -800)
+    authored_center = nodes.new("ShaderNodeMath")
+    authored_center.name = "G4 Authored Detail Center"
+    authored_center.operation = "SUBTRACT"
+    authored_center.inputs[1].default_value = 0.5
+    authored_center.location = (540, -800)
+    authored_distance = nodes.new("ShaderNodeMath")
+    authored_distance.operation = "ABSOLUTE"
+    authored_distance.location = (700, -800)
+    authored_band = nodes.new("ShaderNodeMath")
+    authored_band.name = "G4 Authored Detail Width"
+    authored_band.operation = "LESS_THAN"
+    authored_band.inputs[1].default_value = 0.012
+    authored_band.location = (860, -800)
+    authored_strength = nodes.new("ShaderNodeValue")
+    authored_strength.name = "G4 Authored Detail Strength"
+    authored_strength.outputs[0].default_value = (
+        1.0 if getattr(addon_preferences(), "outline_mode", "SIMPLE") == "HULL" else 0.0
+    )
+    authored_strength.location = (860, -900)
+    authored_mask = nodes.new("ShaderNodeMath")
+    authored_mask.operation = "MULTIPLY"
+    authored_mask.location = (1020, -800)
+    authored_composite = nodes.new("ShaderNodeMixRGB")
+    authored_composite.name = "G4 Authored Outline Detail"
+    authored_composite.inputs[2].default_value = (0.025, 0.012, 0.018, 1.0)
+    authored_composite.location = (1040, 320)
+    links.new(outline_parameters.outputs["Color"], outline_channels.inputs["Color"])
+    links.new(outline_channels.outputs["Red"], authored_center.inputs[0])
+    links.new(authored_center.outputs[0], authored_distance.inputs[0])
+    links.new(authored_distance.outputs[0], authored_band.inputs[0])
+    links.new(authored_band.outputs[0], authored_mask.inputs[0])
+    links.new(authored_strength.outputs[0], authored_mask.inputs[1])
+    links.new(authored_mask.outputs[0], authored_composite.inputs[0])
+    links.new(color_output, authored_composite.inputs[1])
+    color_output = authored_composite.outputs["Color"]
 
     specular_mask_path = first_variant_path(variants, "specular_mask")
     specular_path = first_variant_path(variants, "specular")
@@ -2181,12 +2218,23 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
         "Level-5 G4 Thin Outline",
         "Level-5 G4 Internal Detail",
     }
-    has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
-    if not has_level5_lines:
-        return False
-
     if mode is None:
         mode = getattr(addon_preferences(), "outline_mode", "SIMPLE")
+    for material in bpy.data.materials:
+        if material.node_tree is None:
+            continue
+        strength = material.node_tree.nodes.get("G4 Authored Detail Strength")
+        if strength is not None:
+            strength.outputs[0].default_value = 1.0 if mode == "HULL" else 0.0
+    has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
+    if not has_level5_lines:
+        if mode == "OFF":
+            return False
+        names = {
+            obj.name for obj in bpy.data.objects
+            if obj.type == "MESH" and obj.get("g4_viewport_outline") == "SCREEN_SPACE"
+        }
+        return bool(names) and configure_level5_outlines(names, detailed=mode == "HULL")
     if mode == "OFF":
         for line_set in tuple(settings.linesets):
             if line_set.name in managed:
@@ -2938,6 +2986,64 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
         return {"FINISHED"}
 
 
+class MATERIAL_PT_level5_character(bpy.types.Panel):
+    bl_label = "Level-5 Character"
+    bl_idname = "MATERIAL_PT_level5_character"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "material"
+
+    @classmethod
+    def poll(cls, context):
+        material = context.material
+        return material is not None and bool(material.get("g4_level5_toon")) and material.node_tree is not None
+
+    def draw(self, context):
+        layout = self.layout
+        nodes = context.material.node_tree.nodes
+
+        color = nodes.get("G4 Saturation")
+        if color is not None:
+            box = layout.box()
+            box.label(text="Base Color", icon="COLOR")
+            box.prop(color.inputs["Saturation"], "default_value", text="Saturation")
+            box.prop(color.inputs["Value"], "default_value", text="Brightness")
+
+        box = layout.box()
+        box.label(text="Toon Lighting", icon="LIGHT_SUN")
+        ambient = nodes.get("G4 Toon Ambient")
+        if ambient is not None:
+            box.prop(ambient.inputs[1], "default_value", text="Light Floor")
+            box.prop(ambient.inputs[2], "default_value", text="Shadow Floor")
+        dual_toon = nodes.get("G4 Dual Toon Ramp")
+        if dual_toon is not None:
+            box.prop(dual_toon.inputs[0], "default_value", text="Secondary Shadow")
+        highlight = nodes.get("G4 Highlight")
+        if highlight is not None:
+            box.prop(highlight.inputs[2], "default_value", text="Highlight Color")
+        underlight = nodes.get("G4 Under Light")
+        if underlight is not None:
+            box.prop(underlight.inputs[2], "default_value", text="Under-light Color")
+
+        box = layout.box()
+        box.label(text="Surface", icon="MATERIAL")
+        normal = nodes.get("G4 Surface Normal")
+        if normal is not None:
+            box.prop(normal.inputs["Strength"], "default_value", text="Normal Strength")
+        specular = nodes.get("G4 Specular Strength")
+        if specular is not None:
+            box.prop(specular.inputs[0], "default_value", text="Specular Strength")
+        wetness = nodes.get("G4 Wetness")
+        if wetness is not None:
+            box.prop(wetness.outputs[0], "default_value", text="Wetness")
+
+        outline = nodes.get("G4 UV Outline Width")
+        if outline is not None:
+            box = layout.box()
+            box.label(text="Painted Line Detail", icon="MOD_LINEART")
+            box.prop(outline.inputs[1], "default_value", text="Width Threshold")
+
+
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_level5_g4.bl_idname, text="Level-5 G4 Model (.g4md/.g4pkm)")
     self.layout.operator(IMPORT_OT_level5_g4_folder.bl_idname, text="Level-5 G4 Model Folder")
@@ -2952,6 +3058,7 @@ classes = [
     IMPORT_OT_level5_g4,
     IMPORT_OT_level5_g4_folder,
     IMPORT_OT_level5_g4_character_parts,
+    MATERIAL_PT_level5_character,
 ]
 
 

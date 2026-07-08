@@ -30,12 +30,17 @@ The importer automatically converts G4 assets into Blender-compatible data, recr
 * Direct G4MT and animation G4PK import.
 * G4CM camera import synchronized with character animation.
 * Full event-folder reconstruction with one rig per actor and editable NLA cuts.
+* Event naming support for Victory Road and Ni no Kuni II conventions.
+* Per-cut character lighting reconstructed from `EventMap_fix` resources.
+* Detailed character outlines driven by the model's authored outline parameters.
 
 ### Port Exporter
 
 * Export edited Blender/DAE geometry into a native `G4MD/G4MG` pair.
 * Preserve native layouts, materials, hashes, texture references and record structure where possible.
 * Copy or rebuild `G4TX` texture archives from a native base.
+* Read and write Nintendo Switch `NXTCH` texture payloads with automatic `dx11` to `nx` fallback.
+* Replace individual G4TX entries from an explicit texture list; empty entries remain untouched.
 * Resolve Collada skin controllers and Blender-exported weight sidecars.
 * Validate generated records, palettes, indices and packed weight sums before writing packages.
 * Build port settings from the selected original model instead of shipping model-specific bone presets.
@@ -51,6 +56,8 @@ The importer automatically converts G4 assets into Blender-compatible data, recr
 | G4MT   | Character animation     |
 | G4CM   | Camera animation        |
 | G4PK   | Animation containers    |
+| NXTCH  | Nintendo Switch texture |
+| P3LIP  | Lip-sync sequences      |
 
 ## Installation
 
@@ -68,6 +75,7 @@ The add-on package includes:
 |-- g4mt_probe.py
 |-- g4cm_camera.py
 |-- g4pk_extract_g4mt.py
+|-- g4_p3lip.py
 `-- chara_model_lookup.json
 ```
 

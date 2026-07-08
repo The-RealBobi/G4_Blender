@@ -12,7 +12,10 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+try:
+    from g4_model_probe import dds_to_nxtch
+except ImportError:
+    from .g4_model_probe import dds_to_nxtch
 
 
 DEFAULT_RAW_ROOT = Path(os.environ.get("LEVEL5_G4_RAW_ROOT", "data"))
@@ -62,6 +65,7 @@ class PortConfig:
     native_material_names: list[str]
     records: list[RecordRule]
     texture_replacements: dict[str, str]
+    texture_platform: str = "auto"
     material_overrides: list[MaterialOverride] | None = None
     uv_flip: tuple[bool, bool] = (False, False)
     joint_aliases: dict[str, str | int] | None = None
@@ -76,6 +80,28 @@ class PortConfig:
     @property
     def dx11_rel(self) -> Path:
         return Path("dx11") / self.model_rel.with_suffix(".g4tx")
+
+    @property
+    def nx_rel(self) -> Path:
+        return Path("nx") / self.model_rel.with_suffix(".g4tx")
+
+    def texture_rel(self, raw_root: Path) -> Path:
+        candidates = {
+            "dx11": self.dx11_rel,
+            "nx": self.nx_rel,
+        }
+        if self.texture_platform in candidates:
+            rel = candidates[self.texture_platform]
+            if not (raw_root / rel).is_file():
+                raise FileNotFoundError(f"{self.texture_platform.upper()} G4TX not found: {raw_root / rel}")
+            return rel
+        for platform in ("dx11", "nx"):
+            rel = candidates[platform]
+            if (raw_root / rel).is_file():
+                return rel
+        raise FileNotFoundError(
+            f"G4TX not found in either {raw_root / self.dx11_rel} or {raw_root / self.nx_rel}"
+        )
 
 
 @dataclass
@@ -194,6 +220,7 @@ def load_config(path: Path | None) -> PortConfig:
         native_material_names=list(data.get("native_material_names", NATIVE_MATERIAL_NAMES)),
         records=records,
         texture_replacements=dict(data.get("texture_replacements", {})),
+        texture_platform=str(data.get("texture_platform", "auto")).lower(),
         material_overrides=[
             MaterialOverride(
                 material_index=int(item["material_index"]),
@@ -1715,6 +1742,14 @@ def dds_dimensions(data: bytes) -> tuple[int, int]:
     return width, height
 
 
+def texture_dimensions(data: bytes) -> tuple[int, int]:
+    if data.startswith(b"DDS "):
+        return dds_dimensions(data)
+    if data.startswith(b"NXTCH000") and len(data) >= 0x1C:
+        return struct.unpack_from("<II", data, 0x14)
+    raise ValueError("unsupported G4TX texture payload")
+
+
 def validate_g4tx_dimensions(name: str, width: int, height: int) -> None:
     if not 0 <= width <= 0xFFFF or not 0 <= height <= 0xFFFF:
         raise ValueError(
@@ -1724,6 +1759,13 @@ def validate_g4tx_dimensions(name: str, width: int, height: int) -> None:
 
 
 def png_to_dds(path: Path) -> bytes:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(
+            "Replacing PNG textures requires Pillow in the configured export Python. "
+            "Choose a Python with PIL installed, or provide DDS/NXTCH files directly."
+        ) from exc
     image = Image.open(path).convert("RGBA")
     tmp = path.with_suffix(path.suffix + ".port_tmp.dds")
     try:
@@ -1731,6 +1773,26 @@ def png_to_dds(path: Path) -> bytes:
         return tmp.read_bytes()
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def replacement_texture(path: Path, native_payload: bytes) -> bytes:
+    suffix = path.suffix.lower()
+    if suffix == ".dds":
+        payload = path.read_bytes()
+    elif suffix == ".nxtch":
+        payload = path.read_bytes()
+        if not payload.startswith(b"NXTCH000"):
+            raise ValueError(f"invalid NXTCH replacement: {path}")
+    else:
+        payload = png_to_dds(path)
+
+    native_is_nx = native_payload.startswith(b"NXTCH000")
+    replacement_is_nx = payload.startswith(b"NXTCH000")
+    if native_is_nx and not replacement_is_nx:
+        return dds_to_nxtch(payload, native_payload)
+    if not native_is_nx and replacement_is_nx:
+        raise ValueError(f"NXTCH replacement cannot be written into a DX11 G4TX: {path}")
+    return payload
 
 
 def parse_g4tx_payloads(path: Path) -> tuple[bytes, list[dict], dict[str, bytes]]:
@@ -1845,8 +1907,12 @@ def rebuild_native_g4tx_with_custom_textures(
     output_entries: list[dict] = []
     for entry in template_entries:
         name = entry["name"]
-        png_path = replacement_paths.get(name)
-        payload = png_to_dds(png_path) if png_path is not None and png_path.exists() else native_payloads[name]
+        replacement_path = replacement_paths.get(name)
+        payload = (
+            replacement_texture(replacement_path, native_payloads[name])
+            if replacement_path is not None and replacement_path.exists()
+            else native_payloads[name]
+        )
         output_entries.append({"name": name, "payload": payload, "template": entry})
 
     count = len(output_entries)
@@ -1877,7 +1943,7 @@ def rebuild_native_g4tx_with_custom_textures(
     for index, entry in enumerate(output_entries):
         payload = entry["payload"]
         entry_raw = bytearray(entry["template"]["raw"])
-        width, height = dds_dimensions(payload)
+        width, height = texture_dimensions(payload)
         validate_g4tx_dimensions(entry["name"], width, height)
         struct.pack_into("<II", entry_raw, 4, data_cursor - data_offset, len(payload))
         struct.pack_into("<HH", entry_raw, 0x18, width, height)
@@ -2019,34 +2085,36 @@ def write_port(
 
     common_out = out_root / config.common_rel
     mg_out = common_out.with_suffix(".g4mg")
-    dx11_out = out_root / config.dx11_rel
+    texture_rel = config.texture_rel(raw_root)
+    texture_template = raw_root / texture_rel
+    texture_out = out_root / texture_rel
     common_out.parent.mkdir(parents=True, exist_ok=True)
-    dx11_out.parent.mkdir(parents=True, exist_ok=True)
+    texture_out.parent.mkdir(parents=True, exist_ok=True)
     g4md = build_base_g4md(meshes, records, raw_root, config)
     g4md = rewrite_joint_palettes(g4md, palettes)
     validation = validate_generated_model(g4md, g4mg)
     custom_texture_dir = source_dae.parent / "customTextures" if source_dae else Path()
     if texture_mode == "custom":
         texture_names = rebuild_native_g4tx_with_custom_textures(
-            raw_root / config.dx11_rel, custom_texture_dir, dx11_out, config.texture_replacements
+            texture_template, custom_texture_dir, texture_out, config.texture_replacements
         )
     elif texture_mode == "native":
-        dx11_out.write_bytes((raw_root / config.dx11_rel).read_bytes())
-        _, template_entries, _ = parse_g4tx_payloads(raw_root / config.dx11_rel)
+        texture_out.write_bytes(texture_template.read_bytes())
+        _, template_entries, _ = parse_g4tx_payloads(texture_template)
         texture_names = [entry["name"] for entry in template_entries]
     elif texture_mode == "keep":
-        if not dx11_out.exists():
-            dx11_out.write_bytes((raw_root / config.dx11_rel).read_bytes())
-        _, template_entries, _ = parse_g4tx_payloads(dx11_out)
+        if not texture_out.exists():
+            texture_out.write_bytes(texture_template.read_bytes())
+        _, template_entries, _ = parse_g4tx_payloads(texture_out)
         texture_names = [entry["name"] for entry in template_entries]
     else:
         raise ValueError(f"unsupported texture mode {texture_mode!r}")
     common_out.write_bytes(g4md)
     mg_out.write_bytes(g4mg)
 
-    for source in (raw_root / config.dx11_rel).parent.glob("*.g4tx"):
-        if source.name != dx11_out.name:
-            (dx11_out.parent / source.name).write_bytes(source.read_bytes())
+    for source in texture_template.parent.glob("*.g4tx"):
+        if source.name != texture_out.name:
+            (texture_out.parent / source.name).write_bytes(source.read_bytes())
 
     return {
         "meshes": len(meshes),
@@ -2067,7 +2135,8 @@ def write_port(
         "record_assignments": {mesh.name: list(mesh.source_names) for mesh in meshes},
         "g4md": str(common_out),
         "g4mg": str(mg_out),
-        "g4tx": str(dx11_out),
+        "g4tx": str(texture_out),
+        "texture_platform": texture_rel.parts[0],
     }
 
 

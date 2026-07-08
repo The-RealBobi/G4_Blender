@@ -1690,11 +1690,6 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
 def find_texture_for_model(path: Path) -> Path | None:
     stem = path.stem
     candidates = []
-    xml_texture = resolve_texture_from_chara_model(path)
-    if xml_texture is not None:
-        candidates.append(xml_texture)
-    candidates.append(path.with_suffix(".g4tx"))
-
     try:
         rel = path.relative_to(RAW_DATA_ROOT)
     except ValueError:
@@ -1703,9 +1698,14 @@ def find_texture_for_model(path: Path) -> Path | None:
     if rel is not None:
         parts = list(rel.parts)
         if parts and parts[0] in {"common", "dx11", "nx"}:
-            for root in ("dx11", "common", "nx"):
+            for root in ("dx11", "nx"):
                 alt = RAW_DATA_ROOT.joinpath(root, *parts[1:]).with_suffix(".g4tx")
                 candidates.append(alt)
+
+    xml_texture = resolve_texture_from_chara_model(path)
+    if xml_texture is not None:
+        candidates.append(xml_texture)
+    candidates.append(path.with_suffix(".g4tx"))
 
     # Some face G4TX files are one level above the model folder.
     if rel is not None and len(rel.parts) > 2:
@@ -1721,7 +1721,7 @@ def find_texture_for_model(path: Path) -> Path | None:
             return candidate
 
     # Last resort: local sibling search by stem.
-    for root in (RAW_DATA_ROOT / "dx11" / "chr", RAW_DATA_ROOT / "common" / "chr"):
+    for root in (RAW_DATA_ROOT / "dx11" / "chr", RAW_DATA_ROOT / "nx" / "chr"):
         if not root.exists():
             continue
         matches = list(root.glob(f"**/{stem}.g4tx"))
@@ -1783,8 +1783,9 @@ def find_shared_map_texture_containers(path: Path, material_names: Iterable[str]
         if extended:
             folders.insert(0, extended.group(1))
         for folder in folders:
-            candidates.append(RAW_DATA_ROOT / "dx11" / "map" / map_kind / folder / f"{folder}.g4tx")
-            candidates.append(RAW_DATA_ROOT / "dx11" / "map" / map_kind / folder / f"{stem}.g4tx")
+            for platform in ("dx11", "nx"):
+                candidates.append(RAW_DATA_ROOT / platform / "map" / map_kind / folder / f"{folder}.g4tx")
+                candidates.append(RAW_DATA_ROOT / platform / "map" / map_kind / folder / f"{stem}.g4tx")
 
     seen = set()
     unique: list[Path] = []
@@ -1810,10 +1811,11 @@ def find_shared_texture_containers_for_materials(path: Path, material_names: Ite
         if not match:
             continue
         stem = match.group(1)
-        candidates.append(RAW_DATA_ROOT / "dx11" / "chr" / stem / f"{stem}.g4tx")
-        mirror_dir = RAW_DATA_ROOT / "dx11" / Path(*rel.parts[1:-1])
-        if mirror_dir.is_dir():
-            candidates.extend(sorted(mirror_dir.glob(f"{stem}*.g4tx")))
+        for platform in ("dx11", "nx"):
+            candidates.append(RAW_DATA_ROOT / platform / "chr" / stem / f"{stem}.g4tx")
+            mirror_dir = RAW_DATA_ROOT / platform / Path(*rel.parts[1:-1])
+            if mirror_dir.is_dir():
+                candidates.extend(sorted(mirror_dir.glob(f"{stem}*.g4tx")))
 
     seen = set()
     unique: list[Path] = []
@@ -1845,8 +1847,12 @@ def extract_g4tx(path: Path, out_dir: Path) -> list[Path]:
                 ext = ".dds"
                 out_data = payload
         elif payload.startswith(b"NXTCH000"):
-            ext = ".nxtch"
-            out_data = payload
+            try:
+                ext = ".dds"
+                out_data = nxtch_to_dds(payload)
+            except ValueError:
+                ext = ".nxtch"
+                out_data = payload
         else:
             ext = ".bin"
             out_data = payload
@@ -1854,6 +1860,236 @@ def extract_g4tx(path: Path, out_dir: Path) -> list[Path]:
         out_path.write_bytes(out_data)
         written.append(out_path)
     return written
+
+
+NXTCH_FORMATS = {
+    0x25: (32, 4, None),
+    0x42: (4, 8, b"DXT1"),
+    0x44: (8, 16, b"DXT5"),
+    0x4D: (8, 16, b"DX10"),
+}
+
+
+def nx_bitfield(bit_depth: int, block_compressed: bool, height: int, extension_count: int) -> list[tuple[int, int]]:
+    if block_compressed:
+        fields = {
+            4: [(1, 0), (2, 0), (0, 1), (0, 2), (4, 0), (0, 4), (8, 0), (0, 8), (0, 16), (16, 0)],
+            8: [(1, 0), (2, 0), (0, 1), (0, 2), (0, 4), (4, 0), (0, 8), (0, 16), (8, 0)],
+        }.get(bit_depth)
+        start_y, max_size = 32, 512
+    else:
+        fields = {
+            8: [(1, 0), (2, 0), (4, 0), (8, 0), (0, 1), (16, 0), (0, 2), (0, 4), (32, 0)],
+            16: [(1, 0), (2, 0), (4, 0), (0, 1), (8, 0), (0, 2), (0, 4), (16, 0)],
+            32: [(1, 0), (2, 0), (0, 1), (4, 0), (0, 2), (0, 4), (8, 0)],
+        }.get(bit_depth)
+        start_y, max_size = 8, 128
+    if fields is None:
+        raise ValueError(f"unsupported NXTCH bit depth: {bit_depth}")
+    fields = list(fields)
+    if extension_count < 0:
+        while start_y < min(height, max_size):
+            fields.append((0, start_y))
+            start_y *= 2
+    else:
+        for _ in range(extension_count):
+            if start_y >= min(height, max_size):
+                break
+            fields.append((0, start_y))
+            start_y *= 2
+    return fields
+
+
+def nx_swizzle_dimensions(width: int, height: int, fields: list[tuple[int, int]]) -> tuple[int, int, int, int]:
+    macro_width = 0
+    macro_height = 0
+    for x_value, y_value in fields:
+        macro_width |= x_value
+        macro_height |= y_value
+    macro_width += 1
+    macro_height += 1
+    padded_width = ((width + macro_width - 1) // macro_width) * macro_width
+    padded_height = ((height + macro_height - 1) // macro_height) * macro_height
+    return padded_width, padded_height, macro_width, macro_height
+
+
+def nx_swizzle_point(index: int, width: int, fields: list[tuple[int, int]]) -> tuple[int, int]:
+    macro_width = 0
+    macro_height = 0
+    for x_value, y_value in fields:
+        macro_width |= x_value
+        macro_height |= y_value
+    macro_width += 1
+    macro_height += 1
+    points_per_macro = macro_width * macro_height
+    width_in_tiles = (width + macro_width - 1) // macro_width
+    macro_index = index // points_per_macro
+    x = (macro_index % width_in_tiles) * macro_width
+    y = (macro_index // width_in_tiles) * macro_height
+    for bit, (x_value, y_value) in enumerate(fields):
+        if index >> bit & 1:
+            x ^= x_value
+            y ^= y_value
+    return x, y
+
+
+def deswizzle_nxtch_level(data: bytes, width: int, height: int, bit_depth: int, unit_size: int, extension_count: int, block_compressed: bool) -> bytes:
+    fields = nx_bitfield(bit_depth, block_compressed, height, extension_count)
+    padded_width, padded_height, _, _ = nx_swizzle_dimensions(width, height, fields)
+    if block_compressed:
+        block_width = (width + 3) // 4
+        block_height = (height + 3) // 4
+        padded_blocks = ((padded_width + 3) // 4) * ((padded_height + 3) // 4)
+        output = bytearray(block_width * block_height * unit_size)
+        for source_block in range(min(len(data) // unit_size, padded_blocks)):
+            x, y = nx_swizzle_point(source_block * 16, padded_width, fields)
+            target_x, target_y = x // 4, y // 4
+            if target_x >= block_width or target_y >= block_height:
+                continue
+            target = (target_y * block_width + target_x) * unit_size
+            source = source_block * unit_size
+            output[target : target + unit_size] = data[source : source + unit_size]
+        return bytes(output)
+    output = bytearray(width * height * unit_size)
+    for source_index in range(min(len(data) // unit_size, padded_width * padded_height)):
+        x, y = nx_swizzle_point(source_index, padded_width, fields)
+        if x >= width or y >= height:
+            continue
+        target = (y * width + x) * unit_size
+        source = source_index * unit_size
+        output[target : target + unit_size] = data[source : source + unit_size]
+    return bytes(output)
+
+
+def swizzle_nxtch_level(data: bytes, width: int, height: int, bit_depth: int, unit_size: int, extension_count: int, block_compressed: bool) -> bytes:
+    fields = nx_bitfield(bit_depth, block_compressed, height, extension_count)
+    padded_width, padded_height, _, _ = nx_swizzle_dimensions(width, height, fields)
+    if block_compressed:
+        block_width = (width + 3) // 4
+        block_height = (height + 3) // 4
+        padded_block_width = (padded_width + 3) // 4
+        padded_block_height = (padded_height + 3) // 4
+        output = bytearray(padded_block_width * padded_block_height * unit_size)
+        for source_block in range(padded_block_width * padded_block_height):
+            x, y = nx_swizzle_point(source_block * 16, padded_width, fields)
+            target_x, target_y = x // 4, y // 4
+            if target_x >= block_width or target_y >= block_height:
+                continue
+            source = (target_y * block_width + target_x) * unit_size
+            target = source_block * unit_size
+            output[target : target + unit_size] = data[source : source + unit_size]
+        return bytes(output)
+    output = bytearray(padded_width * padded_height * unit_size)
+    for source_index in range(padded_width * padded_height):
+        x, y = nx_swizzle_point(source_index, padded_width, fields)
+        if x >= width or y >= height:
+            continue
+        source = (y * width + x) * unit_size
+        target = source_index * unit_size
+        output[target : target + unit_size] = data[source : source + unit_size]
+    return bytes(output)
+
+
+def dds_header(width: int, height: int, mip_count: int, format_code: int, data_size: int) -> bytes:
+    bit_depth, _, fourcc = NXTCH_FORMATS[format_code]
+    flags = 0x0002100F if mip_count > 1 else 0x0000100F
+    pitch = data_size if format_code == 0x25 else max(1, (width + 3) // 4) * NXTCH_FORMATS[format_code][1]
+    header = bytearray(128 + (20 if format_code == 0x4D else 0))
+    struct.pack_into("<4s7I", header, 0, b"DDS ", 124, flags, height, width, pitch, 0, mip_count)
+    struct.pack_into("<I", header, 76, 32)
+    if fourcc is not None:
+        struct.pack_into("<I4s", header, 80, 0x4, fourcc)
+    else:
+        struct.pack_into("<I4sI4I", header, 80, 0x41, b"\0\0\0\0", 32, 0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000)
+    caps = 0x401008 if mip_count > 1 else 0x1000
+    struct.pack_into("<I", header, 108, caps)
+    if format_code == 0x4D:
+        struct.pack_into("<5I", header, 128, 98, 3, 0, 1, 0)
+    return bytes(header)
+
+
+def nxtch_to_dds(payload: bytes) -> bytes:
+    if len(payload) < 0x100 or payload[:8] != b"NXTCH000":
+        raise ValueError("not an NXTCH texture")
+    width, height = struct.unpack_from("<II", payload, 0x14)
+    format_code, mip_count = struct.unpack_from("<II", payload, 0x24)
+    if format_code not in NXTCH_FORMATS or width <= 0 or height <= 0 or mip_count <= 0:
+        raise ValueError(f"unsupported NXTCH format: 0x{format_code:x}")
+    offsets = list(struct.unpack_from(f"<{mip_count}I", payload, 0x30))
+    extension_count = struct.unpack_from("<i", payload, 0x74)[0]
+    bit_depth, unit_size, _ = NXTCH_FORMATS[format_code]
+    block_compressed = format_code != 0x25
+    levels = []
+    for level, offset in enumerate(offsets):
+        start = 0x100 + offset
+        end = 0x100 + (offsets[level + 1] if level + 1 < len(offsets) else len(payload) - 0x100)
+        level_width = max(1, width >> level)
+        level_height = max(1, height >> level)
+        levels.append(deswizzle_nxtch_level(
+            payload[start:end], level_width, level_height, bit_depth, unit_size,
+            extension_count, block_compressed,
+        ))
+    return dds_header(width, height, mip_count, format_code, len(levels[0])) + b"".join(levels)
+
+
+def dds_format(data: bytes) -> tuple[int, int]:
+    if len(data) < 128 or data[:4] != b"DDS ":
+        raise ValueError("not a DDS texture")
+    flags = struct.unpack_from("<I", data, 80)[0]
+    fourcc = data[84:88] if flags & 0x4 else b""
+    if fourcc == b"DXT1":
+        return 0x42, 128
+    if fourcc == b"DXT5":
+        return 0x44, 128
+    if fourcc == b"DX10" and len(data) >= 148 and struct.unpack_from("<I", data, 128)[0] == 98:
+        return 0x4D, 148
+    rgb_bits = struct.unpack_from("<I", data, 88)[0]
+    if flags & 0x40 and rgb_bits == 32:
+        return 0x25, 128
+    raise ValueError(f"unsupported DDS format: {fourcc!r}/{rgb_bits}")
+
+
+def dds_to_nxtch(data: bytes, template: bytes | None = None) -> bytes:
+    format_code, data_offset = dds_format(data)
+    height, width = struct.unpack_from("<II", data, 12)
+    mip_count = max(1, struct.unpack_from("<I", data, 28)[0])
+    bit_depth, unit_size, _ = NXTCH_FORMATS[format_code]
+    block_compressed = format_code != 0x25
+    extension_count = -1
+    if template is not None and len(template) >= 0x100 and template[:8] == b"NXTCH000":
+        extension_count = struct.unpack_from("<i", template, 0x74)[0]
+        header = bytearray(template[:0x100])
+    else:
+        header = bytearray(0x100)
+        header[:8] = b"NXTCH000"
+        struct.pack_into("<i", header, 0x74, extension_count)
+
+    cursor = data_offset
+    levels = []
+    offsets = []
+    for level in range(mip_count):
+        level_width = max(1, width >> level)
+        level_height = max(1, height >> level)
+        if block_compressed:
+            linear_size = ((level_width + 3) // 4) * ((level_height + 3) // 4) * unit_size
+        else:
+            linear_size = level_width * level_height * unit_size
+        linear = data[cursor : cursor + linear_size]
+        if len(linear) != linear_size:
+            raise ValueError(f"truncated DDS mip {level}")
+        offsets.append(sum(len(item) for item in levels))
+        levels.append(swizzle_nxtch_level(
+            linear, level_width, level_height, bit_depth, unit_size,
+            extension_count, block_compressed,
+        ))
+        cursor += linear_size
+
+    texture_data = b"".join(levels)
+    struct.pack_into("<III", header, 0x08, len(texture_data), 0, 0)
+    struct.pack_into("<II", header, 0x14, width, height)
+    struct.pack_into("<IIIII", header, 0x1C, 0, 0, format_code, mip_count, len(texture_data))
+    struct.pack_into(f"<{mip_count}I", header, 0x30, *offsets)
+    return bytes(header) + texture_data
 
 
 def dds_half_float_cubemap(data: bytes) -> tuple[int, int, int] | None:

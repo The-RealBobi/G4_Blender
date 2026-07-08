@@ -30,7 +30,7 @@ MAX_GENERATED_TEXTURE_SIZE = 2048
 
 
 def default_python() -> str:
-    for candidate in (sys.executable, "python3"):
+    for candidate in ("/usr/bin/python3", "/opt/homebrew/bin/python3", sys.executable, "python3"):
         if candidate and Path(candidate).exists():
             return candidate
     return "python3"
@@ -235,6 +235,12 @@ TEXTURE_MODE_ITEMS = [
     ("keep", "Keep Existing G4TX", "Preserve the G4TX already present in the output folder"),
 ]
 
+TEXTURE_PLATFORM_ITEMS = [
+    ("auto", "Automatic (DX11, then NX)", "Use DX11 when available, otherwise Nintendo Switch NX"),
+    ("dx11", "Windows / DX11", "Read and write DDS payloads under data/dx11"),
+    ("nx", "Nintendo Switch / NX", "Read and write NXTCH payloads under data/nx"),
+]
+
 
 def align(value: int, boundary: int) -> int:
     return (value + boundary - 1) & ~(boundary - 1)
@@ -281,22 +287,27 @@ def infer_data_root(path: Path) -> Path | None:
     if "common" in parts:
         index = parts.index("common")
         return Path(*parts[:index]) if index > 0 else None
-    if "dx11" in parts:
-        index = parts.index("dx11")
-        return Path(*parts[:index]) if index > 0 else None
+    for platform in ("dx11", "nx"):
+        if platform in parts:
+            index = parts.index(platform)
+            return Path(*parts[:index]) if index > 0 else None
     return None
 
 
 def relative_model_from_data(path: Path, data_root: Path) -> str:
     rel = path.with_suffix("").resolve().relative_to(data_root.resolve())
     parts = rel.parts
-    if parts and parts[0] in {"common", "dx11"}:
+    if parts and parts[0] in {"common", "dx11", "nx"}:
         parts = parts[1:]
     return Path(*parts).as_posix()
 
 
 def dx11_g4tx_for_model(data_root: Path, model_rel: str) -> Path:
     return data_root / "dx11" / Path(model_rel).with_suffix(".g4tx")
+
+
+def nx_g4tx_for_model(data_root: Path, model_rel: str) -> Path:
+    return data_root / "nx" / Path(model_rel).with_suffix(".g4tx")
 
 
 def common_g4tx_for_model(data_root: Path, model_rel: str) -> Path:
@@ -461,6 +472,16 @@ class G4PortJointAlias(PropertyGroup):
     target_joint: StringProperty(name="Level-5 Joint", default="")
 
 
+class G4PortTextureReplacement(PropertyGroup):
+    texture_name: StringProperty(name="Texture", default="")
+    replacement_path: StringProperty(
+        name="Replacement",
+        subtype="FILE_PATH",
+        default="",
+        description="Leave empty to preserve this G4TX texture",
+    )
+
+
 class G4PortRecord(PropertyGroup):
     output_name: StringProperty(name="Output", default="c01000010_20")
     material_name: StringProperty(name="Material", default="c01000010_20M")
@@ -559,10 +580,12 @@ class G4PortSceneSettings(PropertyGroup):
         description="Optional JSON preset. Empty uses the settings inferred from the selected original model",
     )
     texture_mode: EnumProperty(name="Textures", items=TEXTURE_MODE_ITEMS, default="custom")
+    texture_platform: EnumProperty(name="Platform", items=TEXTURE_PLATFORM_ITEMS, default="auto")
     texture_source_dir: StringProperty(name="Texture Source Folder", subtype="DIR_PATH", default="")
+    texture_entries: CollectionProperty(type=G4PortTextureReplacement)
     generate_png_set_on_export: BoolProperty(
         name="Generate PNG Set On Export",
-        default=True,
+        default=False,
         description="Regenerate custom texture spritesheets automatically before exporting a custom G4TX",
     )
     use_source_uv_transforms: BoolProperty(
@@ -621,6 +644,11 @@ class G4PortSceneSettings(PropertyGroup):
 
     def texture_map(self) -> dict:
         result = {}
+        for item in self.texture_entries:
+            if not item.texture_name or not item.replacement_path:
+                continue
+            if self.replace_special_textures or not is_special_texture(item.texture_name):
+                result[item.texture_name] = bpy.path.basename(item.replacement_path)
         for item in split_csv(self.texture_replacements):
             if "=" in item:
                 key, value = item.split("=", 1)
@@ -638,6 +666,7 @@ class G4PortSceneSettings(PropertyGroup):
             "native_material_names": split_csv(self.native_material_names),
             "records": [record.to_config(self.use_source_uv_transforms) for record in self.records],
             "texture_replacements": self.texture_map(),
+            "texture_platform": self.texture_platform,
             "material_overrides": [],
             "joint_aliases": {
                 alias.source_group: alias.target_joint
@@ -659,6 +688,9 @@ def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
     target.native_material_names = join_csv(config.get("native_material_names", []))
     replacements = config.get("texture_replacements", {})
     target.texture_replacements = join_csv(f"{key}={value}" for key, value in replacements.items())
+    target.texture_platform = str(config.get("texture_platform", "auto"))
+    for entry in target.texture_entries:
+        entry.replacement_path = str(replacements.get(entry.texture_name, ""))
     target.generate_tangents = bool(config.get("generate_tangents", False))
     target.strict_skinning = bool(config.get("strict_skinning", False))
     uv_flip = config.get("uv_flip") or [False, True]
@@ -730,7 +762,7 @@ def model_rel_from_path(path: Path) -> str:
         except ValueError:
             pass
     parts = list(path.with_suffix("").parts)
-    for root_name in ("common", "dx11"):
+    for root_name in ("common", "dx11", "nx"):
         if root_name in parts:
             index = parts.index(root_name)
             return "/".join(parts[index + 1 :])
@@ -756,7 +788,11 @@ def original_template_signature(md: dict) -> str:
 
 
 def original_g4tx_path(data_root: Path, model_rel: str) -> Path | None:
-    for path in (dx11_g4tx_for_model(data_root, model_rel), common_g4tx_for_model(data_root, model_rel)):
+    for path in (
+        dx11_g4tx_for_model(data_root, model_rel),
+        nx_g4tx_for_model(data_root, model_rel),
+        common_g4tx_for_model(data_root, model_rel),
+    ):
         if path.is_file():
             return path
     return None
@@ -776,6 +812,10 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
     target.native_material_names = join_csv(md.get("material_names", []))
     target.texture_replacements = ""
     target.texture_names = join_csv(texture_names)
+    target.texture_entries.clear()
+    for texture_name in texture_names:
+        entry = target.texture_entries.add()
+        entry.texture_name = texture_name
     material_names = md.get("material_names", [])
     mesh_names = md.get("mesh_names", [])
     if target.template_signature == signature and len(target.records) == len(md.get("records", [])):
@@ -920,11 +960,40 @@ def prepare_custom_textures(props: G4PortSceneSettings, dae_path: Path) -> Path:
         if source.is_file():
             shutil.copy2(source, custom_dir / source.name)
     texture_source_dir = resolve_file(props.texture_source_dir)
+    for entry in props.texture_entries:
+        if not entry.replacement_path:
+            continue
+        source = Path(bpy.path.abspath(entry.replacement_path))
+        if source.is_file():
+            shutil.copy2(source, custom_dir / source.name)
     for rel_path in props.texture_map().values():
         source = texture_source_dir / rel_path
         if source.is_file():
             shutil.copy2(source, custom_dir / source.name)
     return custom_dir
+
+
+def export_python(prefs, needs_pillow: bool) -> str:
+    configured = bpy.path.abspath(getattr(prefs, "python_path", "") or default_python())
+    if not needs_pillow:
+        return configured
+    candidates = [configured, "/usr/bin/python3", "/opt/homebrew/bin/python3", "python3"]
+    for candidate in dict.fromkeys(candidates):
+        try:
+            completed = subprocess.run(
+                [candidate, "-c", "import PIL"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            continue
+        if completed.returncode == 0:
+            return candidate
+    raise RuntimeError(
+        "PNG texture replacement needs a Python installation with Pillow (PIL). "
+        "DDS and NXTCH replacements do not require Pillow."
+    )
 
 
 def auto_assign_record_texture_files(props: G4PortSceneSettings) -> int:
@@ -1405,7 +1474,10 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
         raise RuntimeError("Choose an original G4MD/G4PKM before generating texture PNGs.")
     port_log(log_path, f"Original model: {original_model}")
     port_log(log_path, f"Raw data root: {raw_root}")
-    entries = parse_g4tx_entries(dx11_g4tx_for_model(raw_root, props.model_rel))
+    g4tx_path = original_g4tx_path(raw_root, props.model_rel)
+    if g4tx_path is None:
+        raise RuntimeError(f"Original G4TX not found for {props.model_rel}")
+    entries = parse_g4tx_entries(g4tx_path)
     port_log(log_path, f"Original G4TX entries: {len(entries)}")
     output_dir.mkdir(parents=True, exist_ok=True)
     replacements = []
@@ -1463,6 +1535,10 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
                 save_png(path, entry["width"], entry["height"], pixels)
     props.texture_source_dir = str(output_dir)
     props.texture_replacements = join_csv(replacements)
+    generated = dict(item.split("=", 1) for item in replacements)
+    for entry in props.texture_entries:
+        if entry.texture_name in generated:
+            entry.replacement_path = str(output_dir / generated[entry.texture_name])
     port_log(log_path, f"Generate PNG set finished; replacements={len(replacements)}")
     return len(replacements)
 
@@ -1480,9 +1556,9 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     raw_root = infer_data_root(original_model)
     if raw_root is None:
         raise RuntimeError("The original model must be inside a data/common or data/dx11 filesystem tree.")
-    dx11_g4tx = dx11_g4tx_for_model(raw_root, props.model_rel)
-    if not dx11_g4tx.is_file():
-        raise RuntimeError(f"Original DX11 G4TX not found: {dx11_g4tx}")
+    source_g4tx = original_g4tx_path(raw_root, props.model_rel)
+    if source_g4tx is None:
+        raise RuntimeError(f"Original G4TX not found in DX11 or NX for {props.model_rel}")
 
     cache = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir())
     cache.mkdir(parents=True, exist_ok=True)
@@ -1501,24 +1577,21 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         reset_uv_tiles(props)
 
     if props.texture_mode == "custom":
-        auto_assign_record_texture_files(props)
-        if props.generate_png_set_on_export or not props.texture_map():
+        if props.generate_png_set_on_export:
             model_name = Path(props.model_rel).name or "model"
             generate_texture_png_set(context, package_root / "texture_sources" / model_name)
-        if not props.texture_map():
-            raise RuntimeError(
-                "Custom G4TX mode needs at least one texture replacement. "
-                "Assign a Texture File, use an image texture in the object's material, "
-                "or generate a Texture PNG Set."
-            )
 
     prepare_custom_textures(props, dae_path)
 
     config = generated_config_path(cache)
     config.write_text(json.dumps(props.to_config(), indent=2), encoding="utf-8")
 
+    needs_pillow = props.texture_mode == "custom" and any(
+        Path(path).suffix.lower() not in {".dds", ".nxtch"}
+        for path in props.texture_map().values()
+    )
     command = [
-        bpy.path.abspath(getattr(prefs, "python_path", "") or default_python()),
+        export_python(prefs, needs_pillow),
         str(resolve_port_script(prefs)),
         str(dae_path),
         "--raw-root",
@@ -1981,8 +2054,15 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
     )
     if props.show_textures:
         box = layout.box()
+        box.prop(props, "texture_platform")
         box.prop(props, "texture_source_dir")
-        box.prop(props, "texture_replacements")
+        if props.texture_entries:
+            for entry in props.texture_entries:
+                row = box.row(align=True)
+                row.label(text=entry.texture_name, icon="TEXTURE")
+                row.prop(entry, "replacement_path", text="")
+        else:
+            box.label(text="Load an original model to list its G4TX textures", icon="INFO")
         box.prop(props, "generate_png_set_on_export")
         box.prop(props, "use_source_uv_transforms")
         box.prop(props, "auto_pack_source_uvs")
@@ -2039,6 +2119,7 @@ if IS_STANDALONE_ADDON:
 classes.extend([
     G4PortObjectSettings,
     G4PortJointAlias,
+    G4PortTextureReplacement,
     G4PortRecord,
     G4PortSceneSettings,
     LEVEL5_G4PORT_UL_records,
