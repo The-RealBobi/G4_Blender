@@ -23,12 +23,14 @@ try:
     from .g4mt_motion import decode_motion, simplify_motion_samples
     from .g4cm_camera import decode_camera, parse_g4cm
     from .g4_event import event_light_parameters, load_event_actor_models, load_event_actor_points
+    from .g4_p3lip import read_p3lip
 except ImportError:
     from g4pk_extract_g4mt import select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
     from g4cm_camera import decode_camera, parse_g4cm
     from g4_event import event_light_parameters, load_event_actor_models, load_event_actor_points
+    from g4_p3lip import read_p3lip
 
 
 ADDON_ID = __name__
@@ -1261,7 +1263,7 @@ def resolve_event_actor_models(directory: Path, prefs) -> dict[str, str]:
     event_name = directory.name
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
         base = data_root / "common" / "event_cfg" / "evt" / f"{event_name}.cfg.bin"
-        for path in (base.with_suffix(base.suffix + ".json"), base.with_suffix(base.suffix + ".xml")):
+        for path in (base, base.with_suffix(base.suffix + ".json"), base.with_suffix(base.suffix + ".xml")):
             if not path.is_file():
                 continue
             try:
@@ -1277,7 +1279,7 @@ def resolve_event_actor_points(directory: Path, prefs) -> dict[str, str]:
     event_name = directory.name
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
         base = data_root / "common" / "event_cfg" / "evt" / f"{event_name}.cfg.bin"
-        for path in (base.with_suffix(base.suffix + ".json"), base.with_suffix(base.suffix + ".xml")):
+        for path in (base, base.with_suffix(base.suffix + ".json"), base.with_suffix(base.suffix + ".xml")):
             if not path.is_file():
                 continue
             try:
@@ -1304,14 +1306,20 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
     family = family_match.group(1).lower()
     results = []
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
-        effect_root = data_root / "common" / "effect" / "event" / family
+        family_root = data_root / "common" / "effect" / "event" / family
+        event_key = directory.name.lower().replace("_", "")
+        exact_root = family_root / event_key
+        effect_root = exact_root if exact_root.is_dir() else family_root
         if not effect_root.is_dir():
             continue
-        for asset_directory in sorted(path for path in effect_root.iterdir() if path.is_dir()):
-            model = next(asset_directory.glob("*.g4pkm"), None)
+        model_paths = sorted(effect_root.rglob("*.g4pkm"))
+        for model in model_paths:
+            asset_directory = model.parent
             particle = next(asset_directory.glob("*.ptlb"), None)
-            if model is None and particle is None:
-                continue
+            cut = None
+            suffix = re.search(r"(\d{5})$", model.stem)
+            if exact_root.is_dir() and suffix:
+                cut = f"c{int(suffix.group(1)) // 10:04d}"
             shader_names = set()
             for source in (particle, next(asset_directory.glob("*.objbin"), None)):
                 if source is None:
@@ -1326,10 +1334,131 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
                 "model": str(model) if model else "",
                 "particle": str(particle) if particle else "",
                 "shaders": sorted(shader_names),
+                "cut": cut,
             })
         if results:
             break
     return results
+
+
+def discover_event_p3lip(directory: Path, prefs) -> list[Path]:
+    for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
+        for language in ("ja", "en"):
+            sound_root = data_root / "common" / "sound" / language
+            paths = sorted(sound_root.glob(f"{directory.name}_*.p3lip"))
+            if paths:
+                return paths
+    return []
+
+
+def import_event_p3lip_controllers(
+    paths: list[Path], cut_starts: dict[str, int]
+) -> list[object]:
+    if not paths:
+        return []
+    collection = bpy.data.collections.new("Level-5 P3 Lip Sync")
+    bpy.context.scene.collection.children.link(collection)
+    cursors: dict[str, float] = {}
+    controllers = []
+    for path in paths:
+        suffix = path.stem.rsplit("_", 2)
+        cut = f"c{int(suffix[-2]):04d}" if len(suffix) >= 3 and suffix[-2].isdigit() else ""
+        start = cursors.get(cut, float(cut_starts.get(cut, 1)))
+        controller = bpy.data.objects.new(path.stem, None)
+        collection.objects.link(controller)
+        controller.empty_display_type = "CIRCLE"
+        controller.empty_display_size = 0.08
+        controller.hide_render = True
+        action, _, duration = create_p3lip_action(controller, path, start)
+        controller.animation_data.action = action
+        controller["g4_p3lip_cut"] = cut
+        cursors[cut] = start + duration * (
+            bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
+        ) + 1.0
+        controllers.append(controller)
+    return controllers
+
+
+def decode_event_effect_motions(directory: Path, prefs, temporary_directory: Path) -> dict[str, dict]:
+    skeleton = None
+    for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
+        candidate = data_root / "common" / "event" / "ev_point" / "point_eff" / "point_eff.g4sk"
+        if candidate.is_file():
+            skeleton = candidate
+            break
+    if skeleton is None:
+        return {}
+    motions = {}
+    prefix = f"{directory.name}_point_eff_"
+    for package in sorted(directory.glob(f"{prefix}*.g4pk")):
+        cut = event_cut_name(package)
+        if cut is None:
+            continue
+        motion, _ = decode_event_package(package, skeleton, temporary_directory)
+        motions[cut] = motion
+    return motions
+
+
+def import_event_effect_models(
+    candidates: list[dict],
+    motions: dict[str, dict],
+    cut_starts: dict[str, int],
+) -> list[object]:
+    imported_roots = []
+    by_cut = defaultdict(list)
+    for candidate in candidates:
+        if candidate.get("cut"):
+            by_cut[candidate["cut"]].append(candidate)
+    for cut, cut_candidates in sorted(by_cut.items(), key=lambda item: cut_sort_key(item[0])):
+        if cut not in cut_starts:
+            continue
+        following = [frame for frame in cut_starts.values() if frame > cut_starts[cut]]
+        end_frame = min(following) if following else cut_starts[cut] + 1
+        for effect_index, candidate in enumerate(cut_candidates, 1):
+            model_path = Path(candidate["model"])
+            before = set(bpy.data.objects)
+            result = bpy.ops.import_scene.level5_g4(
+                filepath=str(model_path),
+                create_report_text=False,
+                import_character_parts=False,
+            )
+            if "FINISHED" not in result:
+                continue
+            imported = set(bpy.data.objects) - before
+            root = bpy.data.objects.new(f"{candidate['name']} [{cut}]", None)
+            bpy.context.scene.collection.objects.link(root)
+            for obj in imported:
+                if obj.parent not in imported:
+                    world = obj.matrix_world.copy()
+                    obj.parent = root
+                    obj.matrix_world = world
+            root["g4_event_effect_model"] = str(model_path)
+            root["g4_event_effect_cut"] = cut
+            root["g4_event_effect_particle"] = candidate.get("particle", "")
+            root["g4_event_effect_shaders"] = json.dumps(candidate.get("shaders") or [])
+            motion = motions.get(cut)
+            target = f"evp_eff{effect_index:02d}"
+            if motion is not None:
+                action = bpy.data.actions.new(f"{candidate['name']}_{cut}_Placement")
+                if append_event_placement(action, root, motion, target):
+                    track = root.animation_data_create().nla_tracks.new()
+                    track.name = "Event Effect Placement"
+                    duration = max(1, end_frame - cut_starts[cut])
+                    add_nla_strip(root, track, action, cut, cut_starts[cut], duration)
+            root.hide_viewport = True
+            root.hide_render = True
+            root.keyframe_insert("hide_viewport", frame=max(1, cut_starts[cut] - 1))
+            root.keyframe_insert("hide_render", frame=max(1, cut_starts[cut] - 1))
+            root.hide_viewport = False
+            root.hide_render = False
+            root.keyframe_insert("hide_viewport", frame=cut_starts[cut])
+            root.keyframe_insert("hide_render", frame=cut_starts[cut])
+            root.hide_viewport = True
+            root.hide_render = True
+            root.keyframe_insert("hide_viewport", frame=end_frame)
+            root.keyframe_insert("hide_render", frame=end_frame)
+            imported_roots.append(root)
+    return imported_roots
 
 
 def decode_event_point_motions(
@@ -1409,6 +1538,79 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
             for curve in animation.action.fcurves:
                 for point in curve.keyframe_points:
                     point.interpolation = "CONSTANT"
+
+    animated_materials = 0
+    for material in bpy.data.materials:
+        if material.node_tree is None or not material.get("g4_level5_toon"):
+            continue
+        highlight_node = material.node_tree.nodes.get("G4 Highlight")
+        underlight_node = material.node_tree.nodes.get("G4 Under Light")
+        primary_shadow = material.node_tree.nodes.get("G4 Shadow Color 0")
+        secondary_shadow = material.node_tree.nodes.get("G4 Shadow Color 1")
+        shadow_blend = material.node_tree.nodes.get("G4 Dual Toon Ramp")
+        under_rim_width = material.node_tree.nodes.get("G4 Under Rim Width")
+        under_rim_strength = material.node_tree.nodes.get("G4 Under Rim Strength")
+        keyed_material = False
+        for _, frame, parameters in keyed:
+            for node, parameter_name in (
+                (highlight_node, "charaHighLightColor"),
+                (underlight_node, "charaUnderRimColor"),
+            ):
+                values = parameters.get(parameter_name)
+                if node is None or not values or len(values) < 3:
+                    continue
+                intensity = values[3] if len(values) > 3 else 1.0
+                node.inputs[2].default_value = tuple(
+                    max(0.0, value * intensity) for value in values[:3]
+                ) + (1.0,)
+                node.inputs[2].keyframe_insert("default_value", frame=frame)
+                keyed_material = True
+            high_threshold = parameters.get("charaHighThreshold")
+            if high_threshold and primary_shadow is not None and secondary_shadow is not None:
+                # The game expresses this threshold around 1.0; Blender's ramps
+                # operate in 0..1, so mirror it around 2.0.
+                position = max(0.02, min(0.98, 2.0 - high_threshold[0]))
+                primary_shadow.color_ramp.elements[-1].position = position
+                secondary_shadow.color_ramp.elements[-1].position = min(0.98, position + 0.14)
+                primary_shadow.color_ramp.elements[-1].keyframe_insert("position", frame=frame)
+                secondary_shadow.color_ramp.elements[-1].keyframe_insert("position", frame=frame)
+                keyed_material = True
+            for node, parameter_name in (
+                (primary_shadow, "charaShadowRate1"),
+                (secondary_shadow, "charaShadowRate2"),
+            ):
+                values = parameters.get(parameter_name)
+                if node is None or not values:
+                    continue
+                shade = max(0.0, min(1.0, values[0]))
+                node.color_ramp.elements[0].color = (shade, shade, shade, 1.0)
+                node.color_ramp.elements[0].keyframe_insert("color", frame=frame)
+                keyed_material = True
+            shadow_blend_rate = parameters.get("charaShadowBlendRate")
+            if shadow_blend is not None and shadow_blend_rate:
+                rate = max(0.0, shadow_blend_rate[0])
+                shadow_blend.inputs[0].default_value = rate / (1.0 + rate)
+                shadow_blend.inputs[0].keyframe_insert("default_value", frame=frame)
+                keyed_material = True
+            under_rim_rate = parameters.get("charaUnderRimRate")
+            if under_rim_rate:
+                rate = max(0.0, under_rim_rate[0])
+                if under_rim_width is not None:
+                    under_rim_width.inputs[1].default_value = max(0.25, rate * 2.0)
+                    under_rim_width.inputs[1].keyframe_insert("default_value", frame=frame)
+                    keyed_material = True
+                if under_rim_strength is not None:
+                    under_rim_strength.inputs[1].default_value = min(1.0, rate * 0.33)
+                    under_rim_strength.inputs[1].keyframe_insert("default_value", frame=frame)
+                    keyed_material = True
+        if keyed_material:
+            animated_materials += 1
+            animation = material.node_tree.animation_data
+            if animation and animation.action:
+                for curve in animation.action.fcurves:
+                    for point in curve.keyframe_points:
+                        point.interpolation = "CONSTANT"
+    scene["g4_event_animated_materials"] = animated_materials
     scene["g4_event_light_parameters"] = json.dumps(
         {cut: parameters for cut, _, parameters in keyed}, sort_keys=True
     )
@@ -1575,6 +1777,7 @@ def import_event_actor(
     head_model: str = "",
     body_model: str = "",
     shoes_model: str = "",
+    manifest_model: str = "",
 ) -> tuple[object, int, list[tuple[str, int]]]:
     model_path = None
     if head_model:
@@ -1584,8 +1787,25 @@ def import_event_actor(
         elif re.fullmatch(r"[A-Za-z]{1,3}\d{4,10}", head_model):
             alias_path = packages[0].with_name(f"{head_model}_s00_p00_c0000.g4pk")
             model_path = resolve_model_path(alias_path, getattr(prefs, "raw_data_root", ""))
+    generic_actor = bool(re.fullmatch(r"c0{2,}\d{3,5}(?:_s\d+)?", actor, re.IGNORECASE))
+
+    def resolve_manifest() -> Path | None:
+        if not manifest_model:
+            return None
+        configured = Path(bpy.path.abspath(manifest_model))
+        if configured.is_file():
+            return configured
+        if re.fullmatch(r"[A-Za-z]{1,3}\d{4,10}", manifest_model):
+            alias_path = packages[0].with_name(f"{manifest_model}_s00_p00_c0000.g4pk")
+            return resolve_model_path(alias_path, getattr(prefs, "raw_data_root", ""))
+        return None
+
+    if model_path is None and generic_actor:
+        model_path = resolve_manifest()
     if model_path is None:
         model_path = resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
+    if model_path is None:
+        model_path = resolve_manifest()
     if model_path is None:
         raise RuntimeError(f"Could not resolve model {actor} for the event")
     skeleton_path = resolve_skeleton_path(model_path)
@@ -1943,6 +2163,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         actor_models = resolve_event_actor_models(directory, prefs)
         actor_points = resolve_event_actor_points(directory, prefs)
         effect_candidates = discover_event_effects(directory, prefs)
+        p3lip_paths = discover_event_p3lip(directory, prefs)
         actors = []
         skipped_actors = {}
         cut_frames = {}
@@ -1955,8 +2176,8 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                     temporary_directory,
                     camera_paths[0] if camera_paths else None,
                 )
-                import_event_character_lighting(directory, cut_starts)
                 point_motions = decode_event_point_motions(directory, prefs, temporary_directory)
+                effect_motions = decode_event_effect_motions(directory, prefs, temporary_directory)
                 for actor, actor_packages in sorted(packages.items()):
                     actor_parts = character_parts.get(actor) or {}
                     actor_base = event_actor_base_id(actor)
@@ -1974,9 +2195,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             character_part_stem="",
                             point_target=actor_points.get(actor, actor_points.get(actor_base, "")),
                             point_motions=point_motions,
-                            head_model=actor_parts.get("head", "") or actor_models.get(actor, actor_models.get(actor_base, "")),
+                            head_model=actor_parts.get("head", ""),
                             body_model=actor_parts.get("body", ""),
                             shoes_model=actor_parts.get("shoes", ""),
+                            manifest_model=actor_models.get(actor, actor_models.get(actor_base, "")),
                         )
                     except Exception as exc:
                         skipped_actors[actor] = str(exc)
@@ -1985,6 +2207,9 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                         continue
                     actors.append(armature)
                     cut_frames.update(actor_cut_frames)
+                import_event_character_lighting(directory, cut_starts)
+                effect_roots = import_event_effect_models(effect_candidates, effect_motions, cut_starts)
+                p3lip_controllers = import_event_p3lip_controllers(p3lip_paths, cut_starts)
                 if camera_paths:
                     camera_object, _ = import_event_camera(
                         camera_paths[0],
@@ -2006,6 +2231,8 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             scene.frame_set(1)
             scene["g4_event_skipped_actors"] = json.dumps(skipped_actors, sort_keys=True)
             scene["g4_event_effect_candidates"] = json.dumps(effect_candidates, sort_keys=True)
+            scene["g4_event_effect_count"] = len(effect_roots)
+            scene["g4_event_p3lip_count"] = len(p3lip_controllers)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -2017,6 +2244,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             f"{sum(len(paths) for paths in packages.values())} animation cuts, "
             f"{camera_clip_count} camera cuts"
         )
+        if effect_roots:
+            message += f", {len(effect_roots)} effect meshes"
+        if p3lip_controllers:
+            message += f", {len(p3lip_controllers)} P3LIP tracks"
         if skipped_actors:
             message += f"; skipped {len(skipped_actors)} unresolved actors"
         self.report({"WARNING" if skipped_actors else "INFO"}, message)
@@ -2088,6 +2319,80 @@ class IMPORT_OT_level5_g4cm(Operator, ImportHelper):
         return {"FINISHED"}
 
 
+def p3lip_weight(packed_viseme: int) -> float:
+    """Decode the normalized articulation envelope stored above the viseme byte."""
+    envelope = (packed_viseme >> 16) & 0xFFFF
+    neutral = 0x2CCC
+    maximum = 0x6666
+    return max(0.0, min(1.0, (envelope - neutral) / (maximum - neutral)))
+
+
+def create_p3lip_action(target, path: Path, frame_start: float = 1.0):
+    sequence = read_p3lip(path)
+    target["g4_lip_viseme"] = 0
+    target["g4_lip_weight"] = 0.0
+    target["g4_p3lip_source"] = str(path)
+    target.animation_data_create()
+    previous_action = target.animation_data.action
+    action = bpy.data.actions.new(f"{path.stem} Lip Sync")
+    action.use_fake_user = True
+    action["g4_p3lip_source"] = str(path)
+    action["g4_p3lip_duration"] = sequence.duration
+    target.animation_data.action = action
+    fps = bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
+    keyed = 0
+    for key in sequence.keys:
+        viseme = key.packed_viseme & 0xFF
+        if viseme in {0xFE, 0xFF}:
+            viseme = 0
+            weight = 0.0
+        else:
+            weight = p3lip_weight(key.packed_viseme)
+        frame = frame_start + key.time * fps
+        target["g4_lip_viseme"] = viseme
+        target["g4_lip_weight"] = weight
+        target.keyframe_insert('["g4_lip_viseme"]', frame=frame, group="P3 Lip Sync")
+        target.keyframe_insert('["g4_lip_weight"]', frame=frame, group="P3 Lip Sync")
+        keyed += 1
+    for curve in action.fcurves:
+        for point in curve.keyframe_points:
+            point.interpolation = "CONSTANT" if "viseme" in curve.data_path else "LINEAR"
+    target.animation_data.action = previous_action
+    return action, keyed, sequence.duration
+
+
+class IMPORT_OT_level5_p3lip(Operator, ImportHelper):
+    bl_idname = "import_scene.level5_p3lip"
+    bl_label = "Import Level-5 P3 Lip Sync"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".p3lip"
+    filter_glob: StringProperty(default="*.p3lip", options={"HIDDEN"})
+
+    def execute(self, context):
+        path = Path(self.filepath)
+        target = context.active_object
+        if target is None:
+            target = bpy.data.objects.new(f"{path.stem} Lip Sync", None)
+            context.collection.objects.link(target)
+            target.empty_display_type = "CIRCLE"
+            target.empty_display_size = 0.25
+        try:
+            action, keyed, duration = create_p3lip_action(
+                target, path, float(context.scene.frame_current)
+            )
+        except (OSError, ValueError, struct.error) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        target.animation_data.action = action
+        context.scene.frame_end = max(
+            context.scene.frame_end,
+            int(context.scene.frame_current + duration * context.scene.render.fps),
+        )
+        self.report({"INFO"}, f"Imported {keyed} P3LIP keys on {target.name}")
+        return {"FINISHED"}
+
+
 class EXPORT_OT_level5_g4_fbx(Operator, ExportHelper):
     bl_idname = "export_scene.level5_g4_fbx"
     bl_label = "Export Level-5 G4 Scene"
@@ -2152,6 +2457,7 @@ class EXPORT_OT_level5_g4_fbx(Operator, ExportHelper):
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_level5_g4mt.bl_idname, text="Level-5 G4 Animation (.g4mt/.g4pk)")
     self.layout.operator(IMPORT_OT_level5_g4cm.bl_idname, text="Level-5 G4 Camera (.g4cm)")
+    self.layout.operator(IMPORT_OT_level5_p3lip.bl_idname, text="Level-5 P3 Lip Sync (.p3lip)")
     self.layout.operator(IMPORT_OT_level5_g4_event_folder.bl_idname, text="Level-5 G4 Event Folder")
 
 
@@ -2166,6 +2472,7 @@ classes = [
     IMPORT_OT_level5_g4mt_pick_shoes,
     IMPORT_OT_level5_g4mt,
     IMPORT_OT_level5_g4cm,
+    IMPORT_OT_level5_p3lip,
     IMPORT_OT_level5_g4_event_parts,
     IMPORT_OT_level5_g4_event_folder,
     EXPORT_OT_level5_g4_fbx,
@@ -2196,6 +2503,18 @@ if hasattr(bpy.types, "FileHandler"):
             return context.area is not None and context.area.type in {"VIEW_3D", "OUTLINER", "FILE_BROWSER"}
 
     classes.append(G4CM_FH_import)
+
+    class P3LIP_FH_import(bpy.types.FileHandler):
+        bl_idname = "P3LIP_FH_import"
+        bl_label = "Level-5 P3 Lip Sync"
+        bl_import_operator = IMPORT_OT_level5_p3lip.bl_idname
+        bl_file_extensions = ".p3lip"
+
+        @classmethod
+        def poll_drop(cls, context):
+            return context.area is not None and context.area.type in {"VIEW_3D", "OUTLINER", "FILE_BROWSER"}
+
+    classes.append(P3LIP_FH_import)
 
 
 def register():

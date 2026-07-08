@@ -16,7 +16,7 @@ ACTOR_INSTANCE_RE = ACTOR_RE
 MODEL_RE = re.compile(r"^[a-z]{1,3}\d{4,10}$", re.IGNORECASE)
 
 
-def raw_cfg_entries(path: Path) -> list[list[object]]:
+def raw_cfg_records(path: Path) -> list[tuple[int, list[object]]]:
     data = path.read_bytes()
     if len(data) < 16:
         raise ValueError(f"truncated cfg.bin: {path}")
@@ -28,7 +28,7 @@ def raw_cfg_entries(path: Path) -> list[list[object]]:
     for _ in range(entry_count):
         if pos + 5 > len(data):
             raise ValueError(f"truncated cfg.bin entry: {path}")
-        _, value_count = struct.unpack_from("<IB", data, pos)
+        entry_hash, value_count = struct.unpack_from("<IB", data, pos)
         pos += 5
         type_bytes = (value_count + 3) // 4
         packed_types = data[pos:pos + type_bytes]
@@ -36,10 +36,10 @@ def raw_cfg_entries(path: Path) -> list[list[object]]:
         values = struct.unpack_from(f"<{value_count}i", data, pos) if value_count else ()
         pos += value_count * 4
         types = [packed_types[index // 4] >> ((index % 4) * 2) & 3 for index in range(value_count)]
-        encoded.append((types, values))
+        encoded.append((entry_hash, types, values))
 
     entries = []
-    for types, values in encoded:
+    for entry_hash, types, values in encoded:
         decoded = []
         for value_type, value in zip(types, values):
             if value_type == 0:
@@ -55,8 +55,29 @@ def raw_cfg_entries(path: Path) -> list[list[object]]:
                 decoded.append(struct.unpack("<f", struct.pack("<i", value))[0])
             else:
                 decoded.append(value)
-        entries.append(decoded)
+        entries.append((entry_hash, decoded))
     return entries
+
+
+def raw_cfg_entries(path: Path) -> list[list[object]]:
+    return [values for _, values in raw_cfg_records(path)]
+
+
+def event_command_entries_from_binary(path: Path) -> list[dict]:
+    names = {
+        0x724243F8: "EVENT_COMMAND_HEADER",
+        0x2F2A5B39: "EVENT_COMMAND_ARGS",
+    }
+    return [
+        {
+            "Name": names.get(entry_hash, f"0x{entry_hash:08x}"),
+            "Values": [
+                {"Index": index, "Value": value}
+                for index, value in enumerate(values)
+            ],
+        }
+        for entry_hash, values in raw_cfg_records(path)
+    ]
 
 
 def event_light_parameters(path: Path) -> dict[str, list[float]]:
@@ -170,6 +191,8 @@ def load_event_actor_models(path: Path) -> dict[str, str]:
         return actor_models_from_json(path)
     if path.suffix.lower() == ".xml":
         return actor_models_from_xml(path)
+    if path.name.lower().endswith(".cfg.bin"):
+        return actor_models_from_entries(event_command_entries_from_binary(path))
     return {}
 
 
@@ -178,4 +201,6 @@ def load_event_actor_points(path: Path) -> dict[str, str]:
         return actor_points_from_json(path)
     if path.suffix.lower() == ".xml":
         return actor_points_from_entries(entries_from_xml(path))
+    if path.name.lower().endswith(".cfg.bin"):
+        return actor_points_from_entries(event_command_entries_from_binary(path))
     return {}

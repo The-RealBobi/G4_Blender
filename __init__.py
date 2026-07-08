@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 13, 0),
+    "version": (0, 14, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -548,13 +548,18 @@ def import_native_g4_mesh(native_path: Path) -> set[str]:
                 bone.parent = edit_bones[parent]
         bpy.ops.object.mode_set(mode="OBJECT")
 
+    source_model = str(payload.get("source") or native_path)
     materials: dict[str, bpy.types.Material] = {}
     for material_name in payload.get("materials", {}):
         existing = bpy.data.materials.get(material_name)
-        if existing is not None and existing.users == 0:
+        if existing is not None and existing.get("g4_source_model") != source_model:
+            existing = None
+        elif existing is not None and existing.users == 0:
             bpy.data.materials.remove(existing)
             existing = None
-        materials[material_name] = existing or bpy.data.materials.new(material_name)
+        material = existing or bpy.data.materials.new(material_name)
+        material["g4_source_model"] = source_model
+        materials[material_name] = material
 
     for mesh_payload in payload.get("meshes", []):
         name = mesh_payload.get("name") or "G4 Mesh"
@@ -642,6 +647,10 @@ def material_image_paths(material) -> set[str]:
 
 
 def materials_are_compatible(left, right) -> bool:
+    left_source = left.get("g4_source_model")
+    right_source = right.get("g4_source_model")
+    if left_source and right_source and left_source != right_source:
+        return False
     left_paths = material_image_paths(left)
     right_paths = material_image_paths(right)
     return not left_paths or not right_paths or bool(left_paths & right_paths)
@@ -976,12 +985,16 @@ def material_uses_image(material, path: Path) -> bool:
 
 
 def find_material(name: str, diffuse_path: Path | None = None):
-    material = bpy.data.materials.get(name)
-    if material is not None:
-        return material
-    for material in bpy.data.materials:
-        if material.name == name or material.name.startswith(f"{name}."):
-            return material
+    named = [
+        material for material in bpy.data.materials
+        if material.name == name or material.name.startswith(f"{name}.")
+    ]
+    if diffuse_path is not None:
+        for material in reversed(named):
+            if material_uses_image(material, diffuse_path):
+                return material
+    if named:
+        return named[-1]
     if diffuse_path is not None:
         for material in bpy.data.materials:
             if material_uses_image(material, diffuse_path):
@@ -1542,6 +1555,7 @@ def apply_level5_toon_shader(
             contour_mask.operation = "MULTIPLY"
             contour_mask.location = (390, -680)
             contour_strength = nodes.new("ShaderNodeMath")
+            contour_strength.name = "G4 Under Rim Strength"
             contour_strength.operation = "MULTIPLY"
             contour_strength.inputs[1].default_value = 0.48 if line_informative else 0.12
             contour_strength.location = (570, -680)
@@ -1567,49 +1581,6 @@ def apply_level5_toon_shader(
             links.new(line_weight.outputs[0], line_composite.inputs[0])
             links.new(contour_shadow.outputs["Color"], line_composite.inputs[1])
             color_output = line_composite.outputs["Color"]
-
-    outline_parameters = nodes.new("ShaderNodeVertexColor")
-    outline_parameters.name = "G4 Outline Parameters"
-    outline_parameters.layer_name = "G4 Outline Parameters"
-    outline_parameters.location = (180, -800)
-    outline_channels = nodes.new("ShaderNodeSeparateColor")
-    outline_channels.name = "G4 Outline Parameter Channels"
-    outline_channels.location = (360, -800)
-    authored_center = nodes.new("ShaderNodeMath")
-    authored_center.name = "G4 Authored Detail Center"
-    authored_center.operation = "SUBTRACT"
-    authored_center.inputs[1].default_value = 0.5
-    authored_center.location = (540, -800)
-    authored_distance = nodes.new("ShaderNodeMath")
-    authored_distance.operation = "ABSOLUTE"
-    authored_distance.location = (700, -800)
-    authored_band = nodes.new("ShaderNodeMath")
-    authored_band.name = "G4 Authored Detail Width"
-    authored_band.operation = "LESS_THAN"
-    authored_band.inputs[1].default_value = 0.012
-    authored_band.location = (860, -800)
-    authored_strength = nodes.new("ShaderNodeValue")
-    authored_strength.name = "G4 Authored Detail Strength"
-    authored_strength.outputs[0].default_value = (
-        1.0 if getattr(addon_preferences(), "outline_mode", "SIMPLE") == "HULL" else 0.0
-    )
-    authored_strength.location = (860, -900)
-    authored_mask = nodes.new("ShaderNodeMath")
-    authored_mask.operation = "MULTIPLY"
-    authored_mask.location = (1020, -800)
-    authored_composite = nodes.new("ShaderNodeMixRGB")
-    authored_composite.name = "G4 Authored Outline Detail"
-    authored_composite.inputs[2].default_value = (0.025, 0.012, 0.018, 1.0)
-    authored_composite.location = (1040, 320)
-    links.new(outline_parameters.outputs["Color"], outline_channels.inputs["Color"])
-    links.new(outline_channels.outputs["Red"], authored_center.inputs[0])
-    links.new(authored_center.outputs[0], authored_distance.inputs[0])
-    links.new(authored_distance.outputs[0], authored_band.inputs[0])
-    links.new(authored_band.outputs[0], authored_mask.inputs[0])
-    links.new(authored_strength.outputs[0], authored_mask.inputs[1])
-    links.new(authored_mask.outputs[0], authored_composite.inputs[0])
-    links.new(color_output, authored_composite.inputs[1])
-    color_output = authored_composite.outputs["Color"]
 
     specular_mask_path = first_variant_path(variants, "specular_mask")
     specular_path = first_variant_path(variants, "specular")
@@ -1994,6 +1965,123 @@ def apply_auxiliary_textures_to_imported_materials(
             apply_level5_toon_shader(material, base_path, variants, debug)
 
 
+CHARACTER_PARAMETER_SOCKETS = (
+    ("Saturation", "g4_saturation", 1.10, 0.0, 2.0),
+    ("Brightness", "g4_brightness", 1.04, 0.0, 2.0),
+    ("Light Floor", "g4_light_floor", 0.88, 0.0, 1.0),
+    ("Shadow Floor", "g4_shadow_floor", 0.12, 0.0, 1.0),
+    ("Normal Strength", "g4_normal_strength", 1.0, 0.0, 2.0),
+    ("Specular Strength", "g4_specular_strength", 0.22, 0.0, 2.0),
+    ("Wetness", "g4_wetness", 0.0, 0.0, 1.0),
+)
+
+
+def character_parameter_node_group():
+    name = "Level-5 Character Parameters"
+    group = bpy.data.node_groups.get(name)
+    if group is not None:
+        return group
+    group = bpy.data.node_groups.new(name, "GeometryNodeTree")
+    geometry_in = group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+    geometry_out = group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    sockets = []
+    for label, _, default, minimum, maximum in CHARACTER_PARAMETER_SOCKETS:
+        socket = group.interface.new_socket(name=label, in_out="INPUT", socket_type="NodeSocketFloat")
+        socket.default_value = default
+        socket.min_value = minimum
+        socket.max_value = maximum
+        sockets.append(socket)
+
+    input_node = group.nodes.new("NodeGroupInput")
+    input_node.location = (-520, 0)
+    output_node = group.nodes.new("NodeGroupOutput")
+    output_node.location = (420, 0)
+    geometry = input_node.outputs[geometry_in.identifier]
+    for index, ((label, attribute_name, _, _, _), socket) in enumerate(zip(CHARACTER_PARAMETER_SOCKETS, sockets)):
+        store = group.nodes.new("GeometryNodeStoreNamedAttribute")
+        store.data_type = "FLOAT"
+        store.domain = "POINT"
+        store.label = label
+        store.location = (-300 + index * 100, -index * 90)
+        store.inputs["Name"].default_value = attribute_name
+        group.links.new(geometry, store.inputs["Geometry"])
+        group.links.new(input_node.outputs[socket.identifier], store.inputs["Value"])
+        geometry = store.outputs["Geometry"]
+    group.links.new(geometry, output_node.inputs[geometry_out.identifier])
+    return group
+
+
+def character_shader_attribute(material, label: str, attribute_name: str):
+    nodes = material.node_tree.nodes
+    node_name = f"G4 Control {label}"
+    node = nodes.get(node_name) or nodes.new("ShaderNodeAttribute")
+    node.name = node_name
+    node.label = label
+    node.attribute_name = attribute_name
+    return node.outputs["Fac"]
+
+
+def connect_character_parameter_material(material) -> None:
+    if material.node_tree is None or not material.get("g4_level5_toon"):
+        return
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    targets = {
+        "Saturation": ("G4 Saturation", "Saturation"),
+        "Brightness": ("G4 Saturation", "Value"),
+        "Light Floor": ("G4 Toon Ambient", 1),
+        "Shadow Floor": ("G4 Toon Ambient", 2),
+        "Normal Strength": ("G4 Surface Normal", "Strength"),
+        "Specular Strength": ("G4 Specular Strength", 0),
+    }
+    for label, attribute_name, _, _, _ in CHARACTER_PARAMETER_SOCKETS:
+        source = character_shader_attribute(material, label, attribute_name)
+        if label == "Wetness":
+            wetness = nodes.get("G4 Wetness")
+            if wetness is not None:
+                for link in tuple(wetness.outputs[0].links):
+                    links.new(source, link.to_socket)
+            continue
+        target_spec = targets.get(label)
+        if target_spec is None:
+            continue
+        node = nodes.get(target_spec[0])
+        if node is None:
+            continue
+        socket = node.inputs.get(target_spec[1]) if isinstance(target_spec[1], str) else node.inputs[target_spec[1]]
+        links.new(source, socket)
+
+
+def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
+    group = character_parameter_node_group()
+    created = 0
+    input_sockets = {
+        item.name: item
+        for item in group.interface.items_tree
+        if getattr(item, "in_out", None) == "INPUT" and item.name != "Geometry"
+    }
+    for object_name in imported_names:
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or obj.type != "MESH" or not any(
+            slot.material is not None and slot.material.get("g4_level5_toon")
+            for slot in obj.material_slots
+        ):
+            continue
+        modifier = obj.modifiers.get("Level-5 Character Parameters")
+        if modifier is None:
+            modifier = obj.modifiers.new("Level-5 Character Parameters", "NODES")
+            created += 1
+        modifier.node_group = group
+        for label, _, default, _, _ in CHARACTER_PARAMETER_SOCKETS:
+            socket = input_sockets.get(label)
+            if socket is not None and socket.identifier not in modifier:
+                modifier[socket.identifier] = default
+        for slot in obj.material_slots:
+            if slot.material is not None:
+                connect_character_parameter_material(slot.material)
+    return created
+
+
 def configure_environment_cubemap(summary: dict, debug: list[str] | None = None) -> bool:
     candidates = [Path(path) for path in summary.get("textures", []) if texture_role(Path(path)) == "environment"]
     if not candidates:
@@ -2220,12 +2308,6 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
     }
     if mode is None:
         mode = getattr(addon_preferences(), "outline_mode", "SIMPLE")
-    for material in bpy.data.materials:
-        if material.node_tree is None:
-            continue
-        strength = material.node_tree.nodes.get("G4 Authored Detail Strength")
-        if strength is not None:
-            strength.outputs[0].default_value = 1.0 if mode == "HULL" else 0.0
     has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
     if not has_level5_lines:
         if mode == "OFF":
@@ -2410,6 +2492,9 @@ def import_g4_model(
         debug,
         apply_styling=apply_styling,
     )
+    if apply_styling:
+        modifier_count = configure_character_parameter_modifiers(imported_names)
+        debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
     if apply_styling:
         configure_character_color_management(debug)
         if outline_mode != "OFF":
@@ -2652,7 +2737,6 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
-
     def invoke(self, context, event):
         self.auto_character_parts = False
         return ImportHelper.invoke(self, context, event)

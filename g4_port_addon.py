@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 import shlex
@@ -787,6 +788,16 @@ def original_template_signature(md: dict) -> str:
     return json.dumps(rows, separators=(",", ":"))
 
 
+def record_default_joint(md: dict, source: dict) -> str:
+    flags = int(source.get("flags0", 0))
+    palette_length = flags & 0xFF if flags & 0x100 else 0
+    palette_offset = int(source.get("palette_or_list", 0))
+    palette = md.get("joint_palette_indices") or []
+    if palette_length > 0 and 0 <= palette_offset < len(palette):
+        return f"joint_{int(palette[palette_offset])}"
+    return "c_head_1_0"
+
+
 def original_g4tx_path(data_root: Path, model_rel: str) -> Path | None:
     for path in (
         dx11_g4tx_for_model(data_root, model_rel),
@@ -838,7 +849,7 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
         record.force_layout_material = True
         record.layout_index = layout_index
         record.material_index = material_index
-        record.rigid_joint = "c_head_1_0"
+        record.rigid_joint = record_default_joint(md, source)
         record.auto_palette = True
     target.active_record = 0
     target.template_signature = signature
@@ -1088,6 +1099,8 @@ def uv_to_pixel(
 ) -> tuple[int, int]:
     u, v = uv
     if obj_uv is not None:
+        u -= math.floor(u)
+        v -= math.floor(v)
         u = u * obj_uv.uv_scale_u + obj_uv.uv_offset_u
         v = v * obj_uv.uv_scale_v + obj_uv.uv_offset_v
     flip_x = record.uv_flip_x or props.global_uv_flip_x
@@ -1116,14 +1129,19 @@ def draw_object_uvs(
     if not mesh.uv_layers.active:
         return
     uv_data = mesh.uv_layers.active.data
+    if not uv_data:
+        return
     color = (0.02, 0.02, 0.02, 1.0)
     for polygon in mesh.polygons:
         loop_indices = list(polygon.loop_indices)
         if len(loop_indices) < 2:
             continue
+        valid_indices = [index for index in loop_indices if index < len(uv_data)]
+        if len(valid_indices) != len(loop_indices):
+            continue
         points = [
             uv_to_pixel(uv_data[index].uv, record, props, width, height, obj.level5_g4_port)
-            for index in loop_indices
+            for index in valid_indices
         ]
         for index, point in enumerate(points):
             draw_line(pixels, width, height, point, points[(index + 1) % len(points)], color)
@@ -1147,8 +1165,9 @@ def load_image_pixels(path: str) -> tuple[int, int, array] | None:
     if not source.is_file():
         return None
     image = bpy.data.images.load(str(source), check_existing=True)
-    image.pixels[0]
     width, height = image.size
+    if width <= 0 or height <= 0 or len(image.pixels) < int(width) * int(height) * 4:
+        return None
     pixels = array("f", [0.0]) * (int(width) * int(height) * 4)
     image.pixels.foreach_get(pixels)
     return int(width), int(height), pixels
@@ -2072,6 +2091,21 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
         row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
 
 
+def draw_texture_replacements(layout, props: G4PortSceneSettings) -> None:
+    box = layout.box()
+    box.label(text="G4TX Texture Replacements", icon="TEXTURE")
+    box.prop(props, "texture_platform")
+    if props.texture_entries:
+        for entry in props.texture_entries:
+            row = box.row(align=True)
+            row.label(text=entry.texture_name)
+            row.prop(entry, "replacement_path", text="")
+    else:
+        box.label(text="Load an original model to list its G4TX textures", icon="INFO")
+    box.label(text="Empty paths preserve the original texture", icon="CHECKMARK")
+    box.prop(props, "replace_special_textures")
+
+
 def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> None:
     row = layout.row(align=True)
     row.prop(
@@ -2084,6 +2118,8 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
         return
     box = layout.box()
     box.prop(props, "texture_mode")
+    if props.texture_mode == "custom":
+        draw_texture_replacements(layout, props)
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
     box.prop(props, "align_forward_to_y")

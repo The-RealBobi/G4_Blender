@@ -196,6 +196,12 @@ disables both outline paths.
 The source vertex `COLOR` channel used by the game's edge shaders is preserved
 as **G4 Outline Parameters** without an interchange-format conversion.
 
+Character meshes also receive a real **Level-5 Character Parameters** Geometry
+Nodes modifier. Saturation, brightness, light/shadow floor, normal strength,
+specular strength and wetness are exposed in the modifier and drive named
+attributes consumed by the Character material, so routine tuning does not
+require editing its shader graph.
+
 Character geometry now enters Blender through the add-on's native
 `level5-g4-native-mesh` payload. Positions, native normals, UVs, vertex `COLOR`,
 joint palettes and all decoded skin influences are constructed with Blender's
@@ -274,6 +280,42 @@ Level-5 export of the tested 2054-frame event, including meshes, was 108.8 MB.
 G4 channels whose first key occurs after the clip start hold that first value.
 This prevents invalid backward extrapolation that previously caused repeated
 180-degree bone rotations and extreme translation or scale values.
+
+`EventMap_fix_cXXXX.cfg.bin` files in the event's `_light` directory are
+applied at their matching cut marker. The importer animates the character sun
+direction and the Character material's highlight threshold, two shadow rates,
+shadow blend and under-rim controls with constant interpolation, matching the
+per-cut nature of the source configuration.
+
+P3LIP resources contain timed viseme IDs in the low byte and an articulation
+envelope in the upper word. Event import looks for the selected language under
+`common/sound`, creates one visible animation controller per voice line and
+places its `g4_lip_viseme` and `g4_lip_weight` channels at the matching cut.
+They remain separate from actor Actions because P3LIP itself does not identify
+the speaking actor. A single `.p3lip` can also be imported directly onto the
+active object from File > Import.
+
+Event effect G4PKM models are discovered in the matching
+`common/effect/event/<family>/<event>` tree, imported with their native
+textures, attached to `point_eff` placement animation and shown only during
+their source cut. The original particle and compiled shader references are
+preserved as custom properties. DX11 `.vfxo`, `.pfxo` and `.fxbin` files are
+compiled engine programs; Blender currently uses a portable textured material
+fallback rather than pretending those binaries can be translated losslessly.
+
+## Port Texture Replacement
+
+After choosing the original G4MD/G4PKM, the export settings list every entry
+inside its G4TX. Each row has an optional file path selector; an empty path
+preserves that entry byte-for-byte. Special line, occlusion and specular maps
+keep their blank/default generation behavior unless an explicit replacement is
+selected.
+
+Automatic atlas generation groups all source materials assigned to one target
+record and writes per-object UV transforms. Repeating source UVs are wrapped
+inside their original image before it is moved into an atlas cell, preventing
+neck, ear or trim islands with coordinates outside 0..1 from leaking into a
+neighbouring cell.
 
 ## Requirements
 

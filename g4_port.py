@@ -1329,7 +1329,12 @@ def source_uv_transform(mesh: Mesh, rule: RecordRule) -> tuple[tuple[float, floa
 def transformed_source_vertex(vertex: Vertex, scale: tuple[float, float], offset: tuple[float, float]) -> Vertex:
     if scale == (1.0, 1.0) and offset == (0.0, 0.0):
         return vertex
-    uv = (vertex.uv[0] * scale[0] + offset[0], vertex.uv[1] * scale[1] + offset[1])
+    # Source materials use repeating UVs (notably Tsubasa's neck/ear sheet has
+    # V coordinates above 1). Wrap inside the source image before moving that
+    # image into an atlas cell; otherwise repeated islands spill into a
+    # neighbouring, often empty, cell.
+    local_uv = tuple(value - math.floor(value) for value in vertex.uv)
+    uv = (local_uv[0] * scale[0] + offset[0], local_uv[1] * scale[1] + offset[1])
     return Vertex(vertex.position, vertex.normal, uv, vertex.influences, vertex.tangent, vertex.bitangent)
 
 
