@@ -68,7 +68,7 @@ def default_camera_decoder_script() -> str:
 
 def inferred_raw_data_root(path: Path) -> Path | None:
     for parent in path.parents:
-        if parent.name == "data" and parent.parent.name in {"raw", "readable"}:
+        if parent.name == "data" and (parent / "common").is_dir():
             return parent
     return None
 
@@ -80,8 +80,9 @@ def candidate_data_roots(g4mt_path: Path, configured_root: str) -> list[Path]:
     inferred = inferred_raw_data_root(g4mt_path)
     if inferred is not None:
         roots.append(inferred)
-        work_root = inferred.parent.parent
-        roots.extend((work_root / "raw" / "data", work_root / "readable" / "data"))
+        if inferred.parent.name in {"raw", "readable"}:
+            work_root = inferred.parent.parent
+            roots.extend((work_root / "raw" / "data", work_root / "readable" / "data"))
     return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
 
 
@@ -207,6 +208,19 @@ def resolve_model_path(g4mt_path: Path, configured_root: str) -> Path | None:
                     direct = model_root / identifier / f"{identifier}{extension}"
                     if direct.is_file():
                         return direct
+                # Ni no Kuni II and YK4 encode actor instances in the final
+                # one or two digits while keeping one monolithic base model.
+                # Restrict this aliasing to non-modular character archives so
+                # HQ/LQ character IDs in modular games are never conflated.
+                if model_root.name == "chr" and not any(
+                    (model_root / folder).is_dir() for folder in ("_face", "_uniform")
+                ):
+                    aliases = (f"{identifier[:-1]}0", f"{identifier[:-2]}00")
+                    for alias in dict.fromkeys(aliases):
+                        for extension in (".g4pkm", ".g4md"):
+                            candidate = model_root / alias / f"{alias}{extension}"
+                            if candidate.is_file():
+                                return candidate
                 for extension in (".g4pkm", ".g4md"):
                     matches = sorted(model_root.rglob(f"{identifier}{extension}"))
                     if matches:
@@ -1259,6 +1273,41 @@ def event_actor_base_id(actor: str) -> str:
     return re.sub(r"_s\d+$", "", actor, flags=re.IGNORECASE)
 
 
+def event_actor_slot(actor: str) -> str:
+    match = re.search(r"_(s\d+)$", actor, re.IGNORECASE)
+    return match.group(1).lower() if match else "s00"
+
+
+def model_lookup_row(model_path: Path) -> dict:
+    lookup_path = model_lookup_path()
+    relative = model_relative_path(model_path)
+    if lookup_path is None or relative is None:
+        return {}
+    try:
+        models = json.loads(lookup_path.read_text(encoding="utf-8")).get("models") or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return models.get(relative) or models.get(Path(relative).with_suffix(".objbin").as_posix()) or {}
+
+
+def compatible_generic_actor(actor_ids: list[str], head_model: str) -> str:
+    skeleton = ""
+    if head_model:
+        path = Path(bpy.path.abspath(head_model))
+        skeleton = str(model_lookup_row(path).get("g4sk_stem") or "").lower()
+    if skeleton:
+        match = next(
+            (actor for actor in actor_ids if event_actor_base_id(actor).lower() == skeleton),
+            None,
+        )
+        if match:
+            return match
+    return next(
+        (actor for actor in actor_ids if event_actor_base_id(actor).lower() == "c000101"),
+        actor_ids[0],
+    )
+
+
 def resolve_event_actor_models(directory: Path, prefs) -> dict[str, str]:
     event_name = directory.name
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
@@ -1405,6 +1454,7 @@ def import_event_effect_models(
     cut_starts: dict[str, int],
 ) -> list[object]:
     imported_roots = []
+    failed_models = []
     by_cut = defaultdict(list)
     for candidate in candidates:
         if candidate.get("cut"):
@@ -1417,11 +1467,17 @@ def import_event_effect_models(
         for effect_index, candidate in enumerate(cut_candidates, 1):
             model_path = Path(candidate["model"])
             before = set(bpy.data.objects)
-            result = bpy.ops.import_scene.level5_g4(
-                filepath=str(model_path),
-                create_report_text=False,
-                import_character_parts=False,
-            )
+            try:
+                result = bpy.ops.import_scene.level5_g4(
+                    filepath=str(model_path),
+                    create_report_text=False,
+                    import_character_parts=False,
+                )
+            except RuntimeError as exc:
+                for obj in set(bpy.data.objects) - before:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                failed_models.append({"model": str(model_path), "error": str(exc)})
+                continue
             if "FINISHED" not in result:
                 continue
             imported = set(bpy.data.objects) - before
@@ -1458,6 +1514,8 @@ def import_event_effect_models(
             root.keyframe_insert("hide_viewport", frame=end_frame)
             root.keyframe_insert("hide_render", frame=end_frame)
             imported_roots.append(root)
+    if failed_models:
+        bpy.context.scene["g4_event_effect_failures"] = json.dumps(failed_models)
     return imported_roots
 
 
@@ -1881,7 +1939,55 @@ def import_event_actor(
     armature.animation_data.action = None
     if placement_samples:
         armature.scale = (0.0, 0.0, 0.0)
+    animate_event_actor_visibility(armature, {cut for cut, _ in cut_frames}, cut_starts)
     return armature, keyed_bones, cut_frames
+
+
+def event_actor_objects(armature) -> set[object]:
+    related_armatures = {
+        obj for obj in bpy.data.objects
+        if obj.type == "ARMATURE" and (
+            obj == armature
+            or any(
+                constraint.name == "G4 Character Part Actor" and constraint.target == armature
+                for constraint in obj.constraints
+            )
+        )
+    }
+    objects = set(related_armatures)
+    objects.update(
+        obj for obj in bpy.data.objects
+        if obj.type == "MESH" and any(
+            modifier.type == "ARMATURE" and modifier.object in related_armatures
+            for modifier in obj.modifiers
+        )
+    )
+    return objects
+
+
+def animate_event_actor_visibility(armature, active_cuts: set[str], cut_starts: dict[str, int]) -> None:
+    if not cut_starts:
+        return
+    objects = event_actor_objects(armature)
+    first_frame = min(cut_starts.values())
+    for obj in objects:
+        obj.hide_viewport = True
+        obj.hide_render = True
+        obj.keyframe_insert("hide_viewport", frame=max(0, first_frame - 1))
+        obj.keyframe_insert("hide_render", frame=max(0, first_frame - 1))
+        for cut, frame in sorted(cut_starts.items(), key=lambda item: item[1]):
+            hidden = cut not in active_cuts
+            obj.hide_viewport = hidden
+            obj.hide_render = hidden
+            obj.keyframe_insert("hide_viewport", frame=frame)
+            obj.keyframe_insert("hide_render", frame=frame)
+        animation = obj.animation_data
+        if animation and animation.action:
+            for curve in animation.action.fcurves:
+                if curve.data_path not in {"hide_viewport", "hide_render"}:
+                    continue
+                for point in curve.keyframe_points:
+                    point.interpolation = "CONSTANT"
 
 
 def import_event_camera(
@@ -1945,18 +2051,20 @@ def invoke_event_parts_dialog(directory: Path, import_camera: bool, actors: list
     )
 
 
+EVENT_PART_OVERRIDES = {
+    "ev72_50010": {
+        "c11010019": {"body": "u11010018", "shoes": "s11010018"},
+        "c11010069": {"body": "u117692", "shoes": "s117691"},
+    },
+}
+
+
 def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
-    overrides = {
-        "ev72_50010": {
-            "c11010019": {"body": "u11010018", "shoes": "s11010018"},
-            "c11010069": {"body": "u117692", "shoes": "s117691"},
-        },
-    }
     actor_id = event_actor_base_id(actor)
     match = re.fullmatch(r"c(\d{6,8})", actor_id, re.IGNORECASE)
     if match is None:
         return {}
-    actor_overrides = overrides.get(directory.name, {}).get(actor_id, {})
+    actor_overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor_id, {})
     result = {}
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
         uniform_root = data_root / "common" / "chr" / "_uniform"
@@ -1974,6 +2082,16 @@ def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
         if result:
             break
     return result
+
+
+def event_uses_modular_characters(directory: Path, prefs) -> bool:
+    """Return whether this data set assembles characters from face/uniform parts."""
+    configured_root = getattr(prefs, "raw_data_root", "")
+    for data_root in candidate_data_roots(directory, configured_root):
+        character_root = data_root / "common" / "chr"
+        if (character_root / "_face").is_dir() or (character_root / "_uniform").is_dir():
+            return True
+    return False
 
 
 class G4EventCharacterPart(PropertyGroup):
@@ -2009,11 +2127,14 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             and actor not in explicit_models
             and event_actor_base_id(actor) not in explicit_models
         ]
-        if generic_actors:
+        generic_groups = defaultdict(list)
+        for actor in generic_actors:
+            generic_groups[event_actor_slot(actor)].append(actor)
+        for slot, slot_actors in sorted(generic_groups.items()):
             item = self.parts.add()
-            item.actor_id = "Generic character"
-            item.actor_ids = json.dumps(generic_actors)
-            generic_saved = saved.get("__generic__") or {}
+            item.actor_id = f"Generic character {slot}"
+            item.actor_ids = json.dumps(slot_actors)
+            generic_saved = saved.get(f"__generic_{slot}__") or saved.get("__generic__") or {}
             item.head_model = generic_saved.get("head", "")
             item.body_model = generic_saved.get("body", "")
             item.shoes_model = generic_saved.get("shoes", "")
@@ -2023,8 +2144,11 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             item = self.parts.add()
             item.actor_id = actor
             item.actor_ids = json.dumps([actor])
-            actor_parts = event_part_defaults(directory, actor, prefs)
-            actor_parts.update(saved.get(actor) or {})
+            actor_parts = dict(saved.get(actor) or {})
+            defaults = event_part_defaults(directory, actor, prefs)
+            for key, value in defaults.items():
+                if not actor_parts.get(key) or key in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                    actor_parts[key] = value
             item.head_model = actor_parts.get("head", "")
             item.body_model = actor_parts.get("body", "")
             item.shoes_model = actor_parts.get("shoes", "")
@@ -2038,7 +2162,7 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             box.label(text=item.actor_id, icon="ARMATURE_DATA")
             actor_ids = json.loads(item.actor_ids or "[]")
             if len(actor_ids) > 1:
-                box.label(text=f"Shared by {len(actor_ids)} generic animation variants")
+                box.label(text=f"Chooses one of {len(actor_ids)} compatible skeleton variants")
             box.prop(item, "head_model")
             box.prop(item, "body_model")
             box.prop(item, "shoes_model")
@@ -2057,8 +2181,12 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                     self.report({"ERROR"}, f"Character part not found or unsupported: {path}")
                     return {"CANCELLED"}
             actor_ids = json.loads(item.actor_ids or "[]") or [item.actor_id]
-            for actor_id in actor_ids:
-                selected[actor_id] = actor_parts
+            if len(actor_ids) > 1:
+                chosen = compatible_generic_actor(actor_ids, actor_parts["head"])
+                for actor_id in actor_ids:
+                    selected[actor_id] = actor_parts if actor_id == chosen else {"skip": True}
+            else:
+                selected[actor_ids[0]] = actor_parts
 
         prefs = addon_preferences()
         try:
@@ -2066,9 +2194,12 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
         except json.JSONDecodeError:
             saved = {}
         saved.update(selected)
-        generic_item = next((item for item in self.parts if len(json.loads(item.actor_ids or "[]")) > 1), None)
-        if generic_item is not None:
-            saved["__generic__"] = selected[json.loads(generic_item.actor_ids)[0]]
+        for generic_item in (
+            item for item in self.parts if len(json.loads(item.actor_ids or "[]")) > 1
+        ):
+            actor_ids = json.loads(generic_item.actor_ids)
+            chosen = compatible_generic_actor(actor_ids, generic_item.head_model)
+            saved[f"__generic_{event_actor_slot(chosen)}__"] = selected[chosen]
         prefs.event_character_parts = json.dumps(saved, sort_keys=True)
         try:
             bpy.ops.wm.save_userpref()
@@ -2142,10 +2273,25 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             self.report({"ERROR"}, f"No character G4PK cuts found in {directory}")
             return {"CANCELLED"}
         character_actors = sorted(actor for actor in packages if actor.startswith("c"))
-        if self.prompt_character_parts and character_actors and not self.character_parts_json:
+        if (
+            self.prompt_character_parts
+            and character_actors
+            and not self.character_parts_json
+            and event_uses_modular_characters(directory, addon_preferences())
+        ):
             invoke_event_parts_dialog(directory, self.import_camera, character_actors)
             return {"FINISHED"}
         character_parts = json.loads(self.character_parts_json or "{}")
+        generic_by_slot = defaultdict(list)
+        for actor in character_actors:
+            if re.fullmatch(r"c0{2,}\d{3,5}", event_actor_base_id(actor), re.IGNORECASE):
+                generic_by_slot[event_actor_slot(actor)].append(actor)
+        for slot_actors in generic_by_slot.values():
+            if any(actor in character_parts for actor in slot_actors):
+                continue
+            chosen = compatible_generic_actor(slot_actors, "")
+            for actor in slot_actors:
+                character_parts[actor] = {} if actor == chosen else {"skip": True}
 
         camera_paths = sorted(directory.glob("*camera*.g4cm")) if self.import_camera else []
         camera_clip_count = len(parse_g4cm(camera_paths[0])["clips"]) if camera_paths else 0
@@ -2180,6 +2326,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 effect_motions = decode_event_effect_motions(directory, prefs, temporary_directory)
                 for actor, actor_packages in sorted(packages.items()):
                     actor_parts = character_parts.get(actor) or {}
+                    if actor_parts.get("skip"):
+                        for _ in actor_packages:
+                            progress()
+                        continue
                     actor_base = event_actor_base_id(actor)
                     try:
                         armature, _, actor_cut_frames = import_event_actor(

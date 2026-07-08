@@ -3932,11 +3932,16 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
 
     mesh_payloads = []
     used_materials: dict[str, Path | None] = {}
+    normalized_path = path.as_posix().lower()
+    prefer_material_refs = "/map/" in normalized_path or "/effect/" in normalized_path
     for record in records:
         mesh_name = mesh_name_for_export(md_info, record, skeleton_info)
         material_name = material_name_for_mesh(md_info, mesh_name, record["index"], record, path.stem)
         if material_name not in used_materials:
-            texture = choose_texture_from_material_record(md_info, material_name, texture_paths, path.stem)
+            texture = (
+                choose_texture_from_material_record(md_info, material_name, texture_paths, path.stem)
+                if prefer_material_refs else None
+            )
             if texture is None:
                 texture = choose_texture(material_name, texture_paths, path.stem, mesh_name)
             used_materials[material_name] = texture

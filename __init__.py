@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 0),
+    "version": (0, 14, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2135,6 +2135,15 @@ def configure_character_color_management(debug: list[str] | None = None) -> None
 def mark_level5_internal_edges(obj, angle: float = math.radians(48.0)) -> int:
     """Mark authored hard folds without enabling Freestyle on every triangle."""
     mesh = obj.data
+    finger_group = re.compile(r"^[lr]_(?:thb|idx|mid|rng|pky)", re.IGNORECASE)
+
+    def belongs_to_finger(vertex) -> bool:
+        return any(
+            item.group < len(obj.vertex_groups)
+            and finger_group.match(obj.vertex_groups[item.group].name)
+            for item in vertex.groups
+        )
+
     polygons_by_edge: dict[tuple[int, int], list] = {}
     for polygon in mesh.polygons:
         for edge_key in polygon.edge_keys:
@@ -2144,6 +2153,15 @@ def mark_level5_internal_edges(obj, angle: float = math.radians(48.0)) -> int:
     for edge in mesh.edges:
         edge.use_freestyle_mark = False
         polygons = polygons_by_edge.get(tuple(sorted(edge.key)), ())
+        if len(polygons) == 1 and all(
+            belongs_to_finger(mesh.vertices[index]) for index in edge.vertices
+        ):
+            # Fingernails are authored as open inset surfaces in several
+            # character bodies. Their perimeter is a source detail line, not
+            # a hull, so preserve it as an explicit non-destructive edge mark.
+            edge.use_freestyle_mark = True
+            marked += 1
+            continue
         if len(polygons) != 2:
             continue
         first, second = polygons
@@ -2152,7 +2170,10 @@ def mark_level5_internal_edges(obj, angle: float = math.radians(48.0)) -> int:
         start, end = (mesh.vertices[index].co for index in edge.vertices)
         direction = obj.matrix_world.to_3x3() @ (end - start)
         vertical_fold = direction.length > 1e-8 and abs(direction.normalized().z) >= 0.55
-        if vertical_fold and (material_seam or hard_fold):
+        authored_finger_fold = hard_fold and all(
+            belongs_to_finger(mesh.vertices[index]) for index in edge.vertices
+        )
+        if authored_finger_fold or vertical_fold and (material_seam or hard_fold):
             edge.use_freestyle_mark = True
             marked += 1
     return marked
@@ -2220,11 +2241,11 @@ def configure_level5_outlines(
         line_set.select_by_edge_types = True
         line_set.collection = source_collection
         line_set.collection_negation = "INCLUSIVE"
-        line_set.select_silhouette = True
+        line_set.select_silhouette = False
         line_set.select_border = False
         line_set.select_crease = False
         line_set.select_material_boundary = False
-        line_set.select_contour = False
+        line_set.select_contour = True
         line_set.edge_type_combination = "OR"
         settings.crease_angle = math.radians(55.0)
         line_style.color = (0.018, 0.012, 0.018)
@@ -2245,11 +2266,11 @@ def configure_level5_outlines(
             thin_set.select_by_edge_types = True
             thin_set.collection = thin_collection
             thin_set.collection_negation = "INCLUSIVE"
-            thin_set.select_silhouette = True
+            thin_set.select_silhouette = False
             thin_set.select_border = False
             thin_set.select_crease = False
             thin_set.select_material_boundary = False
-            thin_set.select_contour = False
+            thin_set.select_contour = True
             thin_set.edge_type_combination = "OR"
             thin_style.color = (0.025, 0.016, 0.021)
             thin_style.thickness = outline_thickness * 0.70
@@ -2661,13 +2682,12 @@ def import_character_parts_for_armature(
     character_part_stem: str = "",
     preserve_part_armatures: bool = False,
 ) -> tuple[int, list[Path]]:
-    if automatic:
-        paths = [
-            find_character_part(model_path, "u", prefs, character_part_stem),
-            find_character_part(model_path, "s", prefs, character_part_stem),
-        ]
-    else:
-        paths = [Path(bpy.path.abspath(value)) if value else None for value in (body_path, shoes_path)]
+    paths = [
+        Path(bpy.path.abspath(value)) if value else find_character_part(
+            model_path, prefix, prefs, character_part_stem
+        )
+        for prefix, value in (("u", body_path), ("s", shoes_path))
+    ]
     selected = []
     for path in paths:
         if path is None:
@@ -2722,13 +2742,11 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
     )
     body_model: StringProperty(
         name="Body Model",
-        subtype="FILE_PATH",
-        description="Optional u*.g4md/.g4pkm body selected manually",
+        description="Optional u*.g4md/.g4pkm override; empty detects the matching body automatically",
     )
     shoes_model: StringProperty(
         name="Shoes Model",
-        subtype="FILE_PATH",
-        description="Optional s*.g4md/.g4pkm shoes selected manually",
+        description="Optional s*.g4md/.g4pkm override; empty detects matching shoes automatically",
     )
     character_part_stem: StringProperty(
         options={"HIDDEN", "SKIP_SAVE"},
@@ -2784,7 +2802,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         path,
                         armatures[0],
                         prefs,
-                        False,
+                        self.auto_character_parts,
                         self.body_model,
                         self.shoes_model,
                         self.create_report_text,
@@ -2948,8 +2966,8 @@ class IMPORT_OT_level5_g4_folder(Operator):
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
-    body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
-    shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
+    body_model: StringProperty(name="Body Model")
+    shoes_model: StringProperty(name="Shoes Model")
     preserve_character_part_armatures: BoolProperty(
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
