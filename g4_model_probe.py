@@ -3226,6 +3226,22 @@ def remap_assigned_joint_palette(joint_palette: list[int], skeleton_info: dict |
     return remap_compact_assigned_joint_palette(joint_palette, skeleton_info)
 
 
+def shared_face_uses_compact_joint_palette(path: Path, joint_palette: list[int]) -> bool:
+    """Whether an assigned face uses the shared character joint table.
+
+    Face G4MDs do not carry their own G4SK.  Their short palettes index the
+    stable shared character table (one-based), even when the resolved body
+    G4SK happens to have unrelated joints at those physical indices.
+    """
+    normalized = path.as_posix().replace("\\", "/").lower()
+    return bool(
+        joint_palette
+        and "/_face/" in normalized
+        and path.stem.lower().startswith("c")
+        and all(0 <= index <= len(ASSIGNED_SKELETON_JOINT_NAMES) for index in joint_palette)
+    )
+
+
 def uniform_source_skeleton_candidates() -> list[tuple[dict, str]]:
     character_root = RAW_DATA_ROOT / "common" / "chr"
     candidates = []
@@ -4068,8 +4084,14 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                         position_tuples, skin_influences, joint_palette, skeleton_info
                     )
         elif assigned_skeleton:
-            joint_palette, palette_remap_count = remap_assigned_joint_palette(joint_palette, skeleton_info)
-            palette_remap_source = "compact assigned skeleton order"
+            if shared_face_uses_compact_joint_palette(path, joint_palette):
+                joint_palette, palette_remap_count = remap_compact_assigned_joint_palette(
+                    joint_palette, skeleton_info
+                )
+                palette_remap_source = "shared face skeleton order"
+            else:
+                joint_palette, palette_remap_count = remap_assigned_joint_palette(joint_palette, skeleton_info)
+                palette_remap_source = "compact assigned skeleton order"
         joint_palette_override = face_rigid_joint_override(path, skeleton_info, joint_palette)
         if joint_palette_override is not None:
             joint_palette = joint_palette_override
