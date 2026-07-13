@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 10),
+    "version": (0, 14, 11),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2684,6 +2684,55 @@ def find_accessory_part_for_body(body_path: Path) -> Path | None:
     return None
 
 
+def find_default_ball_model(model_path: Path, prefs: G4ImporterPreferences) -> Path | None:
+    for data_root in model_data_roots(model_path, prefs):
+        ball_root = data_root / "common" / "chr" / "b000001"
+        for extension in (".g4pkm", ".g4md"):
+            candidate = ball_root / f"b000001{extension}"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def attach_ball_to_armature(
+    path: Path,
+    target_armature,
+    prefs: G4ImporterPreferences,
+    create_report_text: bool,
+) -> int:
+    ball_bone = next(
+        (name for name in ("ball", "c_ball_1_0") if target_armature.pose.bones.get(name) is not None),
+        None,
+    )
+    if ball_bone is None:
+        raise RuntimeError(f"Target rig has no ball bone: {target_armature.name}")
+
+    _, imported_names = import_g4_model(path, prefs, create_report_text, apply_styling=False)
+    imported_objects = [bpy.data.objects.get(name) for name in imported_names]
+    imported_objects = [obj for obj in imported_objects if obj is not None]
+    source_armatures = {obj for obj in imported_objects if obj.type == "ARMATURE"}
+    bone_matrix = target_armature.matrix_world @ target_armature.pose.bones[ball_bone].matrix
+    attached = 0
+    for obj in imported_objects:
+        if obj.type != "MESH":
+            continue
+        world_matrix = obj.matrix_world.copy()
+        for modifier in tuple(obj.modifiers):
+            if modifier.type == "ARMATURE":
+                obj.modifiers.remove(modifier)
+        obj.parent = target_armature
+        obj.parent_type = "BONE"
+        obj.parent_bone = ball_bone
+        obj.matrix_parent_inverse = bone_matrix.inverted_safe()
+        obj.matrix_world = world_matrix
+        obj["g4_ball_source"] = str(path)
+        obj["g4_ball_bone"] = ball_bone
+        attached += 1
+    for source_armature in source_armatures:
+        bpy.data.objects.remove(source_armature, do_unlink=True)
+    return attached
+
+
 def import_character_parts_for_armature(
     model_path: Path,
     target_armature,
@@ -2692,6 +2741,9 @@ def import_character_parts_for_armature(
     body_path: str,
     shoes_path: str,
     accessory_path: str,
+    gloves_path: str,
+    armband_path: str,
+    nameplate_path: str,
     create_report_text: bool,
     character_part_stem: str = "",
     preserve_part_armatures: bool = False,
@@ -2705,7 +2757,12 @@ def import_character_parts_for_armature(
     accessory = Path(bpy.path.abspath(accessory_path)) if accessory_path else None
     if accessory is None and body is not None:
         accessory = find_accessory_part_for_body(body)
-    paths = [body, shoes, accessory]
+    paths = [
+        body,
+        shoes,
+        accessory,
+        *(Path(bpy.path.abspath(value)) for value in (gloves_path, armband_path, nameplate_path) if value),
+    ]
     selected = []
     for path in paths:
         if path is None:
@@ -2753,7 +2810,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
     import_character_parts: BoolProperty(
         name="Import Character Parts",
         default=True,
-        description="Attach manually selected u* body and s* shoes to the character rig",
+        description="Attach selected uniform, shoes and optional character accessories to the character rig",
     )
     auto_character_parts: BoolProperty(
         default=False,
@@ -2771,6 +2828,11 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         name="Sleeves / Collar Model",
         description="Optional sk*.g4md/.g4pkm part; matching sk* is attached automatically for a selected u* body",
     )
+    gloves_model: StringProperty(name="Gloves Model", description="Optional g*.g4md/.g4pkm gloves part")
+    armband_model: StringProperty(name="Captain Armband Model", description="Optional m*.g4md/.g4pkm armband part")
+    nameplate_model: StringProperty(name="Nameplate Model", description="Optional n*.g4md/.g4pkm nameplate part")
+    attach_ball: BoolProperty(name="Attach Ball", default=False)
+    ball_model: StringProperty(name="Ball Model", description="Optional b000001.g4pkm override")
     character_part_stem: StringProperty(
         options={"HIDDEN", "SKIP_SAVE"},
     )
@@ -2792,6 +2854,12 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
             layout.prop(self, "body_model")
             layout.prop(self, "shoes_model")
             layout.prop(self, "accessory_model")
+            layout.prop(self, "gloves_model")
+            layout.prop(self, "armband_model")
+            layout.prop(self, "nameplate_model")
+            layout.prop(self, "attach_ball")
+            if self.attach_ball:
+                layout.prop(self, "ball_model")
 
     def execute(self, context):
         base_path = Path(self.filepath)
@@ -2830,12 +2898,20 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         self.body_model,
                         self.shoes_model,
                         self.accessory_model,
+                        self.gloves_model,
+                        self.armband_model,
+                        self.nameplate_model,
                         self.create_report_text,
                         self.character_part_stem,
                         self.preserve_character_part_armatures,
                     )
                     part_mesh_total += attached
                     imported_parts.extend(part_paths)
+                    if self.attach_ball:
+                        ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(path, prefs)
+                        if ball_path is None:
+                            raise RuntimeError("Default ball model b000001 was not found")
+                        part_mesh_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -2994,6 +3070,11 @@ class IMPORT_OT_level5_g4_folder(Operator):
     body_model: StringProperty(name="Body Model")
     shoes_model: StringProperty(name="Shoes Model")
     accessory_model: StringProperty(name="Sleeves / Collar Model")
+    gloves_model: StringProperty(name="Gloves Model")
+    armband_model: StringProperty(name="Captain Armband Model")
+    nameplate_model: StringProperty(name="Nameplate Model")
+    attach_ball: BoolProperty(name="Attach Ball", default=False)
+    ball_model: StringProperty(name="Ball Model")
     preserve_character_part_armatures: BoolProperty(
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
@@ -3013,6 +3094,12 @@ class IMPORT_OT_level5_g4_folder(Operator):
             layout.prop(self, "body_model")
             layout.prop(self, "shoes_model")
             layout.prop(self, "accessory_model")
+            layout.prop(self, "gloves_model")
+            layout.prop(self, "armband_model")
+            layout.prop(self, "nameplate_model")
+            layout.prop(self, "attach_ball")
+            if self.attach_ball:
+                layout.prop(self, "ball_model")
 
     def execute(self, context):
         directory = Path(bpy.path.abspath(self.directory or ""))
@@ -3058,10 +3145,18 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         self.body_model,
                         self.shoes_model,
                         self.accessory_model,
+                        self.gloves_model,
+                        self.armband_model,
+                        self.nameplate_model,
                         self.create_report_text,
                         preserve_part_armatures=self.preserve_character_part_armatures,
                     )
                     imported_total += attached
+                    if self.attach_ball:
+                        ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(path, prefs)
+                        if ball_path is None:
+                            raise RuntimeError("Default ball model b000001 was not found")
+                        imported_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -3083,6 +3178,11 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
     body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
     accessory_model: StringProperty(name="Sleeves / Collar Model", subtype="FILE_PATH")
+    gloves_model: StringProperty(name="Gloves Model", subtype="FILE_PATH")
+    armband_model: StringProperty(name="Captain Armband Model", subtype="FILE_PATH")
+    nameplate_model: StringProperty(name="Nameplate Model", subtype="FILE_PATH")
+    attach_ball: BoolProperty(name="Attach Ball", default=False)
+    ball_model: StringProperty(name="Ball Model", subtype="FILE_PATH")
 
     @classmethod
     def poll(cls, context):
@@ -3097,15 +3197,24 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
         layout.prop(self, "body_model")
         layout.prop(self, "shoes_model")
         layout.prop(self, "accessory_model")
+        layout.prop(self, "gloves_model")
+        layout.prop(self, "armband_model")
+        layout.prop(self, "nameplate_model")
+        layout.prop(self, "attach_ball")
+        if self.attach_ball:
+            layout.prop(self, "ball_model")
 
     def execute(self, context):
         target = context.active_object
         paths = [
             Path(bpy.path.abspath(value))
-            for value in (self.body_model, self.shoes_model, self.accessory_model)
+            for value in (
+                self.body_model, self.shoes_model, self.accessory_model,
+                self.gloves_model, self.armband_model, self.nameplate_model,
+            )
             if value
         ]
-        if not paths:
+        if not paths and not self.attach_ball:
             self.report({"WARNING"}, "No character part selected")
             return {"CANCELLED"}
         invalid = [path for path in paths if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS]
@@ -3115,6 +3224,11 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
         prefs = addon_preferences()
         try:
             attached = sum(attach_part_to_armature(path, target, prefs, False) for path in paths)
+            if self.attach_ball:
+                ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(Path(), prefs)
+                if ball_path is None:
+                    raise RuntimeError("Default ball model b000001 was not found")
+                attached += attach_ball_to_armature(ball_path, target, prefs, False)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}

@@ -20,7 +20,7 @@ The importer automatically converts G4 assets into Blender-compatible data, recr
 * Automatic material generation.
 * Automatic texture assignment.
 * Character rigging support.
-* Manual body, shoes and sleeve/collar composition for character rigs.
+* Manual body, shoes, sleeves/collar, gloves, captain armband and nameplate composition for character rigs.
 * Shared skeleton resolution.
 * G4SK rest bone orientation reconstruction.
 * Full map importing.
@@ -105,7 +105,10 @@ The importer supports character skeletons and skinning data.
 
 Character heads named `cXXXXXXXX` can be completed with their separate
 `uXXXXXXXX` body and `sXXXXXXXX` shoes. Some modular outfits also provide an
-`skXXXXXXXX` sleeves/collar part. After selecting a single animation,
+`skXXXXXXXX` sleeves/collar part, while `g`, `m` and `n` identify optional
+gloves, captain armband and nameplate parts. The character-parts dialog can
+also attach `b000001` to the rig's `c_ball_1_0` ball bone. After selecting a
+single animation,
 Blender opens three explicit selectors in sequence: character model, body and
 shoes. Cancelling the body or shoes selector skips only that part; no uniform
 is guessed from an ID. Direct model imports expose equivalent manual fields.
