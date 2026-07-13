@@ -835,6 +835,51 @@ def joint_palette_for_record(md_info: dict, record: dict) -> list[int]:
     return palette_indices[palette_offset : palette_offset + palette_length]
 
 
+def remap_joint_palette_by_g4md_hashes(
+    data: bytes,
+    joint_palette: list[int],
+    skeleton_info: dict | None,
+    palette_table_offset: int,
+) -> tuple[list[int] | None, int]:
+    """Resolve G4MD palette slots through its embedded CRC32 joint table.
+
+    G4MD stores local blend indices as u16 values.  The values address a
+    contiguous CRC32 name table in the model, rather than physical indices in
+    the assigned G4SK.  Matching the hashes to the selected skeleton makes
+    shared heads, clothes and dynamic body helpers independent of G4SK order.
+    """
+    if not joint_palette or skeleton_info is None:
+        return None, 0
+    names = skeleton_info.get("names") or []
+    hash_to_index = {
+        crc32b(name.encode("ascii")): index
+        for index, name in enumerate(names)
+        if name
+    }
+    if not hash_to_index:
+        return None, 0
+
+    required_length = max(joint_palette) + 1
+    search_end = min(len(data), palette_table_offset)
+    best_offset = -1
+    best_length = 0
+    for offset in range(0, max(0, search_end - required_length * 4 + 1), 4):
+        length = 0
+        while offset + (length + 1) * 4 <= search_end:
+            value = u32(data, offset + length * 4)
+            if value not in hash_to_index:
+                break
+            length += 1
+        if length > best_length:
+            best_offset = offset
+            best_length = length
+
+    if best_length < required_length:
+        return None, 0
+    remapped = [hash_to_index[u32(data, best_offset + index * 4)] for index in joint_palette]
+    return remapped, sum(before != after for before, after in zip(joint_palette, remapped))
+
+
 def vertex_stride_for_record(record: dict) -> int:
     return record.get("vertex_stride") or (record.get("flags1", 0) & 0xFF) or 0x44
 
@@ -4067,7 +4112,17 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         palette_remap_count = 0
         palette_remap_source = None
         palette_spatial_score = None
-        if uniform_model and len(joint_palette) > 1:
+        hash_palette, hash_remap_count = remap_joint_palette_by_g4md_hashes(
+            md_data,
+            joint_palette,
+            skeleton_info,
+            md_info.get("joint_palette_table", 0),
+        )
+        if hash_palette is not None:
+            joint_palette = hash_palette
+            palette_remap_count = hash_remap_count
+            palette_remap_source = "G4MD CRC32 joint table"
+        elif uniform_model and len(joint_palette) > 1:
             joint_palette, palette_remap_count, palette_remap_source, palette_spatial_score = choose_uniform_joint_palette(
                 joint_palette,
                 position_tuples,
