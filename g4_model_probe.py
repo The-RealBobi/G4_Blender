@@ -3146,7 +3146,54 @@ def skeleton_is_assigned(path: Path, skeleton_source: str | None) -> bool:
     return own is None or skeleton_source != str(own)
 
 
-def remap_assigned_joint_palette(joint_palette: list[int], skeleton_info: dict | None) -> tuple[list[int], int]:
+def joint_palette_uses_assigned_indices(
+    joint_palette: list[int], skeleton_info: dict | None = None
+) -> bool:
+    """Return whether an assigned-model palette uses the shared compact order.
+
+    Some body and uniform G4MDs already store physical indices for their
+    selected G4SK.  Those rigs interleave face, hair and helper joints, so
+    interpreting the values as the compact shared order moves valid body
+    weights onto unrelated joints such as the head.
+    """
+    if not joint_palette:
+        return False
+    if max(joint_palette) > len(ASSIGNED_SKELETON_JOINT_NAMES):
+        return False
+    if skeleton_info is None:
+        return True
+
+    names = skeleton_info.get("names", [])
+    compact_hits = 0
+    for joint_index in joint_palette:
+        source_index = joint_index - 1
+        if (
+            0 <= source_index < len(ASSIGNED_SKELETON_JOINT_NAMES)
+            and source_index < len(names)
+            and names[source_index] == ASSIGNED_SKELETON_JOINT_NAMES[source_index]
+        ):
+            compact_hits += 1
+    # Index 1 is usually ``output`` in both layouts.  A single match is not
+    # evidence that the whole palette uses the compact table.
+    distinct_count = len(set(joint_palette))
+    if compact_hits >= 2 and compact_hits * 2 >= distinct_count:
+        return True
+
+    reserved_prefixes = ("output", "eye_", "mouth_", "hair", "mant", "boundingBox")
+    inspected = 0
+    reserved_hits = 0
+    for joint_index in joint_palette:
+        if not 0 <= joint_index < len(names):
+            continue
+        inspected += 1
+        if names[joint_index].startswith(reserved_prefixes):
+            reserved_hits += 1
+    return inspected == 0 or reserved_hits >= 3
+
+
+def remap_compact_assigned_joint_palette(
+    joint_palette: list[int], skeleton_info: dict | None
+) -> tuple[list[int], int]:
     if not joint_palette or skeleton_info is None:
         return joint_palette, 0
     target_indices = {name: index for index, name in enumerate(skeleton_info.get("names", []))}
@@ -3171,6 +3218,12 @@ def remap_assigned_joint_palette(joint_palette: list[int], skeleton_info: dict |
         remapped.append(target_index)
         changed += target_index != joint_index
     return remapped, changed
+
+
+def remap_assigned_joint_palette(joint_palette: list[int], skeleton_info: dict | None) -> tuple[list[int], int]:
+    if not joint_palette_uses_assigned_indices(joint_palette, skeleton_info):
+        return joint_palette, 0
+    return remap_compact_assigned_joint_palette(joint_palette, skeleton_info)
 
 
 def uniform_source_skeleton_candidates() -> list[tuple[dict, str]]:
@@ -3788,20 +3841,20 @@ def choose_uniform_joint_palette(
     source_skeletons: list[tuple[dict, str]],
 ) -> tuple[list[int], int, str, float]:
     candidates: list[tuple[list[int], int, str]] = [(joint_palette, 0, "target skeleton indices")]
+    # Compact shared palettes cannot reference an index beyond their fixed
+    # table.  Such entries are already physical G4SK indices; applying body
+    # offset heuristics would turn valid targets such as c_bst1_1_0 into
+    # unrelated head or foot helpers.
+    if any(index > len(ASSIGNED_SKELETON_JOINT_NAMES) for index in joint_palette):
+        return (
+            joint_palette,
+            0,
+            "physical target G4SK indices",
+            palette_spatial_error(positions, influences, joint_palette, target_skeleton),
+        )
     if joint_palette and min(joint_palette) > 0 and max(joint_palette) <= len(ASSIGNED_SKELETON_JOINT_NAMES):
-        remapped, changed = remap_assigned_joint_palette(joint_palette, target_skeleton)
-        target_names = set(target_skeleton.get("names", []))
-        compact_names = [ASSIGNED_SKELETON_JOINT_NAMES[index - 1] for index in joint_palette]
-        # Uniform palettes use the stable shared-character order. When the
-        # actor contains every referenced joint this mapping is authoritative;
-        # geometric proximity must not reinterpret bone identity.
-        if all(name in target_names for name in compact_names):
-            return (
-                remapped,
-                changed,
-                "shared uniform skeleton indices",
-                palette_spatial_error(positions, influences, remapped, target_skeleton),
-            )
+        remapped, changed = remap_compact_assigned_joint_palette(joint_palette, target_skeleton)
+        candidates.append((remapped, changed, "shared uniform skeleton indices"))
     for source_skeleton, source in source_skeletons:
         remapped, changed = remap_joint_palette_by_name(joint_palette, source_skeleton, target_skeleton)
         candidates.append((remapped, changed, source))

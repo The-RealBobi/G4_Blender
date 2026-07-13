@@ -144,6 +144,20 @@ def actor_points_from_entries(entries: list[dict]) -> dict[str, str]:
     return points
 
 
+def actor_points_from_raw_records(path: Path) -> dict[str, str]:
+    """Read the inline command layout used by YK4 event_cfg/vis files."""
+    points = {}
+    for _, values in raw_cfg_records(path):
+        if len(values) < 5 or values[1] != EVENT_ATTACH_POINT_COMMAND:
+            continue
+        actor_match = ACTOR_INSTANCE_RE.fullmatch(str(values[2] or ""))
+        source = str(values[3] or "").lower()
+        point = str(values[4] or "").lower()
+        if actor_match and source.startswith("point_") and re.fullmatch(r"evp\d+", point):
+            points.setdefault(actor_match.group(1).lower(), point)
+    return points
+
+
 def actor_models_from_json(path: Path) -> dict[str, str]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return actor_models_from_entries(data.get("Entries") or [])
@@ -202,5 +216,6 @@ def load_event_actor_points(path: Path) -> dict[str, str]:
     if path.suffix.lower() == ".xml":
         return actor_points_from_entries(entries_from_xml(path))
     if path.name.lower().endswith(".cfg.bin"):
-        return actor_points_from_entries(event_command_entries_from_binary(path))
+        points = actor_points_from_entries(event_command_entries_from_binary(path))
+        return points or actor_points_from_raw_records(path)
     return {}

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 1),
+    "version": (0, 14, 5),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2863,7 +2863,7 @@ def is_character_model(path: Path) -> bool:
     parents = {part.lower() for part in path.parent.parts}
     if "map" in parents:
         return False
-    return "chr" in parents
+    return "chr" in parents or path.stem.lower().startswith("ei")
 
 
 def auto_hide_map_parts(imported_names: set[str]) -> int:

@@ -75,14 +75,16 @@ def inferred_raw_data_root(path: Path) -> Path | None:
 
 def candidate_data_roots(g4mt_path: Path, configured_root: str) -> list[Path]:
     roots = []
-    if configured_root:
-        roots.append(Path(bpy.path.abspath(configured_root)))
     inferred = inferred_raw_data_root(g4mt_path)
     if inferred is not None:
         roots.append(inferred)
         if inferred.parent.name in {"raw", "readable"}:
             work_root = inferred.parent.parent
             roots.extend((work_root / "raw" / "data", work_root / "readable" / "data"))
+            if work_root.name == "._work":
+                roots.append(work_root.parent / "data")
+    if configured_root:
+        roots.append(Path(bpy.path.abspath(configured_root)))
     return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
 
 
@@ -373,6 +375,7 @@ def animate_character_parts(
     strip_start: int | None = None,
     duration: int | None = None,
     strip_name: str | None = None,
+    rotation_only_retarget: bool = False,
 ) -> tuple[int, int]:
     parts = character_part_armatures(actor)
     if not parts:
@@ -381,6 +384,8 @@ def animate_character_parts(
     keyed = 0
     for part_armature in parts:
         action, keyed_bones = create_action(part_armature, motion, frame_origin)
+        if rotation_only_retarget:
+            remove_nonroot_translation_curves(action, part_armature)
         keyed += keyed_bones
         if strip_start is not None and duration is not None:
             part_armature.animation_data_create()
@@ -401,6 +406,21 @@ def animate_character_parts(
     return created, keyed
 
 
+def remove_nonroot_translation_curves(action, armature) -> int:
+    """Avoid rest-pose translation/scale deltas stretching a substituted skeleton."""
+    removed = 0
+    for curve in tuple(action.fcurves):
+        match = re.fullmatch(r'pose\.bones\["(.+)"\]\.(?:location|scale)', curve.data_path)
+        if match is None:
+            continue
+        bone = armature.data.bones.get(match.group(1))
+        if bone is None or bone.parent is None:
+            continue
+        action.fcurves.remove(curve)
+        removed += 1
+    return removed
+
+
 def has_display_oriented_bones(armature) -> bool:
     return bool(
         armature
@@ -419,6 +439,7 @@ def import_model_for_animation(
     body_model: str = "",
     shoes_model: str = "",
     character_part_stem: str = "",
+    align_to_motion_rest: bool = True,
 ):
     if model_path is None:
         raise RuntimeError("Select the G4MD/G4PKM model that will receive the animation.")
@@ -448,7 +469,8 @@ def import_model_for_animation(
     if armature is None:
         raise RuntimeError(f"The imported model contains no usable armature: {model_path}")
     resolve_track_names_from_armature(motion, armature)
-    align_armature_to_motion_rest(armature, motion)
+    if align_to_motion_rest:
+        align_armature_to_motion_rest(armature, motion)
     return armature, model_path
 
 
@@ -1278,6 +1300,14 @@ def event_actor_slot(actor: str) -> str:
     return match.group(1).lower() if match else "s00"
 
 
+def generic_actor_groups(actors: list[str]) -> dict[str, list[str]]:
+    groups = defaultdict(list)
+    for actor in actors:
+        if re.fullmatch(r"c0{2,}\d{3,5}", event_actor_base_id(actor), re.IGNORECASE):
+            groups[event_actor_slot(actor)].append(actor)
+    return {slot: sorted(slot_actors) for slot, slot_actors in sorted(groups.items())}
+
+
 def model_lookup_row(model_path: Path) -> dict:
     lookup_path = model_lookup_path()
     relative = model_relative_path(model_path)
@@ -1294,7 +1324,14 @@ def compatible_generic_actor(actor_ids: list[str], head_model: str) -> str:
     skeleton = ""
     if head_model:
         path = Path(bpy.path.abspath(head_model))
-        skeleton = str(model_lookup_row(path).get("g4sk_stem") or "").lower()
+        family = re.fullmatch(r"c\d([1-4])\d{4,6}", path.stem, re.IGNORECASE)
+        if family:
+            skeleton = f"c000{family.group(1)}01"
+        if not skeleton:
+            skeleton = str(model_lookup_row(path).get("g4sk_stem") or "").lower()
+        if not skeleton:
+            resolved_skeleton = resolve_skeleton_path(path)
+            skeleton = resolved_skeleton.stem.lower() if resolved_skeleton is not None else ""
     if skeleton:
         match = next(
             (actor for actor in actor_ids if event_actor_base_id(actor).lower() == skeleton),
@@ -1306,6 +1343,17 @@ def compatible_generic_actor(actor_ids: list[str], head_model: str) -> str:
         (actor for actor in actor_ids if event_actor_base_id(actor).lower() == "c000101"),
         actor_ids[0],
     )
+
+
+def resolve_generic_event_skeleton(package: Path, actor: str, prefs) -> Path | None:
+    actor_base = event_actor_base_id(actor)
+    if not re.fullmatch(r"c000[1-4]01", actor_base, re.IGNORECASE):
+        return None
+    for data_root in candidate_data_roots(package, getattr(prefs, "raw_data_root", "")):
+        candidate = data_root / "common" / "chr" / actor_base / f"{actor_base}.g4sk"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def resolve_event_actor_models(directory: Path, prefs) -> dict[str, str]:
@@ -1327,16 +1375,17 @@ def resolve_event_actor_models(directory: Path, prefs) -> dict[str, str]:
 def resolve_event_actor_points(directory: Path, prefs) -> dict[str, str]:
     event_name = directory.name
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
-        base = data_root / "common" / "event_cfg" / "evt" / f"{event_name}.cfg.bin"
-        for path in (base, base.with_suffix(base.suffix + ".json"), base.with_suffix(base.suffix + ".xml")):
-            if not path.is_file():
-                continue
-            try:
-                points = load_event_actor_points(path)
-            except (OSError, ValueError, json.JSONDecodeError):
-                continue
-            if points:
-                return points
+        for config_group in ("evt", "vis"):
+            base = data_root / "common" / "event_cfg" / config_group / f"{event_name}.cfg.bin"
+            for path in (base, base.with_suffix(base.suffix + ".json"), base.with_suffix(base.suffix + ".xml")):
+                if not path.is_file():
+                    continue
+                try:
+                    points = load_event_actor_points(path)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+                if points:
+                    return points
     return {}
 
 
@@ -1867,6 +1916,8 @@ def import_event_actor(
     if model_path is None:
         raise RuntimeError(f"Could not resolve model {actor} for the event")
     skeleton_path = resolve_skeleton_path(model_path)
+    if skeleton_path is None and generic_actor:
+        skeleton_path = resolve_generic_event_skeleton(packages[0], actor, prefs)
     first_motion, first_entry = decode_event_package(packages[0], skeleton_path, temporary_directory)
     armature, resolved_model = import_model_for_animation(
         packages[0],
@@ -1878,9 +1929,13 @@ def import_event_actor(
         body_model,
         shoes_model,
         character_part_stem=character_part_stem,
+        align_to_motion_rest=not (generic_actor and bool(head_model)),
     )
-    armature.name = actor
-    armature.data.name = f"{actor}_Armature"
+    display_actor = actor
+    if generic_actor and head_model:
+        display_actor = f"{model_path.stem}_{event_actor_slot(actor)}"
+    armature.name = display_actor
+    armature.data.name = f"{display_actor}_Armature"
     model_base_matrix = armature.matrix_world.copy()
     armature.animation_data_create()
     armature.animation_data.action = None
@@ -1899,6 +1954,9 @@ def import_event_actor(
         resolve_track_names_from_armature(motion, armature)
         clip = motion["clip"]
         action, keyed = create_action(armature, motion, clip["start_frame"])
+        substituted_generic = generic_actor and bool(head_model)
+        if substituted_generic:
+            remove_nonroot_translation_curves(action, armature)
         cut = clip["name"] or event_cut_name(package) or f"cut_{index:03d}"
         placement_samples += append_event_placement(
             action,
@@ -1932,6 +1990,7 @@ def import_event_actor(
             strip_start,
             duration,
             cut,
+            rotation_only_retarget=substituted_generic,
         )
         cut_frames.append((cut, strip_start))
         keyed_bones += keyed
@@ -2086,6 +2145,10 @@ def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
 
 def event_uses_modular_characters(directory: Path, prefs) -> bool:
     """Return whether this data set assembles characters from face/uniform parts."""
+    inferred = inferred_raw_data_root(directory)
+    if inferred is not None:
+        character_root = inferred / "common" / "chr"
+        return (character_root / "_face").is_dir() or (character_root / "_uniform").is_dir()
     configured_root = getattr(prefs, "raw_data_root", "")
     for data_root in candidate_data_roots(directory, configured_root):
         character_root = data_root / "common" / "chr"
@@ -2120,21 +2183,15 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
         directory = Path(bpy.path.abspath(self.directory))
         self.parts.clear()
         actors = json.loads(self.actors_json or "[]")
-        explicit_models = resolve_event_actor_models(directory, prefs)
-        generic_actors = [
-            actor for actor in actors
-            if re.fullmatch(r"c0{2,}\d{3,5}", event_actor_base_id(actor), re.IGNORECASE)
-            and actor not in explicit_models
-            and event_actor_base_id(actor) not in explicit_models
-        ]
-        generic_groups = defaultdict(list)
-        for actor in generic_actors:
-            generic_groups[event_actor_slot(actor)].append(actor)
+        generic_groups = generic_actor_groups(actors)
+        generic_actors = {actor for slot_actors in generic_groups.values() for actor in slot_actors}
         for slot, slot_actors in sorted(generic_groups.items()):
             item = self.parts.add()
             item.actor_id = f"Generic character {slot}"
             item.actor_ids = json.dumps(slot_actors)
-            generic_saved = saved.get(f"__generic_{slot}__") or saved.get("__generic__") or {}
+            generic_saved = saved.get(f"__generic_{slot}__") or {}
+            if not generic_saved and slot == "s00":
+                generic_saved = saved.get("__generic__") or {}
             item.head_model = generic_saved.get("head", "")
             item.body_model = generic_saved.get("body", "")
             item.shoes_model = generic_saved.get("shoes", "")
@@ -2282,10 +2339,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             invoke_event_parts_dialog(directory, self.import_camera, character_actors)
             return {"FINISHED"}
         character_parts = json.loads(self.character_parts_json or "{}")
-        generic_by_slot = defaultdict(list)
-        for actor in character_actors:
-            if re.fullmatch(r"c0{2,}\d{3,5}", event_actor_base_id(actor), re.IGNORECASE):
-                generic_by_slot[event_actor_slot(actor)].append(actor)
+        generic_by_slot = generic_actor_groups(character_actors)
         for slot_actors in generic_by_slot.values():
             if any(actor in character_parts for actor in slot_actors):
                 continue
