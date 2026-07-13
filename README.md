@@ -20,7 +20,7 @@ The importer automatically converts G4 assets into Blender-compatible data, recr
 * Automatic material generation.
 * Automatic texture assignment.
 * Character rigging support.
-* Manual body and shoes composition for character rigs.
+* Manual body, shoes and sleeve/collar composition for character rigs.
 * Shared skeleton resolution.
 * G4SK rest bone orientation reconstruction.
 * Full map importing.
@@ -85,7 +85,7 @@ In Blender, enable `Level-5 G4 Blender Tools` and use:
 ```text
 File > Import > Level-5 G4 Model
 File > Import > Level-5 G4 Model Folder
-File > Import > Attach Level-5 G4 Body and Shoes
+File > Import > Attach Level-5 G4 Character Parts
 File > Import > Level-5 G4 Animation
 File > Import > Level-5 G4 Camera
 File > Import > Level-5 G4 Event Folder
@@ -104,11 +104,12 @@ The exporter needs a legally obtained native model base from a complete game dum
 The importer supports character skeletons and skinning data.
 
 Character heads named `cXXXXXXXX` can be completed with their separate
-`uXXXXXXXX` body and `sXXXXXXXX` shoes. After selecting a single animation,
+`uXXXXXXXX` body and `sXXXXXXXX` shoes. Some modular outfits also provide an
+`skXXXXXXXX` sleeves/collar part. After selecting a single animation,
 Blender opens three explicit selectors in sequence: character model, body and
 shoes. Cancelling the body or shoes selector skips only that part; no uniform
 is guessed from an ID. Direct model imports expose equivalent manual fields.
-Existing rigs can also use `Attach Level-5 G4 Body and Shoes` from the Import
+Existing rigs can also use `Attach Level-5 G4 Character Parts` from the Import
 menu. Secondary LOD meshes are discarded during import so LOD0, LOD1 and LOD2
 do not deform visibly at the same time.
 

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 9),
+    "version": (0, 14, 10),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2671,6 +2671,19 @@ def attach_part_to_armature(
     return attached
 
 
+def find_accessory_part_for_body(body_path: Path) -> Path | None:
+    match = re.fullmatch(r"u(\d{6,8})", body_path.stem, re.IGNORECASE)
+    if match is None:
+        return None
+    stem = f"sk{match.group(1)}"
+    uniform_root = body_path.parent.parent
+    for extension in (".g4pkm", ".g4md"):
+        candidate = uniform_root / stem / f"{stem}{extension}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def import_character_parts_for_armature(
     model_path: Path,
     target_armature,
@@ -2678,23 +2691,29 @@ def import_character_parts_for_armature(
     automatic: bool,
     body_path: str,
     shoes_path: str,
+    accessory_path: str,
     create_report_text: bool,
     character_part_stem: str = "",
     preserve_part_armatures: bool = False,
 ) -> tuple[int, list[Path]]:
-    paths = [
-        Path(bpy.path.abspath(value)) if value else find_character_part(
-            model_path, prefix, prefs, character_part_stem
-        )
-        for prefix, value in (("u", body_path), ("s", shoes_path))
-    ]
+    body = Path(bpy.path.abspath(body_path)) if body_path else find_character_part(
+        model_path, "u", prefs, character_part_stem
+    )
+    shoes = Path(bpy.path.abspath(shoes_path)) if shoes_path else find_character_part(
+        model_path, "s", prefs, character_part_stem
+    )
+    accessory = Path(bpy.path.abspath(accessory_path)) if accessory_path else None
+    if accessory is None and body is not None:
+        accessory = find_accessory_part_for_body(body)
+    paths = [body, shoes, accessory]
     selected = []
     for path in paths:
         if path is None:
             continue
         if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS:
             raise RuntimeError(f"Character part not found or unsupported: {path}")
-        selected.append(path)
+        if path not in selected:
+            selected.append(path)
     attached = sum(
         attach_part_to_armature(
             path,
@@ -2732,7 +2751,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         description="Create a Blender text block with the exporter summary",
     )
     import_character_parts: BoolProperty(
-        name="Import Body and Shoes",
+        name="Import Character Parts",
         default=True,
         description="Attach manually selected u* body and s* shoes to the character rig",
     )
@@ -2747,6 +2766,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
     shoes_model: StringProperty(
         name="Shoes Model",
         description="Optional s*.g4md/.g4pkm override; empty detects matching shoes automatically",
+    )
+    accessory_model: StringProperty(
+        name="Sleeves / Collar Model",
+        description="Optional sk*.g4md/.g4pkm part; matching sk* is attached automatically for a selected u* body",
     )
     character_part_stem: StringProperty(
         options={"HIDDEN", "SKIP_SAVE"},
@@ -2768,6 +2791,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         if is_character and self.import_character_parts:
             layout.prop(self, "body_model")
             layout.prop(self, "shoes_model")
+            layout.prop(self, "accessory_model")
 
     def execute(self, context):
         base_path = Path(self.filepath)
@@ -2805,6 +2829,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         self.auto_character_parts,
                         self.body_model,
                         self.shoes_model,
+                        self.accessory_model,
                         self.create_report_text,
                         self.character_part_stem,
                         self.preserve_character_part_armatures,
@@ -2959,7 +2984,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
         description="Create Blender text blocks with exporter summaries",
     )
     import_character_parts: BoolProperty(
-        name="Import Body and Shoes",
+        name="Import Character Parts",
         default=False,
     )
     auto_character_parts: BoolProperty(
@@ -2968,6 +2993,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
     )
     body_model: StringProperty(name="Body Model")
     shoes_model: StringProperty(name="Shoes Model")
+    accessory_model: StringProperty(name="Sleeves / Collar Model")
     preserve_character_part_armatures: BoolProperty(
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
@@ -2986,6 +3012,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
         if self.import_character_parts:
             layout.prop(self, "body_model")
             layout.prop(self, "shoes_model")
+            layout.prop(self, "accessory_model")
 
     def execute(self, context):
         directory = Path(bpy.path.abspath(self.directory or ""))
@@ -3030,6 +3057,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         False,
                         self.body_model,
                         self.shoes_model,
+                        self.accessory_model,
                         self.create_report_text,
                         preserve_part_armatures=self.preserve_character_part_armatures,
                     )
@@ -3049,11 +3077,12 @@ class IMPORT_OT_level5_g4_folder(Operator):
 
 class IMPORT_OT_level5_g4_character_parts(Operator):
     bl_idname = "import_scene.level5_g4_character_parts"
-    bl_label = "Attach Level-5 G4 Body and Shoes"
+    bl_label = "Attach Level-5 G4 Character Parts"
     bl_options = {"REGISTER", "UNDO"}
 
     body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Sleeves / Collar Model", subtype="FILE_PATH")
 
     @classmethod
     def poll(cls, context):
@@ -3067,12 +3096,17 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
         layout.label(text=f"Target rig: {context.active_object.name}")
         layout.prop(self, "body_model")
         layout.prop(self, "shoes_model")
+        layout.prop(self, "accessory_model")
 
     def execute(self, context):
         target = context.active_object
-        paths = [Path(bpy.path.abspath(value)) for value in (self.body_model, self.shoes_model) if value]
+        paths = [
+            Path(bpy.path.abspath(value))
+            for value in (self.body_model, self.shoes_model, self.accessory_model)
+            if value
+        ]
         if not paths:
-            self.report({"WARNING"}, "No body or shoes model selected")
+            self.report({"WARNING"}, "No character part selected")
             return {"CANCELLED"}
         invalid = [path for path in paths if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS]
         if invalid:
@@ -3151,7 +3185,7 @@ def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_level5_g4_folder.bl_idname, text="Level-5 G4 Model Folder")
     self.layout.operator(
         IMPORT_OT_level5_g4_character_parts.bl_idname,
-        text="Attach Level-5 G4 Body and Shoes",
+        text="Attach Level-5 G4 Character Parts",
     )
 
 
