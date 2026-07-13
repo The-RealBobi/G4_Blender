@@ -71,6 +71,7 @@ The add-on package includes:
 |-- g4_port.py
 |-- g4_model_probe.py
 |-- g4_animation_addon.py
+|-- g4_event.py
 |-- g4mt_motion.py
 |-- g4mt_probe.py
 |-- g4cm_camera.py
