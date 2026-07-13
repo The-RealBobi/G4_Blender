@@ -3846,11 +3846,15 @@ def choose_uniform_joint_palette(
     # offset heuristics would turn valid targets such as c_bst1_1_0 into
     # unrelated head or foot helpers.
     if any(index > len(ASSIGNED_SKELETON_JOINT_NAMES) for index in joint_palette):
+        palette, remap_count = refine_arm_palette_by_centroids(
+            joint_palette, positions, influences, target_skeleton
+        )
         return (
-            joint_palette,
-            0,
-            "physical target G4SK indices",
-            palette_spatial_error(positions, influences, joint_palette, target_skeleton),
+            palette,
+            remap_count,
+            "physical target G4SK indices"
+            + (" + arm centroid refinement" if remap_count else ""),
+            palette_spatial_error(positions, influences, palette, target_skeleton),
         )
     if joint_palette and min(joint_palette) > 0 and max(joint_palette) <= len(ASSIGNED_SKELETON_JOINT_NAMES):
         remapped, changed = remap_compact_assigned_joint_palette(joint_palette, target_skeleton)
