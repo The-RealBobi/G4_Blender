@@ -18,6 +18,7 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Matrix, Quaternion, Vector
 
 try:
+    from .g4_model_probe import g4sk_entries_from_candidate
     from .g4pk_extract_g4mt import select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
@@ -25,6 +26,7 @@ try:
     from .g4_event import event_light_parameters, load_event_actor_models, load_event_actor_points
     from .g4_p3lip import read_p3lip
 except ImportError:
+    from g4_model_probe import g4sk_entries_from_candidate
     from g4pk_extract_g4mt import select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
@@ -257,6 +259,28 @@ def valid_skeleton_path(path: Path | None) -> Path | None:
         return path if read_g4sk_data(path)[:4] == b"G4SK" else None
     except OSError:
         return None
+
+
+def materialize_skeleton_source(source: str) -> Path | None:
+    """Return a file path for the exact G4SK source used during model import."""
+    source = source.split(" via ", 1)[0]
+    if "::" not in source:
+        return valid_skeleton_path(Path(source))
+
+    pack_name, entry_name = source.rsplit("::", 1)
+    pack_path = Path(pack_name)
+    if not pack_path.is_file():
+        return None
+    for skeleton_data, candidate_source in g4sk_entries_from_candidate(pack_path):
+        if candidate_source.rsplit("::", 1)[-1] != entry_name:
+            continue
+        cache_root = Path(tempfile.gettempdir()) / "level5_g4sk_blender"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        destination = cache_root / f"{zlib.crc32(source.encode('utf-8')) & 0xFFFFFFFF:08x}.g4sk"
+        if not destination.is_file() or destination.read_bytes() != skeleton_data:
+            destination.write_bytes(skeleton_data)
+        return destination
+    return None
 
 
 def resolve_skeleton_path(model_path: Path | None) -> Path | None:
@@ -1052,7 +1076,13 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 source = Path(str(selected.get("g4_character_model_source", "")))
                 if source.is_file():
                     skeleton_model_hint = source
-            skeleton_hint = resolve_skeleton_path(skeleton_model_hint)
+            skeleton_hint = None
+            if skeleton_model_hint is None and selected is not None and selected.type == "ARMATURE":
+                skeleton_hint = materialize_skeleton_source(
+                    str(selected.get("g4_character_skeleton_source", ""))
+                )
+            if skeleton_hint is None:
+                skeleton_hint = resolve_skeleton_path(skeleton_model_hint)
             motion, decoded_path = decode_g4mt(g4mt_path, self.clip, prefs, skeleton_hint)
             if self.import_camera:
                 camera_path = resolve_companion_g4cm(path, getattr(prefs, "raw_data_root", ""))

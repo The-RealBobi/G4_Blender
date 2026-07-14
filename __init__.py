@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 33),
+    "version": (0, 14, 34),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2563,6 +2563,9 @@ def import_g4_model(
             obj = bpy.data.objects.get(object_name)
             if obj is not None and obj.type == "ARMATURE":
                 obj["g4_character_model_source"] = str(path)
+                skeleton_source = str(summary.get("skeleton_source") or "")
+                if skeleton_source:
+                    obj["g4_character_skeleton_source"] = skeleton_source
     cleanup_generated_files(summary, getattr(prefs, "cleanup_import_cache", True))
     return summary, imported_names
 

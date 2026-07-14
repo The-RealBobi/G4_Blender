@@ -165,6 +165,11 @@ selected rig is replaced with a fresh animation-safe rig. When visual
 orientation is enabled, the original rest quaternion is stored on each bone as
 `g4_rest_rotation_xyzw`.
 
+When animation is applied to an already imported actor, the importer reuses
+the exact resolved G4SK source recorded on that armature. This includes a G4SK
+embedded in a sibling G4PKM, rather than falling back to a shorter companion
+rig with matching filenames.
+
 Bodies and shoes keep their native G4SK bind pose and weights. Their Blender
 vertex groups are named from the verified G4MD CRC32 palette so every weight
 targets the matching bone on the actor armature. G4MT tracks are applied
