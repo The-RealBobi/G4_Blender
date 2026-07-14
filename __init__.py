@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 30),
+    "version": (0, 14, 31),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -86,6 +86,12 @@ def default_chara_model_xml() -> str:
     candidates = []
     if env_path:
         candidates.append(Path(env_path))
+
+    raw_data_root = os.environ.get("LEVEL5_G4_RAW_ROOT", "")
+    if raw_data_root:
+        candidates.extend(sorted(
+            (Path(raw_data_root).expanduser() / "common" / "gamedata" / "character").glob("chara_model*.xml")
+        ))
 
     addon_path = Path(__file__).resolve()
     search_dirs = [addon_path.parent, addon_path.parent / "TOOLS", addon_path.parents[1] / "TOOLS"]
@@ -183,7 +189,14 @@ def exporter_environment(prefs: "G4ImporterPreferences", export_dir: Path) -> di
     chara_model_lookup = bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or default_chara_model_lookup())
     if chara_model_lookup:
         env["LEVEL5_G4_CHARA_LOOKUP"] = chara_model_lookup
-    chara_model_xml = bpy.path.abspath(getattr(prefs, "chara_model_xml", "") or default_chara_model_xml())
+    active_chara_models = sorted(
+        (Path(raw_data_root) / "common" / "gamedata" / "character").glob("chara_model*.xml")
+    ) if raw_data_root else []
+    chara_model_xml = (
+        str(active_chara_models[0])
+        if active_chara_models
+        else bpy.path.abspath(getattr(prefs, "chara_model_xml", "") or default_chara_model_xml())
+    )
     if chara_model_xml:
         env["LEVEL5_G4_CHARA_MODEL"] = chara_model_xml
     env["LEVEL5_G4_SKELETON_CACHE"] = str(export_dir / "g4_skeleton_cache.json")
@@ -221,7 +234,7 @@ class G4ImporterPreferences(AddonPreferences):
         name="Chara Model XML",
         subtype="FILE_PATH",
         default=default_chara_model_xml(),
-        description="Optional chara_model XML fallback used to resolve shared character skeletons",
+        description="Fallback XML used only when Raw Data Root has no current chara_model config",
     )
     chara_model_lookup: StringProperty(
         name="Chara Model Lookup",
