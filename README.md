@@ -141,6 +141,22 @@ data/common/chr/
 
 If these directories are present, the importer will automatically locate and load the required skeletons during import.
 
+### G4SK and vertex-group resolution
+
+The joint palette and joint-name table stored by a skinned G4MD identify the
+authored G4SK joint names by CRC32. The importer resolves those hashes to bone
+names; it does not match joints by palette position, proximity, or mesh shape.
+This is essential for modular `u`, `s`, `sk`, `g`, `m`, and `n` parts, whose
+local palette order can differ from the actor rig.
+
+When a model has no companion G4SK, resolution is deliberately conservative:
+its sibling G4PKM, its primary face mesh, the active dump's
+`chara_model*.cfg.bin.xml`, and the bundled lookup are considered in that
+order. A candidate is accepted only when it names every CRC32 joint used by
+the mesh. The active dump's CFG always takes precedence over an older XML path
+saved in Blender preferences. Legacy face-hair assets may use the shared
+`_hairSK` only after the same complete-palette check.
+
 After Collada import, Blender may display imported bones with vertical default
 tails. `Apply Bone Orientation` can improve that visual presentation, but it
 changes Blender's local bone axes and is therefore disabled by default. G4MT
@@ -149,11 +165,12 @@ selected rig is replaced with a fresh animation-safe rig. When visual
 orientation is enabled, the original rest quaternion is stored on each bone as
 `g4_rest_rotation_xyzw`.
 
-Bodies and shoes keep their native G4SK armature, bind pose, vertex groups and
-weight palettes. G4MT tracks are applied independently to every character part
-whose bone CRC/name matches a motion target. Uniform-only helpers such as
-`_wgt_1_0`, sleeves and accessories remain unkeyed and inherit motion through
-their native hierarchy. No vertex weights or part-specific bones are remapped.
+Bodies and shoes keep their native G4SK bind pose and weights. Their Blender
+vertex groups are named from the verified G4MD CRC32 palette so every weight
+targets the matching bone on the actor armature. G4MT tracks are applied
+independently to every character part whose bone CRC/name matches a motion
+target. Uniform-only helpers such as `_wgt_1_0`, sleeves and accessories remain
+unkeyed and inherit motion through their native hierarchy.
 
 Imported materials use a Level-5-style Eevee node graph with two hard shadow
 regions instead of conventional smooth shading. The base texture keeps its

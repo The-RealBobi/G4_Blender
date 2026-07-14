@@ -1930,13 +1930,13 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
                 start = entry["offset"]
                 end = start + entry["size"]
                 skeleton_data = pack_data[start:end]
-                if palette_path == path or g4sk_covers_g4md_palette(skeleton_data, palette_path):
+                if g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path):
                     return skeleton_data, f"{path}::{entry['name']}"
 
     own = companion(path, ".g4sk")
     if own is not None:
         skeleton_data = own.read_bytes()
-        if palette_path == path or g4sk_covers_g4md_palette(skeleton_data, palette_path):
+        if g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path):
             return skeleton_data, str(own)
 
     # Character G4MD files are sometimes unpacked beside their original
