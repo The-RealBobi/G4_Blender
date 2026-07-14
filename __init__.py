@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 11),
+    "version": (0, 14, 15),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -289,6 +289,11 @@ class G4ImporterPreferences(AddonPreferences):
         default="{}",
         options={"HIDDEN"},
         description="Persistent body and shoes selections keyed by event actor ID",
+    )
+    character_import_parts: StringProperty(
+        default="{}",
+        options={"HIDDEN"},
+        description="Persistent character-part selections used by model and animation imports",
     )
     port_script: StringProperty(
         name="G4 Port Script",
@@ -2651,12 +2656,13 @@ def attach_part_to_armature(
         armature_modifiers = [modifier for modifier in obj.modifiers if modifier.type == "ARMATURE"]
         if not armature_modifiers:
             raise RuntimeError(f"Character part mesh has no armature modifier: {path}::{obj.name}")
+        # The Collada import may create a private skeleton for a part even
+        # when a target rig was supplied.  Parts must never retain that
+        # skeleton: its matching bone names otherwise make the Outliner look
+        # plausible while the meshes ignore the actor's animated rig.
         for modifier in armature_modifiers:
-            if modifier.object in part_armatures:
-                modifier.object = target_armature
-        if not any(modifier.object == target_armature for modifier in armature_modifiers):
-            raise RuntimeError(f"Character part mesh could not be bound to {target_armature.name}: {path}::{obj.name}")
-        if obj.parent in part_armatures:
+            modifier.object = target_armature
+        if obj.parent != target_armature:
             obj.parent = target_armature
             obj.matrix_parent_inverse = Matrix.Identity(4)
             obj.matrix_basis = Matrix.Identity(4)
@@ -2784,6 +2790,99 @@ def import_character_parts_for_armature(
     return attached, selected
 
 
+def saved_character_import_parts(prefs) -> dict:
+    try:
+        value = json.loads(getattr(prefs, "character_import_parts", "{}") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+class IMPORT_OT_level5_g4_character_setup(Operator):
+    """Collect character cosmetics once, after the primary file picker."""
+
+    bl_idname = "import_scene.level5_g4_character_setup"
+    bl_label = "Character Parts"
+    bl_options = {"REGISTER", "UNDO"}
+
+    model_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    animation_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    animation_settings_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    create_report_text: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
+    body_model: StringProperty(name="Body", subtype="FILE_PATH")
+    shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Sleeves / Collar", subtype="FILE_PATH")
+    gloves_model: StringProperty(name="Gloves", subtype="FILE_PATH")
+    armband_model: StringProperty(name="Captain Armband", subtype="FILE_PATH")
+    nameplate_model: StringProperty(name="Nameplate", subtype="FILE_PATH")
+    attach_ball: BoolProperty(name="Attach Ball")
+    ball_model: StringProperty(name="Ball Model", subtype="FILE_PATH")
+
+    def invoke(self, context, event):
+        saved = saved_character_import_parts(addon_preferences())
+        for key in (
+            "body_model", "shoes_model", "accessory_model", "gloves_model",
+            "armband_model", "nameplate_model", "ball_model",
+        ):
+            if not getattr(self, key):
+                setattr(self, key, str(saved.get(key) or ""))
+        self.attach_ball = bool(saved.get("attach_ball", self.attach_ball))
+        return context.window_manager.invoke_props_dialog(self, width=660)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text=f"Rig: {Path(self.model_path).name}", icon="ARMATURE_DATA")
+        layout.label(text="Empty Body/Shoes fields use the matching parts automatically.")
+        layout.prop(self, "body_model")
+        layout.prop(self, "shoes_model")
+        layout.prop(self, "accessory_model")
+        layout.prop(self, "gloves_model")
+        layout.prop(self, "armband_model")
+        layout.prop(self, "nameplate_model")
+        layout.prop(self, "attach_ball")
+        if self.attach_ball:
+            layout.prop(self, "ball_model")
+
+    def execute(self, context):
+        model_path = Path(bpy.path.abspath(self.model_path))
+        if not model_path.is_file() or model_path.suffix.lower() not in MODEL_EXTENSIONS:
+            self.report({"ERROR"}, f"Character model not found or unsupported: {model_path}")
+            return {"CANCELLED"}
+
+        values = {
+            key: bpy.path.abspath(getattr(self, key)) if getattr(self, key) else ""
+            for key in (
+                "body_model", "shoes_model", "accessory_model", "gloves_model",
+                "armband_model", "nameplate_model", "ball_model",
+            )
+        }
+        values["attach_ball"] = self.attach_ball
+        addon_preferences().character_import_parts = json.dumps(values, sort_keys=True)
+
+        if self.animation_path:
+            settings = json.loads(self.animation_settings_json or "{}")
+            result = bpy.ops.import_scene.level5_g4mt(
+                "EXEC_DEFAULT",
+                filepath=self.animation_path,
+                model_path=str(model_path),
+                import_model=True,
+                import_character_parts=True,
+                prompt_for_models=False,
+                **values,
+                **settings,
+            )
+        else:
+            result = bpy.ops.import_scene.level5_g4(
+                "EXEC_DEFAULT",
+                filepath=str(model_path),
+                create_report_text=self.create_report_text,
+                import_character_parts=True,
+                character_setup_complete=True,
+                **values,
+            )
+        return result
+
+
 class IMPORT_OT_level5_g4(Operator, ImportHelper):
     bl_idname = "import_scene.level5_g4"
     bl_label = "Import Level-5 G4 Model"
@@ -2816,6 +2915,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
+    character_setup_complete: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
     body_model: StringProperty(
         name="Body Model",
         description="Optional u*.g4md/.g4pkm override; empty detects the matching body automatically",
@@ -2825,7 +2928,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         description="Optional s*.g4md/.g4pkm override; empty detects matching shoes automatically",
     )
     accessory_model: StringProperty(
-        name="Sleeves / Collar Model",
+        name="Arms / Neck",
         description="Optional sk*.g4md/.g4pkm part; matching sk* is attached automatically for a selected u* body",
     )
     gloves_model: StringProperty(name="Gloves Model", description="Optional g*.g4md/.g4pkm gloves part")
@@ -2842,24 +2945,12 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
     )
     def invoke(self, context, event):
         self.auto_character_parts = False
+        self.character_setup_complete = False
         return ImportHelper.invoke(self, context, event)
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "create_report_text")
-        is_character = bool(re.fullmatch(r"c\d{6,8}", Path(self.filepath).stem, re.IGNORECASE))
-        if is_character:
-            layout.prop(self, "import_character_parts")
-        if is_character and self.import_character_parts:
-            layout.prop(self, "body_model")
-            layout.prop(self, "shoes_model")
-            layout.prop(self, "accessory_model")
-            layout.prop(self, "gloves_model")
-            layout.prop(self, "armband_model")
-            layout.prop(self, "nameplate_model")
-            layout.prop(self, "attach_ball")
-            if self.attach_ball:
-                layout.prop(self, "ball_model")
 
     def execute(self, context):
         base_path = Path(self.filepath)
@@ -2877,6 +2968,23 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         if not paths:
             self.report({"ERROR"}, "No supported G4 model files selected")
             return {"CANCELLED"}
+
+        if (
+            not self.character_setup_complete
+            and len(paths) == 1
+            and re.fullmatch(r"c\d{6,8}", paths[0].stem, re.IGNORECASE)
+        ):
+            selected_path = str(paths[0])
+            create_report_text = self.create_report_text
+            bpy.app.timers.register(
+                lambda: bpy.ops.import_scene.level5_g4_character_setup(
+                    "INVOKE_DEFAULT",
+                    model_path=selected_path,
+                    create_report_text=create_report_text,
+                ) and None,
+                first_interval=0.01,
+            )
+            return {"FINISHED"}
 
         prefs = addon_preferences()
         imported_total = 0
@@ -3069,7 +3177,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
     )
     body_model: StringProperty(name="Body Model")
     shoes_model: StringProperty(name="Shoes Model")
-    accessory_model: StringProperty(name="Sleeves / Collar Model")
+    accessory_model: StringProperty(name="Arms / Neck")
     gloves_model: StringProperty(name="Gloves Model")
     armband_model: StringProperty(name="Captain Armband Model")
     nameplate_model: StringProperty(name="Nameplate Model")
@@ -3177,7 +3285,7 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
 
     body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
-    accessory_model: StringProperty(name="Sleeves / Collar Model", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Arms / Neck", subtype="FILE_PATH")
     gloves_model: StringProperty(name="Gloves Model", subtype="FILE_PATH")
     armband_model: StringProperty(name="Captain Armband Model", subtype="FILE_PATH")
     nameplate_model: StringProperty(name="Nameplate Model", subtype="FILE_PATH")
@@ -3305,6 +3413,7 @@ def menu_func_import(self, context):
 
 classes = [
     G4ImporterPreferences,
+    IMPORT_OT_level5_g4_character_setup,
     IMPORT_OT_level5_g4,
     IMPORT_OT_level5_g4_folder,
     IMPORT_OT_level5_g4_character_parts,

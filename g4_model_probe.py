@@ -75,6 +75,9 @@ def default_chara_parts_json() -> Path | None:
     script_dir = Path(__file__).resolve().parent
     candidates.extend(sorted(script_dir.glob("chara_parts*.json")))
     candidates.extend(sorted((script_dir / "data").glob("chara_parts*.json")))
+    candidates.extend(
+        sorted((RAW_DATA_ROOT / "common" / "gamedata" / "character").glob("chara_parts*.json"))
+    )
 
     if RAW_DATA_ROOT.parts[-2:] == ("raw", "data"):
         readable_root = RAW_DATA_ROOT.parents[1] / "readable" / "data"
@@ -99,6 +102,7 @@ CHARA_MODEL_LOOKUP_DATA: dict | None = None
 CHARA_PARTS_JSON = default_chara_parts_json()
 CHARA_PARTS_DATA: dict | None = None
 UNIFORM_FAMILY_LOOKUP: dict[str, dict] | None = None
+UNIFORM_TEXTURE_LOOKUP: dict[str, list[tuple[int, str]]] | None = None
 UNIFORM_FAMILY_SKELETON_CACHE: dict[str, tuple[bytes | None, str | None]] = {}
 SKELETON_CACHE = (
     Path(os.environ["LEVEL5_G4_SKELETON_CACHE"]).expanduser()
@@ -186,7 +190,7 @@ def infer_raw_data_root(path: Path) -> Path | None:
 
 
 def configure_raw_data_root_from_path(path: Path) -> None:
-    global RAW_DATA_ROOT, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE
+    global RAW_DATA_ROOT, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE
     if os.environ.get("LEVEL5_G4_RAW_ROOT"):
         return
     inferred = infer_raw_data_root(path)
@@ -195,6 +199,7 @@ def configure_raw_data_root_from_path(path: Path) -> None:
         CHARA_PARTS_JSON = None
         CHARA_PARTS_DATA = None
         UNIFORM_FAMILY_LOOKUP = None
+        UNIFORM_TEXTURE_LOOKUP = None
         UNIFORM_FAMILY_SKELETON_CACHE.clear()
 
 
@@ -1357,6 +1362,73 @@ def load_chara_parts_data() -> dict:
     except json.JSONDecodeError:
         CHARA_PARTS_DATA = {}
     return CHARA_PARTS_DATA
+
+
+def load_uniform_texture_lookup() -> dict[str, list[tuple[int, str]]]:
+    """Map uniform models to the G4TX containers declared by chara_parts.
+
+    The G4MD material names only carry the texture-set CRC32 (for example,
+    ``u031001_20``).  The authoritative path for that set is kept in the
+    matching CHARA_PARTS_CLOTHES_INFO row, and can belong to a different
+    uniform family than the model itself.
+    """
+    global UNIFORM_TEXTURE_LOOKUP
+    if UNIFORM_TEXTURE_LOOKUP is not None:
+        return UNIFORM_TEXTURE_LOOKUP
+
+    lookup: dict[str, list[tuple[int, str]]] = {}
+    for entry in load_chara_parts_data().get("Entries") or []:
+        if entry.get("Name") != "CHARA_PARTS_CLOTHES_INFO":
+            continue
+        values = entry.get("Values") or []
+        if len(values) < 2:
+            continue
+        model_path = str(values[0].get("Value") or "").replace("\\", "/").lower()
+        texture_path = str(values[1].get("Value") or "").replace("\\", "/")
+        if not model_path.startswith("_uniform/") or not texture_path.lower().endswith(".g4tx"):
+            continue
+        texture_crc = 0
+        if len(values) > 5:
+            try:
+                texture_crc = int(values[5].get("Value") or 0) & 0xFFFFFFFF
+            except (TypeError, ValueError):
+                pass
+        lookup.setdefault(model_path, []).append((texture_crc, texture_path))
+
+    UNIFORM_TEXTURE_LOOKUP = lookup
+    return lookup
+
+
+def find_uniform_texture_containers_from_chara(
+    path: Path,
+    material_names: Iterable[str],
+) -> list[Path]:
+    """Find shared uniform textures by the model/material CRC32 metadata."""
+    try:
+        relative = path.relative_to(RAW_DATA_ROOT).as_posix().lower()
+    except ValueError:
+        return []
+    prefix = "common/chr/"
+    if not relative.startswith(prefix):
+        return []
+
+    texture_sets = set()
+    for material_name in material_names:
+        name = material_name[:-1] if material_name.endswith("M") else material_name
+        texture_sets.add(crc32b(name.encode("ascii", errors="ignore")))
+
+    model_path = relative[len(prefix) :]
+    declared = load_uniform_texture_lookup().get(model_path) or []
+    selected = [
+        texture_path
+        for texture_crc, texture_path in declared
+        if texture_crc and texture_crc in texture_sets
+    ]
+    if not texture_sets:
+        selected.extend(texture_path for _, texture_path in declared)
+
+    candidates = [RAW_DATA_ROOT / "dx11" / "chr" / texture_path for texture_path in selected]
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate.is_file()))
 
 
 def load_uniform_family_lookup() -> dict[str, dict]:
@@ -4032,6 +4104,11 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
     texture_paths: list[Path] = []
     if extract_textures:
         texture_containers = find_texture_containers_for_model(path)
+        texture_containers.extend(
+            candidate
+            for candidate in find_uniform_texture_containers_from_chara(path, md_info.get("material_names", []))
+            if candidate not in texture_containers
+        )
         texture_containers.extend(
             candidate
             for candidate in find_shared_map_texture_containers(path, md_info.get("material_names", []))

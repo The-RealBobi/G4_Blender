@@ -100,6 +100,7 @@ def addon_preferences():
         raw_data_root = os.environ.get("LEVEL5_G4_RAW_ROOT", "")
         keep_decode_json = False
         event_character_parts = "{}"
+        character_import_parts = "{}"
 
     return Defaults()
 
@@ -438,6 +439,12 @@ def import_model_for_animation(
     auto_character_parts: bool = True,
     body_model: str = "",
     shoes_model: str = "",
+    accessory_model: str = "",
+    gloves_model: str = "",
+    armband_model: str = "",
+    nameplate_model: str = "",
+    attach_ball: bool = False,
+    ball_model: str = "",
     character_part_stem: str = "",
     align_to_motion_rest: bool = True,
 ):
@@ -457,8 +464,14 @@ def import_model_for_animation(
             auto_character_parts=auto_character_parts,
             body_model=body_model,
             shoes_model=shoes_model,
+            accessory_model=accessory_model,
+            gloves_model=gloves_model,
+            armband_model=armband_model,
+            nameplate_model=nameplate_model,
+            attach_ball=attach_ball,
+            ball_model=ball_model,
             character_part_stem=character_part_stem,
-            preserve_character_part_armatures=import_character_parts,
+            preserve_character_part_armatures=False,
         )
     finally:
         prefs.apply_bone_orientation = original_orientation
@@ -808,11 +821,11 @@ class IMPORT_OT_level5_g4mt_pick_model(Operator, ImportHelper):
         animation_path = self.animation_path
         settings_json = self.settings_json
         defer_blender_call(
-            lambda: bpy.ops.import_scene.level5_g4mt_pick_body(
+            lambda: bpy.ops.import_scene.level5_g4_character_setup(
                 "INVOKE_DEFAULT",
-                animation_path=animation_path,
                 model_path=str(model_path),
-                settings_json=settings_json,
+                animation_path=animation_path,
+                animation_settings_json=settings_json,
             )
         )
         return {"FINISHED"}
@@ -946,6 +959,12 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
     )
     body_model: StringProperty(name="Body Model", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes Model", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Arms / Neck", subtype="FILE_PATH")
+    gloves_model: StringProperty(name="Gloves Model", subtype="FILE_PATH")
+    armband_model: StringProperty(name="Captain Armband Model", subtype="FILE_PATH")
+    nameplate_model: StringProperty(name="Nameplate Model", subtype="FILE_PATH")
+    attach_ball: BoolProperty(name="Attach Ball", default=False)
+    ball_model: StringProperty(name="Ball Model", subtype="FILE_PATH")
     prompt_for_models: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
     import_camera: BoolProperty(
         name="Import Matching Camera",
@@ -978,7 +997,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         layout.prop(self, "clip")
         layout.prop(self, "import_model")
         if self.import_model:
-            layout.label(text="Model, body and shoes will be requested after the animation", icon="FILE_FOLDER")
+            layout.label(text="Model and character cosmetics will be requested after the animation", icon="FILE_FOLDER")
         layout.prop(self, "import_camera")
         if self.import_camera:
             layout.prop(self, "set_active_camera")
@@ -990,16 +1009,26 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         if path.suffix.lower() not in {".g4mt", ".g4pk"}:
             self.report({"ERROR"}, "Select a G4MT animation file or a G4PK containing G4MT")
             return {"CANCELLED"}
-        if self.import_model and self.prompt_for_models and not self.model_path:
+        if self.import_model and self.prompt_for_models:
             animation_path = str(path)
             settings_json = g4mt_import_settings(self)
-            defer_blender_call(
-                lambda: bpy.ops.import_scene.level5_g4mt_pick_model(
-                    "INVOKE_DEFAULT",
-                    animation_path=animation_path,
-                    settings_json=settings_json,
+            if self.model_path:
+                defer_blender_call(
+                    lambda: bpy.ops.import_scene.level5_g4_character_setup(
+                        "INVOKE_DEFAULT",
+                        model_path=self.model_path,
+                        animation_path=animation_path,
+                        animation_settings_json=settings_json,
+                    )
                 )
-            )
+            else:
+                defer_blender_call(
+                    lambda: bpy.ops.import_scene.level5_g4mt_pick_model(
+                        "INVOKE_DEFAULT",
+                        animation_path=animation_path,
+                        settings_json=settings_json,
+                    )
+                )
             return {"FINISHED"}
         prefs = addon_preferences()
         decoded_path = None
@@ -1059,6 +1088,12 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                     False,
                     self.body_model,
                     self.shoes_model,
+                    self.accessory_model,
+                    self.gloves_model,
+                    self.armband_model,
+                    self.nameplate_model,
+                    self.attach_ball,
+                    self.ball_model,
                 )
             if armature is None:
                 armature = best_armature(bpy.data.objects, names)
