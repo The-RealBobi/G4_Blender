@@ -24,6 +24,10 @@ def default_chara_model_xml() -> Path:
     if env_path:
         candidates.append(Path(env_path).expanduser())
 
+    candidates.extend(sorted(
+        (RAW_DATA_ROOT / "common" / "gamedata" / "character").glob("chara_model*.xml")
+    ))
+
     script_dir = Path(__file__).resolve().parent
     search_dirs = [script_dir, script_dir / "TOOLS", script_dir.parent / "TOOLS", Path("TOOLS")]
     for directory in search_dirs:
@@ -97,6 +101,7 @@ def default_chara_parts_json() -> Path | None:
 
 
 CHARA_MODEL_XML = default_chara_model_xml()
+CHARA_MODEL_MAPS: tuple[dict[str, dict], dict[int, dict]] | None = None
 CHARA_MODEL_LOOKUP = default_chara_model_lookup()
 CHARA_MODEL_LOOKUP_DATA: dict | None = None
 CHARA_PARTS_JSON = default_chara_parts_json()
@@ -192,12 +197,14 @@ def infer_raw_data_root(path: Path) -> Path | None:
 
 
 def configure_raw_data_root_from_path(path: Path) -> None:
-    global RAW_DATA_ROOT, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CANDIDATES
+    global RAW_DATA_ROOT, CHARA_MODEL_XML, CHARA_MODEL_MAPS, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CANDIDATES
     if os.environ.get("LEVEL5_G4_RAW_ROOT"):
         return
     inferred = infer_raw_data_root(path)
     if inferred is not None:
         RAW_DATA_ROOT = inferred
+        CHARA_MODEL_XML = default_chara_model_xml()
+        CHARA_MODEL_MAPS = None
         CHARA_PARTS_JSON = None
         CHARA_PARTS_DATA = None
         UNIFORM_FAMILY_LOOKUP = None
@@ -1309,8 +1316,12 @@ def model_relpath_candidates(path: Path) -> set[str]:
 
 
 def load_chara_model_maps() -> tuple[dict[str, dict], dict[int, dict]]:
+    global CHARA_MODEL_MAPS
+    if CHARA_MODEL_MAPS is not None:
+        return CHARA_MODEL_MAPS
     if not CHARA_MODEL_XML.exists():
-        return {}, {}
+        CHARA_MODEL_MAPS = ({}, {})
+        return CHARA_MODEL_MAPS
     root = ET.parse(CHARA_MODEL_XML).getroot()
     models: dict[str, dict] = {}
     bodies: dict[int, dict] = {}
@@ -1334,7 +1345,8 @@ def load_chara_model_maps() -> tuple[dict[str, dict], dict[int, dict]]:
                 bodies[int(values[0])] = values
             except ValueError:
                 pass
-    return models, bodies
+    CHARA_MODEL_MAPS = (models, bodies)
+    return CHARA_MODEL_MAPS
 
 
 def load_chara_model_lookup() -> dict:
@@ -1674,6 +1686,35 @@ def resolve_g4sk_info_from_cache(path: Path) -> tuple[dict | None, str | None]:
 
 
 def resolve_g4sk_from_chara_model(path: Path) -> tuple[bytes | None, str | None]:
+    models, bodies = load_chara_model_maps()
+    if models:
+        rel_candidates = model_relpath_candidates(path)
+        model_info = None
+        model_key = None
+        for candidate in rel_candidates:
+            if candidate in models:
+                model_info = models[candidate]
+                model_key = candidate
+                break
+        if model_info is not None:
+            try:
+                body_info = bodies.get(int(model_info.get(4, "0")))
+            except ValueError:
+                body_info = None
+            if body_info is not None:
+                candidates = skeleton_candidates_from_body_info(body_info, include_crc=False)
+                if not any(candidate.exists() for candidate in candidates):
+                    candidates = skeleton_candidates_from_body_info(body_info, include_crc=True)
+                seen = set()
+                for candidate in candidates:
+                    if candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    if candidate.exists():
+                        return candidate.read_bytes(), f"{candidate} via {CHARA_MODEL_XML} ({model_key})"
+
+    # The shipped lookup remains useful for old extractions where no readable
+    # config is present, but must not override the active dump's CFG.
     model_row, model_key = lookup_model_row(path)
     if model_row is not None:
         body_row = lookup_body_row(model_row)
@@ -1682,37 +1723,6 @@ def resolve_g4sk_from_chara_model(path: Path) -> tuple[bytes | None, str | None]
         for candidate in candidates:
             if candidate.exists():
                 return candidate.read_bytes(), f"{candidate} via {CHARA_MODEL_LOOKUP} ({model_key})"
-
-    models, bodies = load_chara_model_maps()
-    if not models:
-        return None, None
-
-    rel_candidates = model_relpath_candidates(path)
-    model_info = None
-    model_key = None
-    for candidate in rel_candidates:
-        if candidate in models:
-            model_info = models[candidate]
-            model_key = candidate
-            break
-    if model_info is None:
-        return None, None
-
-    body_info = None
-    try:
-        body_info = bodies.get(int(model_info.get(4, "0")))
-    except ValueError:
-        body_info = None
-    if body_info is None:
-        return None, None
-
-    seen = set()
-    for candidate in skeleton_candidates_from_body_info(body_info):
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if candidate.exists():
-            return candidate.read_bytes(), f"{candidate} via {CHARA_MODEL_XML} ({model_key})"
     return None, None
 
 
@@ -1953,6 +1963,16 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
         is_face_asset = "_face" in path.relative_to(RAW_DATA_ROOT).parts
     except ValueError:
         is_face_asset = False
+    # Some face variants differ only in their final model digit and share the
+    # preceding variant's rig.  Keep the lookup local to that character group
+    # and still require the complete CRC32 palette to match.
+    if is_face_asset and path.stem.endswith("1"):
+        base_stem = f"{path.stem[:-1]}0"
+        base_dir = path.parent.parent / base_stem
+        for candidate in (base_dir / f"{base_stem}.g4sk", base_dir / f"{base_stem}.g4pkm"):
+            for skeleton_data, source in g4sk_entries_from_candidate(candidate):
+                if g4sk_covers_g4md_palette(skeleton_data, palette_path):
+                    return skeleton_data, f"{source} via local face variant rig"
 
     skeleton_data, skeleton_source = resolve_uniform_generic_g4sk(palette_path, allow_common_fallback=False)
     if skeleton_data is not None:
