@@ -2898,14 +2898,12 @@ def menu_func_export(self, context):
 
 
 classes = [
-    G4EventCharacterPart,
     IMPORT_OT_level5_g4mt_pick_model,
     IMPORT_OT_level5_g4mt_pick_body,
     IMPORT_OT_level5_g4mt_pick_shoes,
     IMPORT_OT_level5_g4mt,
     IMPORT_OT_level5_g4cm,
     IMPORT_OT_level5_p3lip,
-    IMPORT_OT_level5_g4_event_parts,
     IMPORT_OT_level5_g4_event_folder,
     EXPORT_OT_level5_g4_fbx,
 ]
@@ -2950,6 +2948,15 @@ if hasattr(bpy.types, "FileHandler"):
 
 
 def register():
+    # Older installed builds registered a separate Event Character Parts
+    # operator.  Remove it on reload so it cannot survive in Blender's Python
+    # session and reintroduce the obsolete first dialog.
+    legacy = getattr(bpy.types, "IMPORT_SCENE_OT_level5_g4_event_parts", None)
+    if legacy is not None:
+        try:
+            bpy.utils.unregister_class(legacy)
+        except RuntimeError:
+            pass
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
