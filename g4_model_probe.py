@@ -847,6 +847,7 @@ def remap_joint_palette_by_g4md_hashes(
     joint_palette: list[int],
     skeleton_info: dict | None,
     joint_hash_table_offset: int,
+    allow_partial: bool = False,
 ) -> tuple[list[int] | None, int]:
     """Resolve G4MD palette slots through its embedded CRC32 joint table.
 
@@ -872,11 +873,16 @@ def remap_joint_palette_by_g4md_hashes(
     if last_offset + 4 > len(data):
         return None, 0
     hashes = [u32(data, joint_hash_table_offset + index * 4) for index in joint_palette]
-    if any(value not in hash_to_index for value in hashes):
+    unresolved = [value for value in hashes if value not in hash_to_index]
+    if unresolved and not allow_partial:
         return None, 0
-    remapped = [
-        hash_to_index[value] for value in hashes
-    ]
+    # A few character-exclusive clothes reference dynamic helper joints that
+    # are absent from the actor's exported G4SK.  Do not reinterpret those
+    # slots as physical indices: that attaches their weights to unrelated
+    # limbs.  ``-1`` is intentionally ignored by the Blender mesh writer.
+    remapped = [hash_to_index.get(value, -1) for value in hashes]
+    if not any(index >= 0 for index in remapped):
+        return None, 0
     return remapped, sum(before != after for before, after in zip(joint_palette, remapped))
 
 
@@ -3536,7 +3542,10 @@ def palette_spatial_error(
         for local_index, weight in influences[vertex_index]:
             if weight <= 0.0:
                 continue
-            if local_index >= len(joint_palette) or joint_palette[local_index] >= len(bind_matrices):
+            if (
+                local_index >= len(joint_palette)
+                or not 0 <= joint_palette[local_index] < len(bind_matrices)
+            ):
                 total += 100.0 * weight
                 total_weight += weight
                 continue
@@ -4274,11 +4283,20 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         palette_remap_count = 0
         palette_remap_source = None
         palette_spatial_score = None
+        # The separated neck/arm meshes have a shuffled local palette.  Their
+        # embedded CRC table is the only stable relationship to the actor
+        # skeleton; selecting a source G4SK by proximity swaps finger groups
+        # on otherwise compatible body types.
+        crc_palette_is_authoritative = (
+            uniform_model
+            and path.stem.lower().startswith(("sk", "s", "g", "m", "n"))
+        )
         hash_palette, hash_remap_count = remap_joint_palette_by_g4md_hashes(
             md_data,
             joint_palette,
             skeleton_info,
             md_info.get("joint_hash_table", 0),
+            allow_partial=crc_palette_is_authoritative,
         )
         direct_palette_score = palette_spatial_error(
             position_tuples,
@@ -4299,14 +4317,6 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             )
             if hash_palette is None and uniform_model and path.stem.lower().startswith("s")
             else (None, 0)
-        )
-        # The separated neck/arm meshes have a shuffled local palette.  Their
-        # embedded CRC table is the only stable relationship to the actor
-        # skeleton; selecting a source G4SK by proximity swaps finger groups
-        # on otherwise compatible body types.
-        crc_palette_is_authoritative = (
-            uniform_model
-            and path.stem.lower().startswith(("sk", "s", "g", "m", "n"))
         )
         if crc_palette_is_authoritative and hash_palette is not None:
             joint_palette = hash_palette
