@@ -111,6 +111,7 @@ UNIFORM_TEXTURE_LOOKUP: dict[str, list[tuple[int, str]]] | None = None
 UNIFORM_FAMILY_SKELETON_CACHE: dict[str, tuple[bytes | None, str | None]] = {}
 UNIFORM_CRC_SKELETON_CACHE: dict[str, tuple[bytes | None, str | None]] = {}
 UNIFORM_CRC_SKELETON_CANDIDATES: list[tuple[bytes, str, set[int], int]] | None = None
+G4SK_NAME_HASH_CACHE: dict[bytes, set[int]] = {}
 SKELETON_CACHE = (
     Path(os.environ["LEVEL5_G4_SKELETON_CACHE"]).expanduser()
     if os.environ.get("LEVEL5_G4_SKELETON_CACHE")
@@ -1889,11 +1890,14 @@ def g4sk_covers_g4md_palette(skeleton_data: bytes, path: Path) -> bool:
     used_hashes = uniform_used_joint_hashes(path)
     if not used_hashes:
         return False
-    try:
-        names = parse_g4sk(skeleton_data).get("names", [])
-    except (ValueError, struct.error):
-        return False
-    skeleton_hashes = {crc32b(name.encode("ascii")) for name in names if name}
+    skeleton_hashes = G4SK_NAME_HASH_CACHE.get(skeleton_data)
+    if skeleton_hashes is None:
+        try:
+            names = parse_g4sk(skeleton_data).get("names", [])
+        except (ValueError, struct.error):
+            return False
+        skeleton_hashes = {crc32b(name.encode("ascii")) for name in names if name}
+        G4SK_NAME_HASH_CACHE[skeleton_data] = skeleton_hashes
     return used_hashes <= skeleton_hashes
 
 
