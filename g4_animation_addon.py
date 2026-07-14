@@ -1040,13 +1040,19 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         camera_motion = None
         try:
             g4mt_path, extracted_g4mt_path, package_entry_name = materialize_g4mt(path, self.entry)
+            selected = context.active_object if self.reuse_selected_armature else None
             configured_model = bpy.path.abspath(self.model_path or "")
             model_path_hint = Path(configured_model) if configured_model else None
             if model_path_hint is not None and (
                 not model_path_hint.is_file() or model_path_hint.suffix.lower() not in {".g4md", ".g4pkm"}
             ):
                 raise RuntimeError(f"Character model not found or unsupported: {model_path_hint}")
-            skeleton_hint = resolve_skeleton_path(model_path_hint)
+            skeleton_model_hint = model_path_hint
+            if skeleton_model_hint is None and selected is not None and selected.type == "ARMATURE":
+                source = Path(str(selected.get("g4_character_model_source", "")))
+                if source.is_file():
+                    skeleton_model_hint = source
+            skeleton_hint = resolve_skeleton_path(skeleton_model_hint)
             motion, decoded_path = decode_g4mt(g4mt_path, self.clip, prefs, skeleton_hint)
             if self.import_camera:
                 camera_path = resolve_companion_g4cm(path, getattr(prefs, "raw_data_root", ""))
@@ -1062,7 +1068,6 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                         camera_motion = None
 
             names = track_bone_names(motion)
-            selected = context.active_object if self.reuse_selected_armature else None
             if selected is not None and selected.type == "ARMATURE":
                 resolve_track_names_from_armature(motion, selected)
                 names = track_bone_names(motion)
