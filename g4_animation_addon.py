@@ -854,6 +854,7 @@ class IMPORT_OT_level5_g4mt_pick_model(Operator, ImportHelper):
                 model_path=str(model_path),
                 animation_path=animation_path,
                 animation_settings_json=settings_json,
+                allow_head_override=True,
             )
         )
         return {"FINISHED"}
@@ -1047,6 +1048,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                         model_path=self.model_path,
                         animation_path=animation_path,
                         animation_settings_json=settings_json,
+                        allow_head_override=True,
                     )
                 )
             else:

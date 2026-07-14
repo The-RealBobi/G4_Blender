@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 36),
+    "version": (0, 14, 37),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -3033,6 +3033,29 @@ def saved_character_import_parts(prefs) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def autofill_character_setup_parts(operator) -> None:
+    """Set the modular defaults for the head currently selected in the dialog."""
+    head_path = Path(bpy.path.abspath(operator.head_model or operator.model_path))
+    if not head_path.is_file():
+        return
+    prefs = addon_preferences()
+    body = find_character_part(head_path, "u", prefs)
+    shoes = find_character_part(head_path, "s", prefs)
+    accessory = find_accessory_part_for_body(body, prefs) if body is not None else None
+    for key, path in (
+        ("body_model", body),
+        ("shoes_model", shoes),
+        ("accessory_model", accessory),
+    ):
+        if path is not None:
+            setattr(operator, key, str(path))
+
+
+def character_setup_head_changed(operator, _context) -> None:
+    if operator.allow_head_override:
+        autofill_character_setup_parts(operator)
+
+
 class IMPORT_OT_level5_g4_character_setup(Operator):
     """Collect character cosmetics once, after the primary file picker."""
 
@@ -3043,7 +3066,9 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     model_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     animation_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     animation_settings_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    allow_head_override: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
     create_report_text: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
+    head_model: StringProperty(name="Head", subtype="FILE_PATH", update=character_setup_head_changed)
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
     accessory_model: StringProperty(name="Sleeves / Collar", subtype="FILE_PATH")
@@ -3055,8 +3080,15 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
 
     def invoke(self, context, event):
         saved = saved_character_import_parts(addon_preferences())
+        selected_model = Path(bpy.path.abspath(self.model_path))
+        if self.allow_head_override and not self.head_model:
+            self.head_model = str(selected_model)
+        # A model-specific body profile is safer than reusing the last global
+        # choice.  The remaining cosmetic choices do not have a universal
+        # counterpart, so retain their saved values as useful defaults.
+        autofill_character_setup_parts(self)
         for key in (
-            "body_model", "shoes_model", "accessory_model", "gloves_model",
+            "gloves_model",
             "armband_model", "nameplate_model", "ball_model",
         ):
             if not getattr(self, key):
@@ -3067,7 +3099,9 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     def draw(self, context):
         layout = self.layout
         layout.label(text=f"Rig: {Path(self.model_path).name}", icon="ARMATURE_DATA")
-        layout.label(text="Empty Body/Shoes fields use the matching parts automatically.")
+        if self.allow_head_override:
+            layout.prop(self, "head_model")
+        layout.label(text="Body, shoes and sleeves are prefilled from the selected head.")
         layout.prop(self, "body_model")
         layout.prop(self, "shoes_model")
         layout.prop(self, "accessory_model")
@@ -3079,7 +3113,7 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             layout.prop(self, "ball_model")
 
     def execute(self, context):
-        model_path = Path(bpy.path.abspath(self.model_path))
+        model_path = Path(bpy.path.abspath(self.head_model or self.model_path))
         if not model_path.is_file() or model_path.suffix.lower() not in MODEL_EXTENSIONS:
             self.report({"ERROR"}, f"Character model not found or unsupported: {model_path}")
             return {"CANCELLED"}

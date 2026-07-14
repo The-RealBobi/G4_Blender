@@ -173,6 +173,10 @@ superset of the companion file, it is selected for the model as well, so
 dynamic targets such as character-specific helpers are present in both the
 bind pose and the animation.
 
+When importing a G4MT with a new actor, the shared character-parts dialog is
+shown once. It permits replacing the head and pre-fills the body, shoes and
+declared sleeves/collar from the selected head's character configuration.
+
 Bodies and shoes keep their native G4SK bind pose and weights. Their Blender
 vertex groups are named from the verified G4MD CRC32 palette so every weight
 targets the matching bone on the actor armature. G4MT tracks are applied
