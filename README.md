@@ -168,7 +168,10 @@ orientation is enabled, the original rest quaternion is stored on each bone as
 When animation is applied to an already imported actor, the importer reuses
 the exact resolved G4SK source recorded on that armature. This includes a G4SK
 embedded in a sibling G4PKM, rather than falling back to a shorter companion
-rig with matching filenames.
+rig with matching filenames. If that embedded G4SK is a strict CRC-name
+superset of the companion file, it is selected for the model as well, so
+dynamic targets such as character-specific helpers are present in both the
+bind pose and the animation.
 
 Bodies and shoes keep their native G4SK bind pose and weights. Their Blender
 vertex groups are named from the verified G4MD CRC32 palette so every weight

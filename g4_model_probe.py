@@ -1885,19 +1885,26 @@ def resolve_uniform_generic_g4sk(
     return None, None
 
 
-def g4sk_covers_g4md_palette(skeleton_data: bytes, path: Path) -> bool:
-    """Return whether a skeleton names every joint referenced by a G4MD mesh."""
-    used_hashes = uniform_used_joint_hashes(path)
-    if not used_hashes:
-        return False
+def g4sk_name_hashes(skeleton_data: bytes) -> set[int] | None:
     skeleton_hashes = G4SK_NAME_HASH_CACHE.get(skeleton_data)
     if skeleton_hashes is None:
         try:
             names = parse_g4sk(skeleton_data).get("names", [])
         except (ValueError, struct.error):
-            return False
+            return None
         skeleton_hashes = {crc32b(name.encode("ascii")) for name in names if name}
         G4SK_NAME_HASH_CACHE[skeleton_data] = skeleton_hashes
+    return skeleton_hashes
+
+
+def g4sk_covers_g4md_palette(skeleton_data: bytes, path: Path) -> bool:
+    """Return whether a skeleton names every joint referenced by a G4MD mesh."""
+    used_hashes = uniform_used_joint_hashes(path)
+    if not used_hashes:
+        return False
+    skeleton_hashes = g4sk_name_hashes(skeleton_data)
+    if skeleton_hashes is None:
+        return False
     return used_hashes <= skeleton_hashes
 
 
@@ -1937,21 +1944,26 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
                 if g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path):
                     return skeleton_data, f"{path}::{entry['name']}"
 
-    own = companion(path, ".g4sk")
-    if own is not None:
-        skeleton_data = own.read_bytes()
-        if g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path):
-            return skeleton_data, str(own)
-
     # Character G4MD files are sometimes unpacked beside their original
     # G4PKM.  The pack keeps the character-specific (and often dynamic) G4SK;
-    # prefer it to a generic config rig, but only after exact palette coverage
-    # proves that it is the sibling mesh's skeleton.
+    # prefer a verified dynamic superset to a shorter companion rig, but only
+    # after exact palette coverage proves that it is the sibling mesh's rig.
+    own = companion(path, ".g4sk")
+    own_data = own.read_bytes() if own is not None else None
+    own_matches = (
+        own_data is not None and g4sk_matches_or_unskinned_g4md(own_data, palette_path)
+    )
     own_pack = companion(path, ".g4pkm")
     if own_pack is not None:
         for skeleton_data, source in g4sk_entries_from_candidate(own_pack):
-            if g4sk_covers_g4md_palette(skeleton_data, palette_path):
+            if not g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path):
+                continue
+            embedded_hashes = g4sk_name_hashes(skeleton_data) or set()
+            own_hashes = g4sk_name_hashes(own_data) if own_data is not None else set()
+            if not own_matches or embedded_hashes > (own_hashes or set()):
                 return skeleton_data, f"{source} via sibling character pack"
+    if own_matches and own_data is not None and own is not None:
+        return own_data, str(own)
 
     # Older face assets may store a secondary G4MD (hair, brows, etc.) beside
     # the character's primary G4MD without a companion G4SK of their own.
