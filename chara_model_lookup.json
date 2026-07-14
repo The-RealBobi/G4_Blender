@@ -9,7 +9,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_animal/an000100/an000100.g4md": {
       "model_path": "_animal/an000100/an000100.g4md",
@@ -26378,6 +26380,17 @@
       "body_profile": 0,
       "body_mesh_profile": 0
     },
+    "_face/04_GO1/c04001221/c04001221.g4md": {
+      "model_path": "_face/04_GO1/c04001221/c04001221.g4md",
+      "body_id": 613579,
+      "body_path": "_common/c000101/c000101.objbin",
+      "g4sk_path": "c000101/c000101.g4sk",
+      "g4sk_stem": "c000101",
+      "skeleton_crc": "-646744094",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
     "_face/04_GO1/c04001230/c04001230.g4md": {
       "model_path": "_face/04_GO1/c04001230/c04001230.g4md",
       "body_id": 1382133758,
@@ -26930,6 +26943,17 @@
     },
     "_face/04_GO1/c04002060/c04002060.g4md": {
       "model_path": "_face/04_GO1/c04002060/c04002060.g4md",
+      "body_id": 613579,
+      "body_path": "_common/c000101/c000101.objbin",
+      "g4sk_path": "c000101/c000101.g4sk",
+      "g4sk_stem": "c000101",
+      "skeleton_crc": "-646744094",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
+    "_face/04_GO1/c04002061/c04002061.g4md": {
+      "model_path": "_face/04_GO1/c04002061/c04002061.g4md",
       "body_id": 613579,
       "body_path": "_common/c000101/c000101.objbin",
       "g4sk_path": "c000101/c000101.g4sk",
@@ -39558,14 +39582,14 @@
     },
     "_face/05_GO2/c05029720/c05029720.g4md": {
       "model_path": "_face/05_GO2/c05029720/c05029720.g4md",
-      "body_id": -693342501,
-      "body_path": "_common/c000201/c000201.objbin",
-      "g4sk_path": "c000201/c000201.g4sk",
-      "g4sk_stem": "c000201",
-      "skeleton_crc": "-617231941",
+      "body_id": 613579,
+      "body_path": "_common/c000101/c000101.objbin",
+      "g4sk_path": "c000101/c000101.g4sk",
+      "g4sk_stem": "c000101",
+      "skeleton_crc": "-646744094",
       "texture_path": "0",
-      "body_profile": 2,
-      "body_mesh_profile": 2
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/05_GO2/c05029730/c05029730.g4md": {
       "model_path": "_face/05_GO2/c05029730/c05029730.g4md",
@@ -47500,14 +47524,14 @@
     },
     "_face/08_ORION/c08110100/c08110100.g4md": {
       "model_path": "_face/08_ORION/c08110100/c08110100.g4md",
-      "body_id": -7084374,
+      "body_id": -1929443036,
       "body_path": "_common/c000301/c000301.objbin",
       "g4sk_path": "c000301/c000301.g4sk",
       "g4sk_stem": "c000301",
       "skeleton_crc": "1140781622",
       "texture_path": "0",
-      "body_profile": 14,
-      "body_mesh_profile": 4
+      "body_profile": 15,
+      "body_mesh_profile": 7
     },
     "_face/08_ORION/c08110110/c08110110.g4md": {
       "model_path": "_face/08_ORION/c08110110/c08110110.g4md",
@@ -47846,7 +47870,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11010037/c11010037.objbin": {
       "model_path": "_face/11_VICTORY/c11010037/c11010037.objbin",
@@ -54389,7 +54415,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11600041/c11600041.g4md": {
       "model_path": "_face/11_VICTORY/c11600041/c11600041.g4md",
@@ -60848,6 +60876,28 @@
       "body_profile": 0,
       "body_mesh_profile": 0
     },
+    "_face/11_VICTORY/c11901150/c11901150.g4md": {
+      "model_path": "_face/11_VICTORY/c11901150/c11901150.g4md",
+      "body_id": 613579,
+      "body_path": "_common/c000101/c000101.objbin",
+      "g4sk_path": "c000101/c000101.g4sk",
+      "g4sk_stem": "c000101",
+      "skeleton_crc": "-646744094",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
+    "_face/11_VICTORY/c11901160/c11901160.g4md": {
+      "model_path": "_face/11_VICTORY/c11901160/c11901160.g4md",
+      "body_id": 613579,
+      "body_path": "_common/c000101/c000101.objbin",
+      "g4sk_path": "c000101/c000101.g4sk",
+      "g4sk_stem": "c000101",
+      "skeleton_crc": "-646744094",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
     "_face/11_VICTORY/c11902010/c11902010.g4md": {
       "model_path": "_face/11_VICTORY/c11902010/c11902010.g4md",
       "body_id": -546821782,
@@ -61090,6 +61140,17 @@
       "body_profile": 0,
       "body_mesh_profile": 0
     },
+    "_face/11_VICTORY/c11902360/c11902360.g4md": {
+      "model_path": "_face/11_VICTORY/c11902360/c11902360.g4md",
+      "body_id": 613579,
+      "body_path": "_common/c000101/c000101.objbin",
+      "g4sk_path": "c000101/c000101.g4sk",
+      "g4sk_stem": "c000101",
+      "skeleton_crc": "-646744094",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
     "_face/11_VICTORY/c11903010/c11903010.g4md": {
       "model_path": "_face/11_VICTORY/c11903010/c11903010.g4md",
       "body_id": 613579,
@@ -61207,7 +61268,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11905020/c11905020.objbin": {
       "model_path": "_face/11_VICTORY/c11905020/c11905020.objbin",
@@ -61216,7 +61279,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11905030/c11905030.g4md": {
       "model_path": "_face/11_VICTORY/c11905030/c11905030.g4md",
@@ -61302,7 +61367,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11906020/c11906020.objbin": {
       "model_path": "_face/11_VICTORY/c11906020/c11906020.objbin",
@@ -61311,7 +61378,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11906030/c11906030.g4md": {
       "model_path": "_face/11_VICTORY/c11906030/c11906030.g4md",
@@ -61331,7 +61400,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11906050/c11906050.objbin": {
       "model_path": "_face/11_VICTORY/c11906050/c11906050.objbin",
@@ -61340,7 +61411,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11906060/c11906060.objbin": {
       "model_path": "_face/11_VICTORY/c11906060/c11906060.objbin",
@@ -61349,7 +61422,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11907010/c11907010.g4md": {
       "model_path": "_face/11_VICTORY/c11907010/c11907010.g4md",
@@ -61556,7 +61631,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_face/11_VICTORY/c11908080/c11908080.g4md": {
       "model_path": "_face/11_VICTORY/c11908080/c11908080.g4md",
@@ -61623,6 +61700,28 @@
       "texture_path": "0",
       "body_profile": 2,
       "body_mesh_profile": 2
+    },
+    "_face/11_VICTORY/c11908320/c11908320.g4md": {
+      "model_path": "_face/11_VICTORY/c11908320/c11908320.g4md",
+      "body_id": -693342501,
+      "body_path": "_common/c000201/c000201.objbin",
+      "g4sk_path": "c000201/c000201.g4sk",
+      "g4sk_stem": "c000201",
+      "skeleton_crc": "-617231941",
+      "texture_path": "0",
+      "body_profile": 2,
+      "body_mesh_profile": 2
+    },
+    "_face/11_VICTORY/c11908330/c11908330.g4md": {
+      "model_path": "_face/11_VICTORY/c11908330/c11908330.g4md",
+      "body_id": 1422195834,
+      "body_path": "_common/c000301/c000301.objbin",
+      "g4sk_path": "c000301/c000301.g4sk",
+      "g4sk_stem": "c000301",
+      "skeleton_crc": "-621304948",
+      "texture_path": "0",
+      "body_profile": 4,
+      "body_mesh_profile": 4
     },
     "_face/11_VICTORY/c20000010/c20000010.g4md": {
       "model_path": "_face/11_VICTORY/c20000010/c20000010.g4md",
@@ -62170,7 +62269,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d010000/d010000.objbin": {
       "model_path": "_item/d010000/d010000.objbin",
@@ -62256,7 +62357,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050010/d050010.objbin": {
       "model_path": "_item/d050010/d050010.objbin",
@@ -62265,7 +62368,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050020/d050020.objbin": {
       "model_path": "_item/d050020/d050020.objbin",
@@ -62274,7 +62379,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050030/d050030.objbin": {
       "model_path": "_item/d050030/d050030.objbin",
@@ -62283,7 +62390,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050040/d050040.objbin": {
       "model_path": "_item/d050040/d050040.objbin",
@@ -62292,7 +62401,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050050/d050050.objbin": {
       "model_path": "_item/d050050/d050050.objbin",
@@ -62301,7 +62412,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050060/d050060.objbin": {
       "model_path": "_item/d050060/d050060.objbin",
@@ -62310,7 +62423,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/d050070/d050070.objbin": {
       "model_path": "_item/d050070/d050070.objbin",
@@ -62319,7 +62434,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000002/i000002.objbin": {
       "model_path": "_item/i000002/i000002.objbin",
@@ -62328,7 +62445,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000009/i000009.objbin": {
       "model_path": "_item/i000009/i000009.objbin",
@@ -62337,7 +62456,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000010/i000010.objbin": {
       "model_path": "_item/i000010/i000010.objbin",
@@ -62346,7 +62467,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000011/i000011.objbin": {
       "model_path": "_item/i000011/i000011.objbin",
@@ -62355,7 +62478,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000012/i000012.objbin": {
       "model_path": "_item/i000012/i000012.objbin",
@@ -62364,7 +62489,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000013/i000013.objbin": {
       "model_path": "_item/i000013/i000013.objbin",
@@ -62373,7 +62500,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000014/i000014.objbin": {
       "model_path": "_item/i000014/i000014.objbin",
@@ -62382,7 +62511,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000015/i000015.objbin": {
       "model_path": "_item/i000015/i000015.objbin",
@@ -62391,7 +62522,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000016/i000016.objbin": {
       "model_path": "_item/i000016/i000016.objbin",
@@ -62400,7 +62533,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000017/i000017.objbin": {
       "model_path": "_item/i000017/i000017.objbin",
@@ -62409,7 +62544,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000018/i000018.objbin": {
       "model_path": "_item/i000018/i000018.objbin",
@@ -62418,7 +62555,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000019/i000019.objbin": {
       "model_path": "_item/i000019/i000019.objbin",
@@ -62427,7 +62566,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000020/i000020.objbin": {
       "model_path": "_item/i000020/i000020.objbin",
@@ -62436,7 +62577,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000021/i000021.objbin": {
       "model_path": "_item/i000021/i000021.objbin",
@@ -62445,7 +62588,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000027/i000027.objbin": {
       "model_path": "_item/i000027/i000027.objbin",
@@ -62454,7 +62599,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000028/i000028.objbin": {
       "model_path": "_item/i000028/i000028.objbin",
@@ -62463,7 +62610,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000029/i000029.objbin": {
       "model_path": "_item/i000029/i000029.objbin",
@@ -62472,7 +62621,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000030/i000030.objbin": {
       "model_path": "_item/i000030/i000030.objbin",
@@ -62481,7 +62632,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000041/i000041.objbin": {
       "model_path": "_item/i000041/i000041.objbin",
@@ -62490,7 +62643,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000042/i000042.objbin": {
       "model_path": "_item/i000042/i000042.objbin",
@@ -62499,7 +62654,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000043/i000043.objbin": {
       "model_path": "_item/i000043/i000043.objbin",
@@ -62508,7 +62665,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000045/i000045.objbin": {
       "model_path": "_item/i000045/i000045.objbin",
@@ -62517,7 +62676,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000046/i000046.objbin": {
       "model_path": "_item/i000046/i000046.objbin",
@@ -62526,7 +62687,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000047/i000047.objbin": {
       "model_path": "_item/i000047/i000047.objbin",
@@ -62535,7 +62698,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000050/i000050.objbin": {
       "model_path": "_item/i000050/i000050.objbin",
@@ -62544,7 +62709,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000051/i000051.objbin": {
       "model_path": "_item/i000051/i000051.objbin",
@@ -62553,7 +62720,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000052/i000052.objbin": {
       "model_path": "_item/i000052/i000052.objbin",
@@ -62562,7 +62731,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000053/i000053.objbin": {
       "model_path": "_item/i000053/i000053.objbin",
@@ -62571,7 +62742,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000054/i000054.objbin": {
       "model_path": "_item/i000054/i000054.objbin",
@@ -62580,7 +62753,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000055/i000055.objbin": {
       "model_path": "_item/i000055/i000055.objbin",
@@ -62589,7 +62764,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000056/i000056.objbin": {
       "model_path": "_item/i000056/i000056.objbin",
@@ -62598,7 +62775,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000057/i000057.objbin": {
       "model_path": "_item/i000057/i000057.objbin",
@@ -62607,7 +62786,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000058/i000058.objbin": {
       "model_path": "_item/i000058/i000058.objbin",
@@ -62616,7 +62797,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000059/i000059.objbin": {
       "model_path": "_item/i000059/i000059.objbin",
@@ -62625,7 +62808,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000060/i000060.objbin": {
       "model_path": "_item/i000060/i000060.objbin",
@@ -62634,7 +62819,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000061/i000061.objbin": {
       "model_path": "_item/i000061/i000061.objbin",
@@ -62643,7 +62830,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000070/i000070.objbin": {
       "model_path": "_item/i000070/i000070.objbin",
@@ -62652,7 +62841,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000071/i000071.objbin": {
       "model_path": "_item/i000071/i000071.objbin",
@@ -62661,7 +62852,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000072/i000072.objbin": {
       "model_path": "_item/i000072/i000072.objbin",
@@ -62670,7 +62863,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000073/i000073.objbin": {
       "model_path": "_item/i000073/i000073.objbin",
@@ -62679,7 +62874,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000074/i000074.objbin": {
       "model_path": "_item/i000074/i000074.objbin",
@@ -62688,7 +62885,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000075/i000075.objbin": {
       "model_path": "_item/i000075/i000075.objbin",
@@ -62697,7 +62896,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000076/i000076.objbin": {
       "model_path": "_item/i000076/i000076.objbin",
@@ -62706,7 +62907,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000077/i000077.objbin": {
       "model_path": "_item/i000077/i000077.objbin",
@@ -62715,7 +62918,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000078/i000078.objbin": {
       "model_path": "_item/i000078/i000078.objbin",
@@ -62724,7 +62929,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000079/i000079.objbin": {
       "model_path": "_item/i000079/i000079.objbin",
@@ -62733,7 +62940,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000080/i000080.objbin": {
       "model_path": "_item/i000080/i000080.objbin",
@@ -62742,7 +62951,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000081/i000081.objbin": {
       "model_path": "_item/i000081/i000081.objbin",
@@ -62751,7 +62962,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000082/i000082.objbin": {
       "model_path": "_item/i000082/i000082.objbin",
@@ -62760,7 +62973,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000083/i000083.objbin": {
       "model_path": "_item/i000083/i000083.objbin",
@@ -62769,7 +62984,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000084/i000084.objbin": {
       "model_path": "_item/i000084/i000084.objbin",
@@ -62778,7 +62995,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000085/i000085.objbin": {
       "model_path": "_item/i000085/i000085.objbin",
@@ -62787,7 +63006,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000086/i000086.objbin": {
       "model_path": "_item/i000086/i000086.objbin",
@@ -62796,7 +63017,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000088/i000088.objbin": {
       "model_path": "_item/i000088/i000088.objbin",
@@ -62805,7 +63028,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000089/i000089.objbin": {
       "model_path": "_item/i000089/i000089.objbin",
@@ -62814,7 +63039,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000090/i000090.objbin": {
       "model_path": "_item/i000090/i000090.objbin",
@@ -62823,7 +63050,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000099/i000099.objbin": {
       "model_path": "_item/i000099/i000099.objbin",
@@ -62832,7 +63061,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000100/i000100.objbin": {
       "model_path": "_item/i000100/i000100.objbin",
@@ -62841,7 +63072,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000102/i000102.objbin": {
       "model_path": "_item/i000102/i000102.objbin",
@@ -62850,7 +63083,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000103/i000103.objbin": {
       "model_path": "_item/i000103/i000103.objbin",
@@ -62859,7 +63094,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000104/i000104.objbin": {
       "model_path": "_item/i000104/i000104.objbin",
@@ -62868,7 +63105,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000105/i000105.objbin": {
       "model_path": "_item/i000105/i000105.objbin",
@@ -62877,7 +63116,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000106/i000106.objbin": {
       "model_path": "_item/i000106/i000106.objbin",
@@ -62886,7 +63127,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000107/i000107.objbin": {
       "model_path": "_item/i000107/i000107.objbin",
@@ -62895,7 +63138,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000108/i000108.objbin": {
       "model_path": "_item/i000108/i000108.objbin",
@@ -62904,7 +63149,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000109/i000109.objbin": {
       "model_path": "_item/i000109/i000109.objbin",
@@ -62913,7 +63160,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000110/i000110.objbin": {
       "model_path": "_item/i000110/i000110.objbin",
@@ -62922,7 +63171,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000112/i000112.objbin": {
       "model_path": "_item/i000112/i000112.objbin",
@@ -62931,7 +63182,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000113/i000113.objbin": {
       "model_path": "_item/i000113/i000113.objbin",
@@ -62940,7 +63193,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000114/i000114.objbin": {
       "model_path": "_item/i000114/i000114.objbin",
@@ -62949,7 +63204,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000115/i000115.objbin": {
       "model_path": "_item/i000115/i000115.objbin",
@@ -62958,7 +63215,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000116/i000116.objbin": {
       "model_path": "_item/i000116/i000116.objbin",
@@ -62967,7 +63226,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000117/i000117.objbin": {
       "model_path": "_item/i000117/i000117.objbin",
@@ -62976,7 +63237,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000118/i000118.objbin": {
       "model_path": "_item/i000118/i000118.objbin",
@@ -62985,7 +63248,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000119/i000119.objbin": {
       "model_path": "_item/i000119/i000119.objbin",
@@ -62994,7 +63259,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000120/i000120.objbin": {
       "model_path": "_item/i000120/i000120.objbin",
@@ -63003,7 +63270,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000122/i000122.objbin": {
       "model_path": "_item/i000122/i000122.objbin",
@@ -63012,7 +63281,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000123/i000123.objbin": {
       "model_path": "_item/i000123/i000123.objbin",
@@ -63021,7 +63292,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000124/i000124.objbin": {
       "model_path": "_item/i000124/i000124.objbin",
@@ -63030,7 +63303,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000125/i000125.objbin": {
       "model_path": "_item/i000125/i000125.objbin",
@@ -63039,7 +63314,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000126/i000126.objbin": {
       "model_path": "_item/i000126/i000126.objbin",
@@ -63048,7 +63325,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000127/i000127.objbin": {
       "model_path": "_item/i000127/i000127.objbin",
@@ -63057,7 +63336,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000128/i000128.objbin": {
       "model_path": "_item/i000128/i000128.objbin",
@@ -63066,7 +63347,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000129/i000129.objbin": {
       "model_path": "_item/i000129/i000129.objbin",
@@ -63075,7 +63358,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000130/i000130.objbin": {
       "model_path": "_item/i000130/i000130.objbin",
@@ -63084,7 +63369,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000131/i000131.objbin": {
       "model_path": "_item/i000131/i000131.objbin",
@@ -63093,7 +63380,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000132/i000132.objbin": {
       "model_path": "_item/i000132/i000132.objbin",
@@ -63102,7 +63391,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000133/i000133.objbin": {
       "model_path": "_item/i000133/i000133.objbin",
@@ -63111,7 +63402,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000134/i000134.objbin": {
       "model_path": "_item/i000134/i000134.objbin",
@@ -63120,7 +63413,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000135/i000135.objbin": {
       "model_path": "_item/i000135/i000135.objbin",
@@ -63129,7 +63424,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000136/i000136.objbin": {
       "model_path": "_item/i000136/i000136.objbin",
@@ -63138,7 +63435,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000137/i000137.objbin": {
       "model_path": "_item/i000137/i000137.objbin",
@@ -63147,7 +63446,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000138/i000138.objbin": {
       "model_path": "_item/i000138/i000138.objbin",
@@ -63156,7 +63457,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000139/i000139.objbin": {
       "model_path": "_item/i000139/i000139.objbin",
@@ -63165,7 +63468,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000140/i000140.objbin": {
       "model_path": "_item/i000140/i000140.objbin",
@@ -63174,7 +63479,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000150/i000150.objbin": {
       "model_path": "_item/i000150/i000150.objbin",
@@ -63183,7 +63490,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000151/i000151.objbin": {
       "model_path": "_item/i000151/i000151.objbin",
@@ -63192,7 +63501,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000152/i000152.objbin": {
       "model_path": "_item/i000152/i000152.objbin",
@@ -63201,7 +63512,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000153/i000153.objbin": {
       "model_path": "_item/i000153/i000153.objbin",
@@ -63210,7 +63523,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000154/i000154.objbin": {
       "model_path": "_item/i000154/i000154.objbin",
@@ -63219,7 +63534,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000155/i000155.objbin": {
       "model_path": "_item/i000155/i000155.objbin",
@@ -63228,7 +63545,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000156/i000156.objbin": {
       "model_path": "_item/i000156/i000156.objbin",
@@ -63237,7 +63556,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000159/i000159.objbin": {
       "model_path": "_item/i000159/i000159.objbin",
@@ -63246,7 +63567,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000162/i000162.objbin": {
       "model_path": "_item/i000162/i000162.objbin",
@@ -63255,7 +63578,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000165/i000165.objbin": {
       "model_path": "_item/i000165/i000165.objbin",
@@ -63264,7 +63589,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000167/i000167.objbin": {
       "model_path": "_item/i000167/i000167.objbin",
@@ -63273,7 +63600,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000168/i000168.objbin": {
       "model_path": "_item/i000168/i000168.objbin",
@@ -63282,7 +63611,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000169/i000169.objbin": {
       "model_path": "_item/i000169/i000169.objbin",
@@ -63291,7 +63622,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000170/i000170.objbin": {
       "model_path": "_item/i000170/i000170.objbin",
@@ -63300,7 +63633,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000171/i000171.objbin": {
       "model_path": "_item/i000171/i000171.objbin",
@@ -63309,7 +63644,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000172/i000172.objbin": {
       "model_path": "_item/i000172/i000172.objbin",
@@ -63318,7 +63655,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000173/i000173.objbin": {
       "model_path": "_item/i000173/i000173.objbin",
@@ -63327,7 +63666,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000174/i000174.objbin": {
       "model_path": "_item/i000174/i000174.objbin",
@@ -63336,7 +63677,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000175/i000175.objbin": {
       "model_path": "_item/i000175/i000175.objbin",
@@ -63345,7 +63688,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000176/i000176.objbin": {
       "model_path": "_item/i000176/i000176.objbin",
@@ -63354,7 +63699,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000177/i000177.objbin": {
       "model_path": "_item/i000177/i000177.objbin",
@@ -63363,7 +63710,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000178/i000178.objbin": {
       "model_path": "_item/i000178/i000178.objbin",
@@ -63372,7 +63721,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000179/i000179.objbin": {
       "model_path": "_item/i000179/i000179.objbin",
@@ -63381,7 +63732,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000180/i000180.objbin": {
       "model_path": "_item/i000180/i000180.objbin",
@@ -63390,7 +63743,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000181/i000181.objbin": {
       "model_path": "_item/i000181/i000181.objbin",
@@ -63399,7 +63754,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000182/i000182.objbin": {
       "model_path": "_item/i000182/i000182.objbin",
@@ -63408,7 +63765,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000183/i000183.objbin": {
       "model_path": "_item/i000183/i000183.objbin",
@@ -63417,7 +63776,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000184/i000184.objbin": {
       "model_path": "_item/i000184/i000184.objbin",
@@ -63426,7 +63787,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000185/i000185.objbin": {
       "model_path": "_item/i000185/i000185.objbin",
@@ -63435,7 +63798,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000186/i000186.objbin": {
       "model_path": "_item/i000186/i000186.objbin",
@@ -63444,7 +63809,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i000187/i000187.objbin": {
       "model_path": "_item/i000187/i000187.objbin",
@@ -63453,7 +63820,42 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
+    "_item/i000188/i000188.objbin": {
+      "model_path": "_item/i000188/i000188.objbin",
+      "body_id": 0,
+      "body_path": "",
+      "g4sk_path": "",
+      "g4sk_stem": "",
+      "skeleton_crc": "",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
+    "_item/i000189/i000189.g4md": {
+      "model_path": "_item/i000189/i000189.g4md",
+      "body_id": 0,
+      "body_path": "",
+      "g4sk_path": "",
+      "g4sk_stem": "",
+      "skeleton_crc": "",
+      "texture_path": "_item/i000189/i000189_00.g4tx",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
+    "_item/i000189/i000189.objbin": {
+      "model_path": "_item/i000189/i000189.objbin",
+      "body_id": 0,
+      "body_path": "",
+      "g4sk_path": "",
+      "g4sk_stem": "",
+      "skeleton_crc": "",
+      "texture_path": "_item/i000189/i000189_00.g4tx",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i002001/i002001.objbin": {
       "model_path": "_item/i002001/i002001.objbin",
@@ -63462,7 +63864,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i002501/i002501.objbin": {
       "model_path": "_item/i002501/i002501.objbin",
@@ -63471,7 +63875,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i070001/i070001.g4md": {
       "model_path": "_item/i070001/i070001.g4md",
@@ -63480,7 +63886,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "_item/i070001/i070034_10.g4tx"
+      "texture_path": "_item/i070001/i070034_10.g4tx",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i070001/i070001.objbin": {
       "model_path": "_item/i070001/i070001.objbin",
@@ -63489,7 +63897,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "_item/i070001/i070034_10.g4tx"
+      "texture_path": "_item/i070001/i070034_10.g4tx",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i111801/i111801.g4md": {
       "model_path": "_item/i111801/i111801.g4md",
@@ -63498,7 +63908,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "_item/i111801/i111851_20.g4tx"
+      "texture_path": "_item/i111801/i111851_20.g4tx",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/i111801/i111801.objbin": {
       "model_path": "_item/i111801/i111801.objbin",
@@ -63507,7 +63919,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "_item/i111801/i111851_20.g4tx"
+      "texture_path": "_item/i111801/i111851_20.g4tx",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000004/kt000004.objbin": {
       "model_path": "_item/kt000004/kt000004.objbin",
@@ -63516,7 +63930,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000005/kt000005.objbin": {
       "model_path": "_item/kt000005/kt000005.objbin",
@@ -63525,7 +63941,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000006/kt000006.objbin": {
       "model_path": "_item/kt000006/kt000006.objbin",
@@ -63534,7 +63952,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000007/kt000007.objbin": {
       "model_path": "_item/kt000007/kt000007.objbin",
@@ -63543,7 +63963,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000008/kt000008.objbin": {
       "model_path": "_item/kt000008/kt000008.objbin",
@@ -63552,7 +63974,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000009/kt000009.objbin": {
       "model_path": "_item/kt000009/kt000009.objbin",
@@ -63561,7 +63985,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000010/kt000010.objbin": {
       "model_path": "_item/kt000010/kt000010.objbin",
@@ -63570,7 +63996,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000011/kt000011.objbin": {
       "model_path": "_item/kt000011/kt000011.objbin",
@@ -63579,7 +64007,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000012/kt000012.objbin": {
       "model_path": "_item/kt000012/kt000012.objbin",
@@ -63588,7 +64018,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000013/kt000013.objbin": {
       "model_path": "_item/kt000013/kt000013.objbin",
@@ -63597,7 +64029,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000014/kt000014.objbin": {
       "model_path": "_item/kt000014/kt000014.objbin",
@@ -63606,7 +64040,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000015/kt000015.objbin": {
       "model_path": "_item/kt000015/kt000015.objbin",
@@ -63615,7 +64051,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000016/kt000016.objbin": {
       "model_path": "_item/kt000016/kt000016.objbin",
@@ -63624,7 +64062,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000019/kt000019.objbin": {
       "model_path": "_item/kt000019/kt000019.objbin",
@@ -63633,7 +64073,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000020/kt000020.objbin": {
       "model_path": "_item/kt000020/kt000020.objbin",
@@ -63642,7 +64084,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000021/kt000021.objbin": {
       "model_path": "_item/kt000021/kt000021.objbin",
@@ -63651,7 +64095,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000023/kt000023.objbin": {
       "model_path": "_item/kt000023/kt000023.objbin",
@@ -63660,7 +64106,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000024/kt000024.objbin": {
       "model_path": "_item/kt000024/kt000024.objbin",
@@ -63669,7 +64117,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000025/kt000025.objbin": {
       "model_path": "_item/kt000025/kt000025.objbin",
@@ -63678,7 +64128,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000026/kt000026.objbin": {
       "model_path": "_item/kt000026/kt000026.objbin",
@@ -63687,7 +64139,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000027/kt000027.objbin": {
       "model_path": "_item/kt000027/kt000027.objbin",
@@ -63696,7 +64150,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000028/kt000028.objbin": {
       "model_path": "_item/kt000028/kt000028.objbin",
@@ -63705,7 +64161,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000029/kt000029.objbin": {
       "model_path": "_item/kt000029/kt000029.objbin",
@@ -63714,7 +64172,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000030/kt000030.objbin": {
       "model_path": "_item/kt000030/kt000030.objbin",
@@ -63723,7 +64183,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000031/kt000031.objbin": {
       "model_path": "_item/kt000031/kt000031.objbin",
@@ -63743,7 +64205,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt000033/kt000033.objbin": {
       "model_path": "_item/kt000033/kt000033.objbin",
@@ -63785,7 +64249,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt001001/kt001001.objbin": {
       "model_path": "_item/kt001001/kt001001.objbin",
@@ -63794,7 +64260,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt001002/kt001002.objbin": {
       "model_path": "_item/kt001002/kt001002.objbin",
@@ -63803,7 +64271,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt001003/kt001003.objbin": {
       "model_path": "_item/kt001003/kt001003.objbin",
@@ -63812,7 +64282,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt001004/kt001004.objbin": {
       "model_path": "_item/kt001004/kt001004.objbin",
@@ -63821,7 +64293,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt002010/kt002010.objbin": {
       "model_path": "_item/kt002010/kt002010.objbin",
@@ -63830,7 +64304,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_item/kt002020/kt002020.objbin": {
       "model_path": "_item/kt002020/kt002020.objbin",
@@ -63839,7 +64315,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000010/k000010.objbin": {
       "model_path": "_keshin/k000010/k000010.objbin",
@@ -63848,7 +64326,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000020/k000020.objbin": {
       "model_path": "_keshin/k000020/k000020.objbin",
@@ -63857,7 +64337,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000030/k000030.objbin": {
       "model_path": "_keshin/k000030/k000030.objbin",
@@ -63866,7 +64348,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000040/k000040.objbin": {
       "model_path": "_keshin/k000040/k000040.objbin",
@@ -63875,7 +64359,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000050/k000050.objbin": {
       "model_path": "_keshin/k000050/k000050.objbin",
@@ -63884,7 +64370,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000060/k000060.objbin": {
       "model_path": "_keshin/k000060/k000060.objbin",
@@ -63893,7 +64381,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000070/k000070.objbin": {
       "model_path": "_keshin/k000070/k000070.objbin",
@@ -63902,7 +64392,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000080/k000080.objbin": {
       "model_path": "_keshin/k000080/k000080.objbin",
@@ -63911,7 +64403,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000090/k000090.objbin": {
       "model_path": "_keshin/k000090/k000090.objbin",
@@ -63920,7 +64414,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000100/k000100.objbin": {
       "model_path": "_keshin/k000100/k000100.objbin",
@@ -63929,7 +64425,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000110/k000110.objbin": {
       "model_path": "_keshin/k000110/k000110.objbin",
@@ -63938,7 +64436,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000120/k000120.objbin": {
       "model_path": "_keshin/k000120/k000120.objbin",
@@ -63947,7 +64447,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000130/k000130.objbin": {
       "model_path": "_keshin/k000130/k000130.objbin",
@@ -63956,7 +64458,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000140/k000140.objbin": {
       "model_path": "_keshin/k000140/k000140.objbin",
@@ -63965,7 +64469,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000150/k000150.objbin": {
       "model_path": "_keshin/k000150/k000150.objbin",
@@ -63974,7 +64480,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000160/k000160.objbin": {
       "model_path": "_keshin/k000160/k000160.objbin",
@@ -63983,7 +64491,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000170/k000170.objbin": {
       "model_path": "_keshin/k000170/k000170.objbin",
@@ -63992,7 +64502,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000180/k000180.objbin": {
       "model_path": "_keshin/k000180/k000180.objbin",
@@ -64001,7 +64513,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000190/k000190.objbin": {
       "model_path": "_keshin/k000190/k000190.objbin",
@@ -64010,7 +64524,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000200/k000200.objbin": {
       "model_path": "_keshin/k000200/k000200.objbin",
@@ -64019,7 +64535,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000210/k000210.objbin": {
       "model_path": "_keshin/k000210/k000210.objbin",
@@ -64028,7 +64546,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000220/k000220.objbin": {
       "model_path": "_keshin/k000220/k000220.objbin",
@@ -64037,7 +64557,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000230/k000230.objbin": {
       "model_path": "_keshin/k000230/k000230.objbin",
@@ -64046,7 +64568,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000240/k000240.objbin": {
       "model_path": "_keshin/k000240/k000240.objbin",
@@ -64055,7 +64579,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000250/k000250.objbin": {
       "model_path": "_keshin/k000250/k000250.objbin",
@@ -64064,7 +64590,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000260/k000260.objbin": {
       "model_path": "_keshin/k000260/k000260.objbin",
@@ -64073,7 +64601,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000270/k000270.objbin": {
       "model_path": "_keshin/k000270/k000270.objbin",
@@ -64082,7 +64612,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000280/k000280.objbin": {
       "model_path": "_keshin/k000280/k000280.objbin",
@@ -64091,7 +64623,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000290/k000290.objbin": {
       "model_path": "_keshin/k000290/k000290.objbin",
@@ -64100,7 +64634,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000300/k000300.objbin": {
       "model_path": "_keshin/k000300/k000300.objbin",
@@ -64109,7 +64645,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000310/k000310.objbin": {
       "model_path": "_keshin/k000310/k000310.objbin",
@@ -64118,7 +64656,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000320/k000320.objbin": {
       "model_path": "_keshin/k000320/k000320.objbin",
@@ -64127,7 +64667,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000330/k000330.objbin": {
       "model_path": "_keshin/k000330/k000330.objbin",
@@ -64136,7 +64678,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000340/k000340.objbin": {
       "model_path": "_keshin/k000340/k000340.objbin",
@@ -64145,7 +64689,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000350/k000350.objbin": {
       "model_path": "_keshin/k000350/k000350.objbin",
@@ -64154,7 +64700,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000360/k000360.objbin": {
       "model_path": "_keshin/k000360/k000360.objbin",
@@ -64163,7 +64711,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000370/k000370.objbin": {
       "model_path": "_keshin/k000370/k000370.objbin",
@@ -64172,7 +64722,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000380/k000380.objbin": {
       "model_path": "_keshin/k000380/k000380.objbin",
@@ -64181,7 +64733,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000390/k000390.objbin": {
       "model_path": "_keshin/k000390/k000390.objbin",
@@ -64190,7 +64744,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000400/k000400.objbin": {
       "model_path": "_keshin/k000400/k000400.objbin",
@@ -64199,7 +64755,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000410/k000410.objbin": {
       "model_path": "_keshin/k000410/k000410.objbin",
@@ -64208,7 +64766,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000420/k000420.objbin": {
       "model_path": "_keshin/k000420/k000420.objbin",
@@ -64217,7 +64777,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000430/k000430.objbin": {
       "model_path": "_keshin/k000430/k000430.objbin",
@@ -64226,7 +64788,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000440/k000440.objbin": {
       "model_path": "_keshin/k000440/k000440.objbin",
@@ -64235,7 +64799,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000450/k000450.objbin": {
       "model_path": "_keshin/k000450/k000450.objbin",
@@ -64244,7 +64810,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000460/k000460.objbin": {
       "model_path": "_keshin/k000460/k000460.objbin",
@@ -64253,7 +64821,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000470/k000470.objbin": {
       "model_path": "_keshin/k000470/k000470.objbin",
@@ -64262,7 +64832,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000480/k000480.objbin": {
       "model_path": "_keshin/k000480/k000480.objbin",
@@ -64271,7 +64843,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000490/k000490.objbin": {
       "model_path": "_keshin/k000490/k000490.objbin",
@@ -64280,7 +64854,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000500/k000500.objbin": {
       "model_path": "_keshin/k000500/k000500.objbin",
@@ -64289,7 +64865,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000510/k000510.objbin": {
       "model_path": "_keshin/k000510/k000510.objbin",
@@ -64298,7 +64876,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000520/k000520.objbin": {
       "model_path": "_keshin/k000520/k000520.objbin",
@@ -64307,7 +64887,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000530/k000530.objbin": {
       "model_path": "_keshin/k000530/k000530.objbin",
@@ -64316,7 +64898,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000540/k000540.objbin": {
       "model_path": "_keshin/k000540/k000540.objbin",
@@ -64325,7 +64909,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000610/k000610.objbin": {
       "model_path": "_keshin/k000610/k000610.objbin",
@@ -64334,7 +64920,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000630/k000630.objbin": {
       "model_path": "_keshin/k000630/k000630.objbin",
@@ -64343,7 +64931,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000640/k000640.objbin": {
       "model_path": "_keshin/k000640/k000640.objbin",
@@ -64352,7 +64942,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000650/k000650.objbin": {
       "model_path": "_keshin/k000650/k000650.objbin",
@@ -64361,7 +64953,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000660/k000660.objbin": {
       "model_path": "_keshin/k000660/k000660.objbin",
@@ -64370,7 +64964,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000670/k000670.objbin": {
       "model_path": "_keshin/k000670/k000670.objbin",
@@ -64379,7 +64975,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000680/k000680.objbin": {
       "model_path": "_keshin/k000680/k000680.objbin",
@@ -64388,7 +64986,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000690/k000690.objbin": {
       "model_path": "_keshin/k000690/k000690.objbin",
@@ -64397,7 +64997,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000700/k000700.objbin": {
       "model_path": "_keshin/k000700/k000700.objbin",
@@ -64406,7 +65008,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000710/k000710.objbin": {
       "model_path": "_keshin/k000710/k000710.objbin",
@@ -64415,7 +65019,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000720/k000720.objbin": {
       "model_path": "_keshin/k000720/k000720.objbin",
@@ -64424,7 +65030,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000760/k000760.objbin": {
       "model_path": "_keshin/k000760/k000760.objbin",
@@ -64433,7 +65041,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000770/k000770.objbin": {
       "model_path": "_keshin/k000770/k000770.objbin",
@@ -64442,7 +65052,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000780/k000780.objbin": {
       "model_path": "_keshin/k000780/k000780.objbin",
@@ -64451,7 +65063,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000790/k000790.objbin": {
       "model_path": "_keshin/k000790/k000790.objbin",
@@ -64460,7 +65074,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000800/k000800.objbin": {
       "model_path": "_keshin/k000800/k000800.objbin",
@@ -64469,7 +65085,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000810/k000810.objbin": {
       "model_path": "_keshin/k000810/k000810.objbin",
@@ -64478,7 +65096,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000820/k000820.objbin": {
       "model_path": "_keshin/k000820/k000820.objbin",
@@ -64487,7 +65107,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000830/k000830.objbin": {
       "model_path": "_keshin/k000830/k000830.objbin",
@@ -64496,7 +65118,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000840/k000840.objbin": {
       "model_path": "_keshin/k000840/k000840.objbin",
@@ -64505,7 +65129,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000850/k000850.objbin": {
       "model_path": "_keshin/k000850/k000850.objbin",
@@ -64514,7 +65140,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000860/k000860.objbin": {
       "model_path": "_keshin/k000860/k000860.objbin",
@@ -64523,7 +65151,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000870/k000870.objbin": {
       "model_path": "_keshin/k000870/k000870.objbin",
@@ -64532,7 +65162,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000880/k000880.objbin": {
       "model_path": "_keshin/k000880/k000880.objbin",
@@ -64541,7 +65173,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000890/k000890.objbin": {
       "model_path": "_keshin/k000890/k000890.objbin",
@@ -64550,7 +65184,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000900/k000900.objbin": {
       "model_path": "_keshin/k000900/k000900.objbin",
@@ -64559,7 +65195,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000910/k000910.objbin": {
       "model_path": "_keshin/k000910/k000910.objbin",
@@ -64568,7 +65206,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000920/k000920.objbin": {
       "model_path": "_keshin/k000920/k000920.objbin",
@@ -64577,7 +65217,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000930/k000930.objbin": {
       "model_path": "_keshin/k000930/k000930.objbin",
@@ -64586,7 +65228,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000940/k000940.objbin": {
       "model_path": "_keshin/k000940/k000940.objbin",
@@ -64595,7 +65239,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000950/k000950.objbin": {
       "model_path": "_keshin/k000950/k000950.objbin",
@@ -64604,7 +65250,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000960/k000960.objbin": {
       "model_path": "_keshin/k000960/k000960.objbin",
@@ -64613,7 +65261,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000970/k000970.objbin": {
       "model_path": "_keshin/k000970/k000970.objbin",
@@ -64622,7 +65272,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000980/k000980.objbin": {
       "model_path": "_keshin/k000980/k000980.objbin",
@@ -64631,7 +65283,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k000990/k000990.objbin": {
       "model_path": "_keshin/k000990/k000990.objbin",
@@ -64640,7 +65294,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002010/k002010.objbin": {
       "model_path": "_keshin/k002010/k002010.objbin",
@@ -64649,7 +65305,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002011/k002011.objbin": {
       "model_path": "_keshin/k002011/k002011.objbin",
@@ -64658,7 +65316,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002012/k002012.objbin": {
       "model_path": "_keshin/k002012/k002012.objbin",
@@ -64667,7 +65327,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002020/k002020.objbin": {
       "model_path": "_keshin/k002020/k002020.objbin",
@@ -64676,7 +65338,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002030/k002030.objbin": {
       "model_path": "_keshin/k002030/k002030.objbin",
@@ -64685,7 +65349,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002040/k002040.objbin": {
       "model_path": "_keshin/k002040/k002040.objbin",
@@ -64694,7 +65360,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002050/k002050.objbin": {
       "model_path": "_keshin/k002050/k002050.objbin",
@@ -64703,7 +65371,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/k002060/k002060.objbin": {
       "model_path": "_keshin/k002060/k002060.objbin",
@@ -64712,7 +65382,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/kx000010/kx000010.objbin": {
       "model_path": "_keshin/kx000010/kx000010.objbin",
@@ -64721,7 +65393,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/me000010/me000010.objbin": {
       "model_path": "_keshin/me000010/me000010.objbin",
@@ -64730,7 +65404,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_keshin/mx000010/mx000010.objbin": {
       "model_path": "_keshin/mx000010/mx000010.objbin",
@@ -64739,7 +65415,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_rig/tw000101/tw000101.objbin": {
       "model_path": "_rig/tw000101/tw000101.objbin",
@@ -64770,7 +65448,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_test/c000101_test/c000101.objbin": {
       "model_path": "_test/c000101_test/c000101.objbin",
@@ -64790,7 +65470,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_test/c04810000/c04810000.objbin": {
       "model_path": "_test/c04810000/c04810000.objbin",
@@ -64799,7 +65481,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_test/mant_test/c000101_mant/c000101_mant.g4md": {
       "model_path": "_test/mant_test/c000101_mant/c000101_mant.g4md",
@@ -64907,7 +65591,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000020/a000020.objbin": {
       "model_path": "_waza/a000020/a000020.objbin",
@@ -64916,7 +65602,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000030/a000030.objbin": {
       "model_path": "_waza/a000030/a000030.objbin",
@@ -64925,7 +65613,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000040/a000040.objbin": {
       "model_path": "_waza/a000040/a000040.objbin",
@@ -64934,7 +65624,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000050/a000050.objbin": {
       "model_path": "_waza/a000050/a000050.objbin",
@@ -64943,7 +65635,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000060/a000060.objbin": {
       "model_path": "_waza/a000060/a000060.objbin",
@@ -64952,7 +65646,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000070/a000070.objbin": {
       "model_path": "_waza/a000070/a000070.objbin",
@@ -64961,7 +65657,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000080/a000080.objbin": {
       "model_path": "_waza/a000080/a000080.objbin",
@@ -64970,7 +65668,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000090/a000090.objbin": {
       "model_path": "_waza/a000090/a000090.objbin",
@@ -64979,7 +65679,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000100/a000100.objbin": {
       "model_path": "_waza/a000100/a000100.objbin",
@@ -64988,7 +65690,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000110/a000110.objbin": {
       "model_path": "_waza/a000110/a000110.objbin",
@@ -64997,7 +65701,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000120/a000120.objbin": {
       "model_path": "_waza/a000120/a000120.objbin",
@@ -65006,7 +65712,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000130/a000130.objbin": {
       "model_path": "_waza/a000130/a000130.objbin",
@@ -65015,7 +65723,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000140/a000140.objbin": {
       "model_path": "_waza/a000140/a000140.objbin",
@@ -65024,7 +65734,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000150/a000150.objbin": {
       "model_path": "_waza/a000150/a000150.objbin",
@@ -65033,7 +65745,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000160/a000160.objbin": {
       "model_path": "_waza/a000160/a000160.objbin",
@@ -65042,7 +65756,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000170/a000170.objbin": {
       "model_path": "_waza/a000170/a000170.objbin",
@@ -65051,7 +65767,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000180/a000180.objbin": {
       "model_path": "_waza/a000180/a000180.objbin",
@@ -65060,7 +65778,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000190/a000190.objbin": {
       "model_path": "_waza/a000190/a000190.objbin",
@@ -65069,7 +65789,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000200/a000200.objbin": {
       "model_path": "_waza/a000200/a000200.objbin",
@@ -65078,7 +65800,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000210/a000210.objbin": {
       "model_path": "_waza/a000210/a000210.objbin",
@@ -65087,7 +65811,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000220/a000220.objbin": {
       "model_path": "_waza/a000220/a000220.objbin",
@@ -65096,7 +65822,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000230/a000230.objbin": {
       "model_path": "_waza/a000230/a000230.objbin",
@@ -65105,7 +65833,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000240/a000240.objbin": {
       "model_path": "_waza/a000240/a000240.objbin",
@@ -65114,7 +65844,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000250/a000250.objbin": {
       "model_path": "_waza/a000250/a000250.objbin",
@@ -65123,7 +65855,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000260/a000260.objbin": {
       "model_path": "_waza/a000260/a000260.objbin",
@@ -65132,7 +65866,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000270/a000270.objbin": {
       "model_path": "_waza/a000270/a000270.objbin",
@@ -65141,7 +65877,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000280/a000280.objbin": {
       "model_path": "_waza/a000280/a000280.objbin",
@@ -65150,7 +65888,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000290/a000290.objbin": {
       "model_path": "_waza/a000290/a000290.objbin",
@@ -65159,7 +65899,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000300/a000300.objbin": {
       "model_path": "_waza/a000300/a000300.objbin",
@@ -65168,7 +65910,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000310/a000310.objbin": {
       "model_path": "_waza/a000310/a000310.objbin",
@@ -65177,7 +65921,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000320/a000320.objbin": {
       "model_path": "_waza/a000320/a000320.objbin",
@@ -65186,7 +65932,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000330/a000330.objbin": {
       "model_path": "_waza/a000330/a000330.objbin",
@@ -65195,7 +65943,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000340/a000340.objbin": {
       "model_path": "_waza/a000340/a000340.objbin",
@@ -65204,7 +65954,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000350/a000350.objbin": {
       "model_path": "_waza/a000350/a000350.objbin",
@@ -65213,7 +65965,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000360/a000360.objbin": {
       "model_path": "_waza/a000360/a000360.objbin",
@@ -65222,7 +65976,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000370/a000370.objbin": {
       "model_path": "_waza/a000370/a000370.objbin",
@@ -65231,7 +65987,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000380/a000380.objbin": {
       "model_path": "_waza/a000380/a000380.objbin",
@@ -65240,7 +65998,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000390/a000390.objbin": {
       "model_path": "_waza/a000390/a000390.objbin",
@@ -65249,7 +66009,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000400/a000400.objbin": {
       "model_path": "_waza/a000400/a000400.objbin",
@@ -65258,7 +66020,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000410/a000410.objbin": {
       "model_path": "_waza/a000410/a000410.objbin",
@@ -65267,7 +66031,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000420/a000420.objbin": {
       "model_path": "_waza/a000420/a000420.objbin",
@@ -65276,7 +66042,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000430/a000430.objbin": {
       "model_path": "_waza/a000430/a000430.objbin",
@@ -65285,7 +66053,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000440/a000440.objbin": {
       "model_path": "_waza/a000440/a000440.objbin",
@@ -65294,7 +66064,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000450/a000450.objbin": {
       "model_path": "_waza/a000450/a000450.objbin",
@@ -65303,7 +66075,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000460/a000460.objbin": {
       "model_path": "_waza/a000460/a000460.objbin",
@@ -65312,7 +66086,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000470/a000470.objbin": {
       "model_path": "_waza/a000470/a000470.objbin",
@@ -65321,7 +66097,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000480/a000480.objbin": {
       "model_path": "_waza/a000480/a000480.objbin",
@@ -65330,7 +66108,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000490/a000490.objbin": {
       "model_path": "_waza/a000490/a000490.objbin",
@@ -65339,7 +66119,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000500/a000500.objbin": {
       "model_path": "_waza/a000500/a000500.objbin",
@@ -65348,7 +66130,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000510/a000510.objbin": {
       "model_path": "_waza/a000510/a000510.objbin",
@@ -65357,7 +66141,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000520/a000520.objbin": {
       "model_path": "_waza/a000520/a000520.objbin",
@@ -65366,7 +66152,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000530/a000530.objbin": {
       "model_path": "_waza/a000530/a000530.objbin",
@@ -65375,7 +66163,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000540/a000540.objbin": {
       "model_path": "_waza/a000540/a000540.objbin",
@@ -65384,7 +66174,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000550/a000550.objbin": {
       "model_path": "_waza/a000550/a000550.objbin",
@@ -65393,7 +66185,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/a000560/a000560.objbin": {
       "model_path": "_waza/a000560/a000560.objbin",
@@ -65402,7 +66196,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00060/ev60_00060.objbin": {
       "model_path": "_waza/ev60_00060/ev60_00060.objbin",
@@ -65411,7 +66207,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00100/ev60_00100.objbin": {
       "model_path": "_waza/ev60_00100/ev60_00100.objbin",
@@ -65420,7 +66218,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00220/ev60_00220.objbin": {
       "model_path": "_waza/ev60_00220/ev60_00220.objbin",
@@ -65429,7 +66229,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00330/ev60_00330.objbin": {
       "model_path": "_waza/ev60_00330/ev60_00330.objbin",
@@ -65438,7 +66240,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00340/ev60_00340.objbin": {
       "model_path": "_waza/ev60_00340/ev60_00340.objbin",
@@ -65447,7 +66251,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00350/ev60_00350.objbin": {
       "model_path": "_waza/ev60_00350/ev60_00350.objbin",
@@ -65456,7 +66262,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00370/ev60_00370.objbin": {
       "model_path": "_waza/ev60_00370/ev60_00370.objbin",
@@ -65465,7 +66273,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00400/ev60_00400.objbin": {
       "model_path": "_waza/ev60_00400/ev60_00400.objbin",
@@ -65474,7 +66284,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00410/ev60_00410.objbin": {
       "model_path": "_waza/ev60_00410/ev60_00410.objbin",
@@ -65483,7 +66295,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00420/ev60_00420.objbin": {
       "model_path": "_waza/ev60_00420/ev60_00420.objbin",
@@ -65492,7 +66306,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00490/ev60_00490.objbin": {
       "model_path": "_waza/ev60_00490/ev60_00490.objbin",
@@ -65501,7 +66317,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00580/ev60_00580.objbin": {
       "model_path": "_waza/ev60_00580/ev60_00580.objbin",
@@ -65510,7 +66328,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00600/ev60_00600.objbin": {
       "model_path": "_waza/ev60_00600/ev60_00600.objbin",
@@ -65519,7 +66339,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00610/ev60_00610.objbin": {
       "model_path": "_waza/ev60_00610/ev60_00610.objbin",
@@ -65528,7 +66350,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00670/ev60_00670.objbin": {
       "model_path": "_waza/ev60_00670/ev60_00670.objbin",
@@ -65537,7 +66361,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00680/ev60_00680.objbin": {
       "model_path": "_waza/ev60_00680/ev60_00680.objbin",
@@ -65546,7 +66372,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00720/ev60_00720.objbin": {
       "model_path": "_waza/ev60_00720/ev60_00720.objbin",
@@ -65555,7 +66383,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00800/ev60_00800.objbin": {
       "model_path": "_waza/ev60_00800/ev60_00800.objbin",
@@ -65564,7 +66394,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00820/ev60_00820.objbin": {
       "model_path": "_waza/ev60_00820/ev60_00820.objbin",
@@ -65573,7 +66405,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00830/ev60_00830.objbin": {
       "model_path": "_waza/ev60_00830/ev60_00830.objbin",
@@ -65582,7 +66416,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00840/ev60_00840.objbin": {
       "model_path": "_waza/ev60_00840/ev60_00840.objbin",
@@ -65591,7 +66427,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00860/ev60_00860.objbin": {
       "model_path": "_waza/ev60_00860/ev60_00860.objbin",
@@ -65600,7 +66438,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00890/ev60_00890.objbin": {
       "model_path": "_waza/ev60_00890/ev60_00890.objbin",
@@ -65609,7 +66449,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00900/ev60_00900.objbin": {
       "model_path": "_waza/ev60_00900/ev60_00900.objbin",
@@ -65618,7 +66460,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00920/ev60_00920.objbin": {
       "model_path": "_waza/ev60_00920/ev60_00920.objbin",
@@ -65627,7 +66471,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_00960/ev60_00960.objbin": {
       "model_path": "_waza/ev60_00960/ev60_00960.objbin",
@@ -65636,7 +66482,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01010/ev60_01010.objbin": {
       "model_path": "_waza/ev60_01010/ev60_01010.objbin",
@@ -65645,7 +66493,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01020/ev60_01020.objbin": {
       "model_path": "_waza/ev60_01020/ev60_01020.objbin",
@@ -65654,7 +66504,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01030/ev60_01030.objbin": {
       "model_path": "_waza/ev60_01030/ev60_01030.objbin",
@@ -65663,7 +66515,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01040/ev60_01040.objbin": {
       "model_path": "_waza/ev60_01040/ev60_01040.objbin",
@@ -65672,7 +66526,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01050/ev60_01050.objbin": {
       "model_path": "_waza/ev60_01050/ev60_01050.objbin",
@@ -65681,7 +66537,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01060/ev60_01060.objbin": {
       "model_path": "_waza/ev60_01060/ev60_01060.objbin",
@@ -65690,7 +66548,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01130/ev60_01130.objbin": {
       "model_path": "_waza/ev60_01130/ev60_01130.objbin",
@@ -65699,7 +66559,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01210/ev60_01210.objbin": {
       "model_path": "_waza/ev60_01210/ev60_01210.objbin",
@@ -65708,7 +66570,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01270/ev60_01270.objbin": {
       "model_path": "_waza/ev60_01270/ev60_01270.objbin",
@@ -65717,7 +66581,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01280/ev60_01280.objbin": {
       "model_path": "_waza/ev60_01280/ev60_01280.objbin",
@@ -65726,7 +66592,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01290/ev60_01290.objbin": {
       "model_path": "_waza/ev60_01290/ev60_01290.objbin",
@@ -65735,7 +66603,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01300/ev60_01300.objbin": {
       "model_path": "_waza/ev60_01300/ev60_01300.objbin",
@@ -65744,7 +66614,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01310/ev60_01310.objbin": {
       "model_path": "_waza/ev60_01310/ev60_01310.objbin",
@@ -65753,7 +66625,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01320/ev60_01320.objbin": {
       "model_path": "_waza/ev60_01320/ev60_01320.objbin",
@@ -65762,7 +66636,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01390/ev60_01390.objbin": {
       "model_path": "_waza/ev60_01390/ev60_01390.objbin",
@@ -65771,7 +66647,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01480/ev60_01480.objbin": {
       "model_path": "_waza/ev60_01480/ev60_01480.objbin",
@@ -65780,7 +66658,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01540/ev60_01540.objbin": {
       "model_path": "_waza/ev60_01540/ev60_01540.objbin",
@@ -65789,7 +66669,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01600/ev60_01600.objbin": {
       "model_path": "_waza/ev60_01600/ev60_01600.objbin",
@@ -65798,7 +66680,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01640/ev60_01640.objbin": {
       "model_path": "_waza/ev60_01640/ev60_01640.objbin",
@@ -65807,7 +66691,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01650/ev60_01650.objbin": {
       "model_path": "_waza/ev60_01650/ev60_01650.objbin",
@@ -65816,7 +66702,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01710/ev60_01710.objbin": {
       "model_path": "_waza/ev60_01710/ev60_01710.objbin",
@@ -65825,7 +66713,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01750/ev60_01750.objbin": {
       "model_path": "_waza/ev60_01750/ev60_01750.objbin",
@@ -65834,7 +66724,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_01960/ev60_01960.objbin": {
       "model_path": "_waza/ev60_01960/ev60_01960.objbin",
@@ -65843,7 +66735,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02050/ev60_02050.objbin": {
       "model_path": "_waza/ev60_02050/ev60_02050.objbin",
@@ -65852,7 +66746,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02090/ev60_02090.objbin": {
       "model_path": "_waza/ev60_02090/ev60_02090.objbin",
@@ -65861,7 +66757,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02250/ev60_02250.objbin": {
       "model_path": "_waza/ev60_02250/ev60_02250.objbin",
@@ -65870,7 +66768,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02260/ev60_02260.objbin": {
       "model_path": "_waza/ev60_02260/ev60_02260.objbin",
@@ -65879,7 +66779,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02270/ev60_02270.objbin": {
       "model_path": "_waza/ev60_02270/ev60_02270.objbin",
@@ -65888,7 +66790,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02290/ev60_02290.objbin": {
       "model_path": "_waza/ev60_02290/ev60_02290.objbin",
@@ -65897,7 +66801,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02300/ev60_02300.objbin": {
       "model_path": "_waza/ev60_02300/ev60_02300.objbin",
@@ -65906,7 +66812,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02301/ev60_02301.objbin": {
       "model_path": "_waza/ev60_02301/ev60_02301.objbin",
@@ -65915,7 +66823,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02310/ev60_02310.objbin": {
       "model_path": "_waza/ev60_02310/ev60_02310.objbin",
@@ -65924,7 +66834,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02500/ev60_02500.objbin": {
       "model_path": "_waza/ev60_02500/ev60_02500.objbin",
@@ -65933,7 +66845,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02550/ev60_02550.objbin": {
       "model_path": "_waza/ev60_02550/ev60_02550.objbin",
@@ -65942,7 +66856,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02551/ev60_02551.objbin": {
       "model_path": "_waza/ev60_02551/ev60_02551.objbin",
@@ -65951,7 +66867,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02560/ev60_02560.objbin": {
       "model_path": "_waza/ev60_02560/ev60_02560.objbin",
@@ -65960,7 +66878,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02561/ev60_02561.objbin": {
       "model_path": "_waza/ev60_02561/ev60_02561.objbin",
@@ -65969,7 +66889,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02640/ev60_02640.objbin": {
       "model_path": "_waza/ev60_02640/ev60_02640.objbin",
@@ -65978,7 +66900,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02660/ev60_02660.objbin": {
       "model_path": "_waza/ev60_02660/ev60_02660.objbin",
@@ -65987,7 +66911,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02661/ev60_02661.objbin": {
       "model_path": "_waza/ev60_02661/ev60_02661.objbin",
@@ -65996,7 +66922,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02770/ev60_02770.objbin": {
       "model_path": "_waza/ev60_02770/ev60_02770.objbin",
@@ -66005,7 +66933,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02790/ev60_02790.objbin": {
       "model_path": "_waza/ev60_02790/ev60_02790.objbin",
@@ -66014,7 +66944,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02840/ev60_02840.objbin": {
       "model_path": "_waza/ev60_02840/ev60_02840.objbin",
@@ -66023,7 +66955,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02870/ev60_02870.objbin": {
       "model_path": "_waza/ev60_02870/ev60_02870.objbin",
@@ -66032,7 +66966,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02871/ev60_02871.objbin": {
       "model_path": "_waza/ev60_02871/ev60_02871.objbin",
@@ -66041,7 +66977,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02880/ev60_02880.objbin": {
       "model_path": "_waza/ev60_02880/ev60_02880.objbin",
@@ -66050,7 +66988,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02900/ev60_02900.objbin": {
       "model_path": "_waza/ev60_02900/ev60_02900.objbin",
@@ -66059,7 +66999,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02910/ev60_02910.objbin": {
       "model_path": "_waza/ev60_02910/ev60_02910.objbin",
@@ -66068,7 +67010,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02920/ev60_02920.objbin": {
       "model_path": "_waza/ev60_02920/ev60_02920.objbin",
@@ -66077,7 +67021,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02940/ev60_02940.objbin": {
       "model_path": "_waza/ev60_02940/ev60_02940.objbin",
@@ -66086,7 +67032,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_02990/ev60_02990.objbin": {
       "model_path": "_waza/ev60_02990/ev60_02990.objbin",
@@ -66095,7 +67043,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03000/ev60_03000.objbin": {
       "model_path": "_waza/ev60_03000/ev60_03000.objbin",
@@ -66104,7 +67054,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03020/ev60_03020.objbin": {
       "model_path": "_waza/ev60_03020/ev60_03020.objbin",
@@ -66113,7 +67065,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03030/ev60_03030.objbin": {
       "model_path": "_waza/ev60_03030/ev60_03030.objbin",
@@ -66122,7 +67076,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03040/ev60_03040.objbin": {
       "model_path": "_waza/ev60_03040/ev60_03040.objbin",
@@ -66131,7 +67087,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03050/ev60_03050.objbin": {
       "model_path": "_waza/ev60_03050/ev60_03050.objbin",
@@ -66140,7 +67098,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03051/ev60_03051.objbin": {
       "model_path": "_waza/ev60_03051/ev60_03051.objbin",
@@ -66149,7 +67109,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03080/ev60_03080.objbin": {
       "model_path": "_waza/ev60_03080/ev60_03080.objbin",
@@ -66158,7 +67120,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03100/ev60_03100.objbin": {
       "model_path": "_waza/ev60_03100/ev60_03100.objbin",
@@ -66167,7 +67131,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03150/ev60_03150.objbin": {
       "model_path": "_waza/ev60_03150/ev60_03150.objbin",
@@ -66176,7 +67142,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03151/ev60_03151.objbin": {
       "model_path": "_waza/ev60_03151/ev60_03151.objbin",
@@ -66185,7 +67153,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03170/ev60_03170.objbin": {
       "model_path": "_waza/ev60_03170/ev60_03170.objbin",
@@ -66194,7 +67164,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03171/ev60_03171.objbin": {
       "model_path": "_waza/ev60_03171/ev60_03171.objbin",
@@ -66203,7 +67175,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03172/ev60_03172.objbin": {
       "model_path": "_waza/ev60_03172/ev60_03172.objbin",
@@ -66212,7 +67186,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03190/ev60_03190.objbin": {
       "model_path": "_waza/ev60_03190/ev60_03190.objbin",
@@ -66221,7 +67197,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03200/ev60_03200.objbin": {
       "model_path": "_waza/ev60_03200/ev60_03200.objbin",
@@ -66230,7 +67208,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03220/ev60_03220.objbin": {
       "model_path": "_waza/ev60_03220/ev60_03220.objbin",
@@ -66239,7 +67219,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03230/ev60_03230.objbin": {
       "model_path": "_waza/ev60_03230/ev60_03230.objbin",
@@ -66248,7 +67230,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03240/ev60_03240.objbin": {
       "model_path": "_waza/ev60_03240/ev60_03240.objbin",
@@ -66257,7 +67241,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03250/ev60_03250.objbin": {
       "model_path": "_waza/ev60_03250/ev60_03250.objbin",
@@ -66266,7 +67252,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03251/ev60_03251.objbin": {
       "model_path": "_waza/ev60_03251/ev60_03251.objbin",
@@ -66275,7 +67263,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03260/ev60_03260.objbin": {
       "model_path": "_waza/ev60_03260/ev60_03260.objbin",
@@ -66284,7 +67274,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03270/ev60_03270.objbin": {
       "model_path": "_waza/ev60_03270/ev60_03270.objbin",
@@ -66293,7 +67285,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03280/ev60_03280.objbin": {
       "model_path": "_waza/ev60_03280/ev60_03280.objbin",
@@ -66302,7 +67296,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03290/ev60_03290.objbin": {
       "model_path": "_waza/ev60_03290/ev60_03290.objbin",
@@ -66311,7 +67307,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03330/ev60_03330.objbin": {
       "model_path": "_waza/ev60_03330/ev60_03330.objbin",
@@ -66320,7 +67318,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_03370/ev60_03370.objbin": {
       "model_path": "_waza/ev60_03370/ev60_03370.objbin",
@@ -66329,7 +67329,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10090/ev60_10090.objbin": {
       "model_path": "_waza/ev60_10090/ev60_10090.objbin",
@@ -66338,7 +67340,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10100/ev60_10100.objbin": {
       "model_path": "_waza/ev60_10100/ev60_10100.objbin",
@@ -66347,7 +67351,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10101/ev60_10101.objbin": {
       "model_path": "_waza/ev60_10101/ev60_10101.objbin",
@@ -66356,7 +67362,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10102/ev60_10102.objbin": {
       "model_path": "_waza/ev60_10102/ev60_10102.objbin",
@@ -66365,7 +67373,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10120/ev60_10120.objbin": {
       "model_path": "_waza/ev60_10120/ev60_10120.objbin",
@@ -66374,7 +67384,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10150/ev60_10150.objbin": {
       "model_path": "_waza/ev60_10150/ev60_10150.objbin",
@@ -66383,7 +67395,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev60_10170/ev60_10170.objbin": {
       "model_path": "_waza/ev60_10170/ev60_10170.objbin",
@@ -66392,7 +67406,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00240/ev61_00240.objbin": {
       "model_path": "_waza/ev61_00240/ev61_00240.objbin",
@@ -66401,7 +67417,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00390/ev61_00390.objbin": {
       "model_path": "_waza/ev61_00390/ev61_00390.objbin",
@@ -66410,7 +67428,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00440/ev61_00440.objbin": {
       "model_path": "_waza/ev61_00440/ev61_00440.objbin",
@@ -66419,7 +67439,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00450/ev61_00450.objbin": {
       "model_path": "_waza/ev61_00450/ev61_00450.objbin",
@@ -66428,7 +67450,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00520/ev61_00520.objbin": {
       "model_path": "_waza/ev61_00520/ev61_00520.objbin",
@@ -66437,7 +67461,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00540/ev61_00540.objbin": {
       "model_path": "_waza/ev61_00540/ev61_00540.objbin",
@@ -66446,7 +67472,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00550/ev61_00550.objbin": {
       "model_path": "_waza/ev61_00550/ev61_00550.objbin",
@@ -66455,7 +67483,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00590/ev61_00590.objbin": {
       "model_path": "_waza/ev61_00590/ev61_00590.objbin",
@@ -66464,7 +67494,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00640/ev61_00640.objbin": {
       "model_path": "_waza/ev61_00640/ev61_00640.objbin",
@@ -66473,7 +67505,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00641/ev61_00641.objbin": {
       "model_path": "_waza/ev61_00641/ev61_00641.objbin",
@@ -66482,7 +67516,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00650/ev61_00650.objbin": {
       "model_path": "_waza/ev61_00650/ev61_00650.objbin",
@@ -66491,7 +67527,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00840/ev61_00840.objbin": {
       "model_path": "_waza/ev61_00840/ev61_00840.objbin",
@@ -66500,7 +67538,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00850/ev61_00850.objbin": {
       "model_path": "_waza/ev61_00850/ev61_00850.objbin",
@@ -66509,7 +67549,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_00860/ev61_00860.objbin": {
       "model_path": "_waza/ev61_00860/ev61_00860.objbin",
@@ -66518,7 +67560,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01020/ev61_01020.objbin": {
       "model_path": "_waza/ev61_01020/ev61_01020.objbin",
@@ -66527,7 +67571,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01030/ev61_01030.objbin": {
       "model_path": "_waza/ev61_01030/ev61_01030.objbin",
@@ -66536,7 +67582,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01060/ev61_01060.objbin": {
       "model_path": "_waza/ev61_01060/ev61_01060.objbin",
@@ -66545,7 +67593,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01130/ev61_01130.objbin": {
       "model_path": "_waza/ev61_01130/ev61_01130.objbin",
@@ -66554,7 +67604,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01240/ev61_01240.objbin": {
       "model_path": "_waza/ev61_01240/ev61_01240.objbin",
@@ -66563,7 +67615,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01250/ev61_01250.objbin": {
       "model_path": "_waza/ev61_01250/ev61_01250.objbin",
@@ -66572,7 +67626,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01270/ev61_01270.objbin": {
       "model_path": "_waza/ev61_01270/ev61_01270.objbin",
@@ -66581,7 +67637,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01280/ev61_01280.objbin": {
       "model_path": "_waza/ev61_01280/ev61_01280.objbin",
@@ -66590,7 +67648,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01290/ev61_01290.objbin": {
       "model_path": "_waza/ev61_01290/ev61_01290.objbin",
@@ -66599,7 +67659,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_01460/ev61_01460.objbin": {
       "model_path": "_waza/ev61_01460/ev61_01460.objbin",
@@ -66608,7 +67670,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_10070/ev61_10070.objbin": {
       "model_path": "_waza/ev61_10070/ev61_10070.objbin",
@@ -66617,7 +67681,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev61_10080/ev61_10080.objbin": {
       "model_path": "_waza/ev61_10080/ev61_10080.objbin",
@@ -66626,7 +67692,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00190/ev62_00190.objbin": {
       "model_path": "_waza/ev62_00190/ev62_00190.objbin",
@@ -66635,7 +67703,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00280/ev62_00280.objbin": {
       "model_path": "_waza/ev62_00280/ev62_00280.objbin",
@@ -66644,7 +67714,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00330/ev62_00330.objbin": {
       "model_path": "_waza/ev62_00330/ev62_00330.objbin",
@@ -66653,7 +67725,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00360/ev62_00360.objbin": {
       "model_path": "_waza/ev62_00360/ev62_00360.objbin",
@@ -66662,7 +67736,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00370/ev62_00370.objbin": {
       "model_path": "_waza/ev62_00370/ev62_00370.objbin",
@@ -66671,7 +67747,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00460/ev62_00460.objbin": {
       "model_path": "_waza/ev62_00460/ev62_00460.objbin",
@@ -66680,7 +67758,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00490/ev62_00490.objbin": {
       "model_path": "_waza/ev62_00490/ev62_00490.objbin",
@@ -66689,7 +67769,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00510/ev62_00510.objbin": {
       "model_path": "_waza/ev62_00510/ev62_00510.objbin",
@@ -66698,7 +67780,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00560/ev62_00560.objbin": {
       "model_path": "_waza/ev62_00560/ev62_00560.objbin",
@@ -66707,7 +67791,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00760/ev62_00760.objbin": {
       "model_path": "_waza/ev62_00760/ev62_00760.objbin",
@@ -66716,7 +67802,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00800/ev62_00800.objbin": {
       "model_path": "_waza/ev62_00800/ev62_00800.objbin",
@@ -66725,7 +67813,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00830/ev62_00830.objbin": {
       "model_path": "_waza/ev62_00830/ev62_00830.objbin",
@@ -66734,7 +67824,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00850/ev62_00850.objbin": {
       "model_path": "_waza/ev62_00850/ev62_00850.objbin",
@@ -66743,7 +67835,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00860/ev62_00860.objbin": {
       "model_path": "_waza/ev62_00860/ev62_00860.objbin",
@@ -66752,7 +67846,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00890/ev62_00890.objbin": {
       "model_path": "_waza/ev62_00890/ev62_00890.objbin",
@@ -66761,7 +67857,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00910/ev62_00910.objbin": {
       "model_path": "_waza/ev62_00910/ev62_00910.objbin",
@@ -66770,7 +67868,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_00990/ev62_00990.objbin": {
       "model_path": "_waza/ev62_00990/ev62_00990.objbin",
@@ -66779,7 +67879,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01010/ev62_01010.objbin": {
       "model_path": "_waza/ev62_01010/ev62_01010.objbin",
@@ -66788,7 +67890,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01020/ev62_01020.objbin": {
       "model_path": "_waza/ev62_01020/ev62_01020.objbin",
@@ -66797,7 +67901,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01080/ev62_01080.objbin": {
       "model_path": "_waza/ev62_01080/ev62_01080.objbin",
@@ -66806,7 +67912,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01100/ev62_01100.objbin": {
       "model_path": "_waza/ev62_01100/ev62_01100.objbin",
@@ -66815,7 +67923,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01120/ev62_01120.objbin": {
       "model_path": "_waza/ev62_01120/ev62_01120.objbin",
@@ -66824,7 +67934,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01180/ev62_01180.objbin": {
       "model_path": "_waza/ev62_01180/ev62_01180.objbin",
@@ -66833,7 +67945,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01330/ev62_01330.objbin": {
       "model_path": "_waza/ev62_01330/ev62_01330.objbin",
@@ -66842,7 +67956,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01350/ev62_01350.objbin": {
       "model_path": "_waza/ev62_01350/ev62_01350.objbin",
@@ -66851,7 +67967,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01370/ev62_01370.objbin": {
       "model_path": "_waza/ev62_01370/ev62_01370.objbin",
@@ -66860,7 +67978,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01510/ev62_01510.objbin": {
       "model_path": "_waza/ev62_01510/ev62_01510.objbin",
@@ -66869,7 +67989,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01520/ev62_01520.objbin": {
       "model_path": "_waza/ev62_01520/ev62_01520.objbin",
@@ -66878,7 +68000,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01540/ev62_01540.objbin": {
       "model_path": "_waza/ev62_01540/ev62_01540.objbin",
@@ -66887,7 +68011,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01560/ev62_01560.objbin": {
       "model_path": "_waza/ev62_01560/ev62_01560.objbin",
@@ -66896,7 +68022,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_01590/ev62_01590.objbin": {
       "model_path": "_waza/ev62_01590/ev62_01590.objbin",
@@ -66905,7 +68033,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_10040/ev62_10040.objbin": {
       "model_path": "_waza/ev62_10040/ev62_10040.objbin",
@@ -66914,7 +68044,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_10060/ev62_10060.objbin": {
       "model_path": "_waza/ev62_10060/ev62_10060.objbin",
@@ -66923,7 +68055,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_10061/ev62_10061.objbin": {
       "model_path": "_waza/ev62_10061/ev62_10061.objbin",
@@ -66932,7 +68066,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_10080/ev62_10080.objbin": {
       "model_path": "_waza/ev62_10080/ev62_10080.objbin",
@@ -66941,7 +68077,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev62_10110/ev62_10110.objbin": {
       "model_path": "_waza/ev62_10110/ev62_10110.objbin",
@@ -66950,7 +68088,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00150/ev63_00150.objbin": {
       "model_path": "_waza/ev63_00150/ev63_00150.objbin",
@@ -66959,7 +68099,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00160/ev63_00160.objbin": {
       "model_path": "_waza/ev63_00160/ev63_00160.objbin",
@@ -66968,7 +68110,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00220/ev63_00220.objbin": {
       "model_path": "_waza/ev63_00220/ev63_00220.objbin",
@@ -66977,7 +68121,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00230/ev63_00230.objbin": {
       "model_path": "_waza/ev63_00230/ev63_00230.objbin",
@@ -66986,7 +68132,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00300/ev63_00300.objbin": {
       "model_path": "_waza/ev63_00300/ev63_00300.objbin",
@@ -66995,7 +68143,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00310/ev63_00310.objbin": {
       "model_path": "_waza/ev63_00310/ev63_00310.objbin",
@@ -67004,7 +68154,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00330/ev63_00330.objbin": {
       "model_path": "_waza/ev63_00330/ev63_00330.objbin",
@@ -67013,7 +68165,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00350/ev63_00350.objbin": {
       "model_path": "_waza/ev63_00350/ev63_00350.objbin",
@@ -67022,7 +68176,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00420/ev63_00420.objbin": {
       "model_path": "_waza/ev63_00420/ev63_00420.objbin",
@@ -67031,7 +68187,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00470/ev63_00470.objbin": {
       "model_path": "_waza/ev63_00470/ev63_00470.objbin",
@@ -67040,7 +68198,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00540/ev63_00540.objbin": {
       "model_path": "_waza/ev63_00540/ev63_00540.objbin",
@@ -67049,7 +68209,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00550/ev63_00550.objbin": {
       "model_path": "_waza/ev63_00550/ev63_00550.objbin",
@@ -67058,7 +68220,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00590/ev63_00590.objbin": {
       "model_path": "_waza/ev63_00590/ev63_00590.objbin",
@@ -67067,7 +68231,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00591/ev63_00591.objbin": {
       "model_path": "_waza/ev63_00591/ev63_00591.objbin",
@@ -67076,7 +68242,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00600/ev63_00600.objbin": {
       "model_path": "_waza/ev63_00600/ev63_00600.objbin",
@@ -67085,7 +68253,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00610/ev63_00610.objbin": {
       "model_path": "_waza/ev63_00610/ev63_00610.objbin",
@@ -67094,7 +68264,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00620/ev63_00620.objbin": {
       "model_path": "_waza/ev63_00620/ev63_00620.objbin",
@@ -67103,7 +68275,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00670/ev63_00670.objbin": {
       "model_path": "_waza/ev63_00670/ev63_00670.objbin",
@@ -67112,7 +68286,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00740/ev63_00740.objbin": {
       "model_path": "_waza/ev63_00740/ev63_00740.objbin",
@@ -67121,7 +68297,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_00870/ev63_00870.objbin": {
       "model_path": "_waza/ev63_00870/ev63_00870.objbin",
@@ -67130,7 +68308,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01120/ev63_01120.objbin": {
       "model_path": "_waza/ev63_01120/ev63_01120.objbin",
@@ -67139,7 +68319,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01200/ev63_01200.objbin": {
       "model_path": "_waza/ev63_01200/ev63_01200.objbin",
@@ -67148,7 +68330,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01230/ev63_01230.objbin": {
       "model_path": "_waza/ev63_01230/ev63_01230.objbin",
@@ -67157,7 +68341,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01260/ev63_01260.objbin": {
       "model_path": "_waza/ev63_01260/ev63_01260.objbin",
@@ -67166,7 +68352,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01300/ev63_01300.objbin": {
       "model_path": "_waza/ev63_01300/ev63_01300.objbin",
@@ -67175,7 +68363,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01470/ev63_01470.objbin": {
       "model_path": "_waza/ev63_01470/ev63_01470.objbin",
@@ -67184,7 +68374,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01480/ev63_01480.objbin": {
       "model_path": "_waza/ev63_01480/ev63_01480.objbin",
@@ -67193,7 +68385,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01490/ev63_01490.objbin": {
       "model_path": "_waza/ev63_01490/ev63_01490.objbin",
@@ -67202,7 +68396,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01491/ev63_01491.objbin": {
       "model_path": "_waza/ev63_01491/ev63_01491.objbin",
@@ -67211,7 +68407,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01500/ev63_01500.objbin": {
       "model_path": "_waza/ev63_01500/ev63_01500.objbin",
@@ -67220,7 +68418,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01520/ev63_01520.objbin": {
       "model_path": "_waza/ev63_01520/ev63_01520.objbin",
@@ -67229,7 +68429,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01530/ev63_01530.objbin": {
       "model_path": "_waza/ev63_01530/ev63_01530.objbin",
@@ -67238,7 +68440,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01580/ev63_01580.objbin": {
       "model_path": "_waza/ev63_01580/ev63_01580.objbin",
@@ -67247,7 +68451,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01600/ev63_01600.objbin": {
       "model_path": "_waza/ev63_01600/ev63_01600.objbin",
@@ -67256,7 +68462,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01620/ev63_01620.objbin": {
       "model_path": "_waza/ev63_01620/ev63_01620.objbin",
@@ -67265,7 +68473,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01630/ev63_01630.objbin": {
       "model_path": "_waza/ev63_01630/ev63_01630.objbin",
@@ -67274,7 +68484,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01640/ev63_01640.objbin": {
       "model_path": "_waza/ev63_01640/ev63_01640.objbin",
@@ -67283,7 +68495,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01641/ev63_01641.objbin": {
       "model_path": "_waza/ev63_01641/ev63_01641.objbin",
@@ -67292,7 +68506,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01660/ev63_01660.objbin": {
       "model_path": "_waza/ev63_01660/ev63_01660.objbin",
@@ -67301,7 +68517,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_01690/ev63_01690.objbin": {
       "model_path": "_waza/ev63_01690/ev63_01690.objbin",
@@ -67310,7 +68528,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_10070/ev63_10070.objbin": {
       "model_path": "_waza/ev63_10070/ev63_10070.objbin",
@@ -67319,7 +68539,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_10080/ev63_10080.objbin": {
       "model_path": "_waza/ev63_10080/ev63_10080.objbin",
@@ -67328,7 +68550,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_10081/ev63_10081.objbin": {
       "model_path": "_waza/ev63_10081/ev63_10081.objbin",
@@ -67337,7 +68561,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev63_10090/ev63_10090.objbin": {
       "model_path": "_waza/ev63_10090/ev63_10090.objbin",
@@ -67346,7 +68572,20 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
+    },
+    "_waza/ev63_10100/ev63_10100.objbin": {
+      "model_path": "_waza/ev63_10100/ev63_10100.objbin",
+      "body_id": 0,
+      "body_path": "",
+      "g4sk_path": "",
+      "g4sk_stem": "",
+      "skeleton_crc": "",
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev74_00100/ev74_00100.objbin": {
       "model_path": "_waza/ev74_00100/ev74_00100.objbin",
@@ -67355,7 +68594,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/ev74_01280/ev74_01280.objbin": {
       "model_path": "_waza/ev74_01280/ev74_01280.objbin",
@@ -67364,7 +68605,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w60_0060/w60_0060.objbin": {
       "model_path": "_waza/w60_0060/w60_0060.objbin",
@@ -67373,7 +68616,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w60_0220/w60_0220.objbin": {
       "model_path": "_waza/w60_0220/w60_0220.objbin",
@@ -67382,7 +68627,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w60_0450/w60_0450.objbin": {
       "model_path": "_waza/w60_0450/w60_0450.objbin",
@@ -67391,7 +68638,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w60_0540/w60_0540.objbin": {
       "model_path": "_waza/w60_0540/w60_0540.objbin",
@@ -67400,7 +68649,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w60_0850/w60_0850.objbin": {
       "model_path": "_waza/w60_0850/w60_0850.objbin",
@@ -67409,7 +68660,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w60_0870/w60_0870.objbin": {
       "model_path": "_waza/w60_0870/w60_0870.objbin",
@@ -67418,7 +68671,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "_waza/w62_0280/w62_0280.objbin": {
       "model_path": "_waza/w62_0280/w62_0280.objbin",
@@ -67427,7 +68682,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "b000001/b000001.objbin": {
       "model_path": "b000001/b000001.objbin",
@@ -67436,7 +68693,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "b000002/b000002.objbin": {
       "model_path": "b000002/b000002.objbin",
@@ -67445,7 +68704,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "c000101/c000101.objbin": {
       "model_path": "c000101/c000101.objbin",
@@ -67498,7 +68759,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "i000003/i000003.objbin": {
       "model_path": "i000003/i000003.objbin",
@@ -67507,7 +68770,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "i000004/i000004.objbin": {
       "model_path": "i000004/i000004.objbin",
@@ -67516,7 +68781,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "i000005/i000005.objbin": {
       "model_path": "i000005/i000005.objbin",
@@ -67525,7 +68792,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     },
     "stairs000001/stairs000001.objbin": {
       "model_path": "stairs000001/stairs000001.objbin",
@@ -67534,7 +68803,9 @@
       "g4sk_path": "",
       "g4sk_stem": "",
       "skeleton_crc": "",
-      "texture_path": "0"
+      "texture_path": "0",
+      "body_profile": 0,
+      "body_mesh_profile": 0
     }
   },
   "bodies": {
