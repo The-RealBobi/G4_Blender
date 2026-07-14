@@ -1874,29 +1874,115 @@ def resolve_uniform_generic_g4sk(
     return None, None
 
 
+def g4sk_covers_g4md_palette(skeleton_data: bytes, path: Path) -> bool:
+    """Return whether a skeleton names every joint referenced by a G4MD mesh."""
+    used_hashes = uniform_used_joint_hashes(path)
+    if not used_hashes:
+        return False
+    try:
+        names = parse_g4sk(skeleton_data).get("names", [])
+    except (ValueError, struct.error):
+        return False
+    skeleton_hashes = {crc32b(name.encode("ascii")) for name in names if name}
+    return used_hashes <= skeleton_hashes
+
+
+def g4sk_matches_or_unskinned_g4md(skeleton_data: bytes, path: Path) -> bool:
+    """Allow a configured rig for static meshes, otherwise require coverage."""
+    return not uniform_used_joint_hashes(path) or g4sk_covers_g4md_palette(skeleton_data, path)
+
+
+def resolve_unique_face_crc_g4sk(path: Path) -> tuple[bytes | None, str | None]:
+    """Resolve an unlisted face mesh only when its CRC palette has one rig."""
+    used_hashes = uniform_used_joint_hashes(path)
+    if not used_hashes:
+        return None, None
+    matches = [
+        (skeleton_data, source)
+        for skeleton_data, source, hashes, _joint_count in uniform_crc_skeleton_candidates()
+        if used_hashes <= hashes
+    ]
+    if len(matches) != 1:
+        return None, None
+    skeleton_data, source = matches[0]
+    return skeleton_data, f"{source} via unique complete face CRC32 palette"
+
+
 def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple[bytes | None, str | None]:
+    palette_path = companion(path, ".g4md") if pack_data is not None else path
+    if palette_path is None:
+        palette_path = path
+
     if pack_data is not None and pack_data[:4] == b"G4PK":
         pack = parse_g4pk(pack_data)
         for entry in pack["entries"]:
             if entry["magic"] == "G4SK":
                 start = entry["offset"]
                 end = start + entry["size"]
-                return pack_data[start:end], f"{path}::{entry['name']}"
+                skeleton_data = pack_data[start:end]
+                if palette_path == path or g4sk_covers_g4md_palette(skeleton_data, palette_path):
+                    return skeleton_data, f"{path}::{entry['name']}"
 
     own = companion(path, ".g4sk")
     if own is not None:
-        return own.read_bytes(), str(own)
+        skeleton_data = own.read_bytes()
+        if palette_path == path or g4sk_covers_g4md_palette(skeleton_data, palette_path):
+            return skeleton_data, str(own)
 
-    skeleton_data, skeleton_source = resolve_uniform_generic_g4sk(path, allow_common_fallback=False)
+    # Character G4MD files are sometimes unpacked beside their original
+    # G4PKM.  The pack keeps the character-specific (and often dynamic) G4SK;
+    # prefer it to a generic config rig, but only after exact palette coverage
+    # proves that it is the sibling mesh's skeleton.
+    own_pack = companion(path, ".g4pkm")
+    if own_pack is not None:
+        for skeleton_data, source in g4sk_entries_from_candidate(own_pack):
+            if g4sk_covers_g4md_palette(skeleton_data, palette_path):
+                return skeleton_data, f"{source} via sibling character pack"
+
+    # Older face assets may store a secondary G4MD (hair, brows, etc.) beside
+    # the character's primary G4MD without a companion G4SK of their own.
+    # The primary mesh is the authoritative rig anchor; reuse it only when its
+    # skeleton covers every CRC32 palette entry used by this secondary mesh.
+    primary = path.parent / f"{path.parent.name}.g4md"
+    if primary != path and primary.is_file():
+        primary_data, primary_source = find_skeleton_for_model(primary)
+        if primary_data is not None and g4sk_covers_g4md_palette(primary_data, path):
+            return primary_data, f"{primary_source} via sibling primary mesh"
+
+    try:
+        is_face_asset = "_face" in path.relative_to(RAW_DATA_ROOT).parts
+    except ValueError:
+        is_face_asset = False
+
+    skeleton_data, skeleton_source = resolve_uniform_generic_g4sk(palette_path, allow_common_fallback=False)
     if skeleton_data is not None:
         return skeleton_data, skeleton_source
-    skeleton_data, skeleton_source = resolve_g4sk_from_chara_model(path)
-    if skeleton_data is not None:
+    skeleton_data, skeleton_source = resolve_g4sk_from_chara_model(palette_path)
+    if skeleton_data is not None and (
+        not is_face_asset or g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path)
+    ):
         return skeleton_data, skeleton_source
-    skeleton_data, skeleton_source = resolve_uniform_family_g4sk(path)
-    if skeleton_data is not None:
+    skeleton_data, skeleton_source = resolve_uniform_family_g4sk(palette_path)
+    if skeleton_data is not None and (
+        not is_face_asset or g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path)
+    ):
         return skeleton_data, skeleton_source
-    return resolve_uniform_generic_g4sk(path)
+
+    # A small number of legacy face-only assets have no character row or
+    # companion rig.  They are hair meshes authored against the shared hair
+    # skeleton, not against an arbitrary character body skeleton.
+    hair_skeleton = (
+        RAW_DATA_ROOT / "common" / "chr" / "_face" / "20_EDIT" / "_hairSK" / "_hairSK.g4sk"
+    )
+    if is_face_asset and hair_skeleton.is_file():
+        hair_data = hair_skeleton.read_bytes()
+        if g4sk_covers_g4md_palette(hair_data, palette_path):
+            return hair_data, f"{hair_skeleton} via shared face hair rig"
+    if is_face_asset:
+        skeleton_data, skeleton_source = resolve_unique_face_crc_g4sk(palette_path)
+        if skeleton_data is not None:
+            return skeleton_data, skeleton_source
+    return resolve_uniform_generic_g4sk(palette_path)
 
 
 
