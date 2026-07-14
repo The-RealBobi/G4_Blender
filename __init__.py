@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 37),
+    "version": (0, 14, 38),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -3188,6 +3188,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
+    skip_character_setup: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
     body_model: StringProperty(
         name="Body Model",
         description="Optional u*.g4md/.g4pkm override; empty detects the matching body automatically",
@@ -3240,6 +3244,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
 
         if (
             not self.character_setup_complete
+            and not self.skip_character_setup
             and len(paths) == 1
             and re.fullmatch(r"c\d{6,8}", paths[0].stem, re.IGNORECASE)
         ):

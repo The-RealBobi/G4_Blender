@@ -490,6 +490,7 @@ def import_model_for_animation(
             # Without this flag the model operator schedules its setup dialog
             # again and returns before an armature exists for the G4MT action.
             character_setup_complete=True,
+            skip_character_setup=True,
             body_model=body_model,
             shoes_model=shoes_model,
             accessory_model=accessory_model,
@@ -1960,7 +1961,14 @@ def import_event_actor(
     head_model: str = "",
     body_model: str = "",
     shoes_model: str = "",
+    accessory_model: str = "",
+    gloves_model: str = "",
+    armband_model: str = "",
+    nameplate_model: str = "",
+    attach_ball: bool = False,
+    ball_model: str = "",
     manifest_model: str = "",
+    debug_log: list[str] | None = None,
 ) -> tuple[object, int, list[tuple[str, int]]]:
     model_path = None
     if head_model:
@@ -1991,19 +1999,32 @@ def import_event_actor(
         model_path = resolve_manifest()
     if model_path is None:
         raise RuntimeError(f"Could not resolve model {actor} for the event")
+    if debug_log is not None:
+        debug_log.append(f"{actor}: model={model_path}")
     skeleton_path = resolve_skeleton_path(model_path)
     if skeleton_path is None and generic_actor:
         skeleton_path = resolve_generic_event_skeleton(packages[0], actor, prefs)
     first_motion, first_entry = decode_event_package(packages[0], skeleton_path, temporary_directory)
+    if debug_log is not None:
+        debug_log.append(
+            f"{actor}: skeleton={skeleton_path or '<embedded/auto>'}; "
+            f"first_clip={first_motion['clip']['name']}; targets={len(track_bone_names(first_motion))}"
+        )
     armature, resolved_model = import_model_for_animation(
         packages[0],
         first_motion,
         prefs,
         model_path,
-        bool(body_model or shoes_model),
+        bool(body_model or shoes_model or accessory_model or gloves_model or armband_model or nameplate_model or attach_ball),
         False,
         body_model,
         shoes_model,
+        accessory_model,
+        gloves_model,
+        armband_model,
+        nameplate_model,
+        attach_ball,
+        ball_model,
         character_part_stem=character_part_stem,
         align_to_motion_rest=not (generic_actor and bool(head_model)),
     )
@@ -2012,6 +2033,8 @@ def import_event_actor(
         display_actor = f"{model_path.stem}_{event_actor_slot(actor)}"
     armature.name = display_actor
     armature.data.name = f"{display_actor}_Armature"
+    if debug_log is not None:
+        debug_log.append(f"{actor}: armature={armature.name}; bones={len(armature.data.bones)}")
     model_base_matrix = armature.matrix_world.copy()
     armature.animation_data_create()
     armature.animation_data.action = None
@@ -2068,6 +2091,11 @@ def import_event_actor(
             cut,
             rotation_only_retarget=substituted_generic,
         )
+        if debug_log is not None:
+            debug_log.append(
+                f"{actor}/{cut}: keyed={keyed}; frames={duration}; "
+                f"fcurves={len(action.fcurves)}; strip_start={strip_start}"
+            )
         cut_frames.append((cut, strip_start))
         keyed_bones += keyed
         progress()
@@ -2186,6 +2214,14 @@ def invoke_event_parts_dialog(directory: Path, import_camera: bool, actors: list
     )
 
 
+def write_event_import_log(lines: list[str]) -> None:
+    text = bpy.data.texts.get("G4 Event Import Log")
+    if text is None:
+        text = bpy.data.texts.new("G4 Event Import Log")
+    text.clear()
+    text.write("\n".join(lines) + "\n")
+
+
 EVENT_PART_OVERRIDES = {
     "ev72_50010": {
         "c11010019": {"body": "u11010018", "shoes": "s11010018"},
@@ -2233,12 +2269,59 @@ def event_uses_modular_characters(directory: Path, prefs) -> bool:
     return False
 
 
+def model_importer_module():
+    """Return the loaded model-importer package without creating an import cycle."""
+    return sys.modules.get(__package__) if __package__ else None
+
+
+def event_part_defaults_from_head(head_model: str, prefs) -> dict[str, str]:
+    """Resolve modular defaults through the model importer's CFG-aware lookup."""
+    head_path = Path(bpy.path.abspath(head_model)) if head_model else None
+    importer = model_importer_module()
+    if head_path is None or not head_path.is_file() or importer is None:
+        return {}
+    find_part = getattr(importer, "find_character_part", None)
+    find_accessory = getattr(importer, "find_accessory_part_for_body", None)
+    if find_part is None:
+        return {}
+    body = find_part(head_path, "u", prefs)
+    shoes = find_part(head_path, "s", prefs)
+    accessory = find_accessory(body, prefs) if body is not None and find_accessory is not None else None
+    return {
+        key: str(path)
+        for key, path in (("body", body), ("shoes", shoes), ("accessory", accessory))
+        if path is not None
+    }
+
+
+def event_accessory_from_body(body_model: str, prefs) -> str:
+    importer = model_importer_module()
+    find_accessory = getattr(importer, "find_accessory_part_for_body", None) if importer is not None else None
+    body_path = Path(bpy.path.abspath(body_model)) if body_model else None
+    if find_accessory is None or body_path is None or not body_path.is_file():
+        return ""
+    accessory = find_accessory(body_path, prefs)
+    return str(accessory) if accessory is not None else ""
+
+
+def event_part_head_changed(item, _context) -> None:
+    defaults = event_part_defaults_from_head(item.head_model, addon_preferences())
+    for key, value in defaults.items():
+        setattr(item, f"{key}_model", value)
+
+
 class G4EventCharacterPart(PropertyGroup):
     actor_id: StringProperty()
     actor_ids: StringProperty()
-    head_model: StringProperty(name="Head", subtype="FILE_PATH")
+    head_model: StringProperty(name="Head", subtype="FILE_PATH", update=event_part_head_changed)
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Sleeves / Collar", subtype="FILE_PATH")
+    gloves_model: StringProperty(name="Gloves", subtype="FILE_PATH")
+    armband_model: StringProperty(name="Captain Armband", subtype="FILE_PATH")
+    nameplate_model: StringProperty(name="Nameplate", subtype="FILE_PATH")
+    attach_ball: BoolProperty(name="Attach Ball", default=False)
+    ball_model: StringProperty(name="Ball", subtype="FILE_PATH")
 
 
 class IMPORT_OT_level5_g4_event_parts(Operator):
@@ -2257,6 +2340,7 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
         except json.JSONDecodeError:
             saved = {}
         directory = Path(bpy.path.abspath(self.directory))
+        packages = collect_event_packages(directory)
         self.parts.clear()
         actors = json.loads(self.actors_json or "[]")
         generic_groups = generic_actor_groups(actors)
@@ -2271,6 +2355,12 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             item.head_model = generic_saved.get("head", "")
             item.body_model = generic_saved.get("body", "")
             item.shoes_model = generic_saved.get("shoes", "")
+            item.accessory_model = generic_saved.get("accessory", "")
+            item.gloves_model = generic_saved.get("gloves", "")
+            item.armband_model = generic_saved.get("armband", "")
+            item.nameplate_model = generic_saved.get("nameplate", "")
+            item.attach_ball = bool(generic_saved.get("attach_ball", False))
+            item.ball_model = generic_saved.get("ball", "")
         for actor in actors:
             if actor in generic_actors:
                 continue
@@ -2278,18 +2368,38 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             item.actor_id = actor
             item.actor_ids = json.dumps([actor])
             actor_parts = dict(saved.get(actor) or {})
+            if not actor_parts.get("head") and packages.get(actor):
+                default_head = resolve_model_path(packages[actor][0], getattr(prefs, "raw_data_root", ""))
+                if default_head is not None:
+                    actor_parts["head"] = str(default_head)
+            if actor_parts.get("head"):
+                actor_parts.update({
+                    key: value
+                    for key, value in event_part_defaults_from_head(actor_parts["head"], prefs).items()
+                    if not actor_parts.get(key)
+                })
             defaults = event_part_defaults(directory, actor, prefs)
             for key, value in defaults.items():
                 if not actor_parts.get(key) or key in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
                     actor_parts[key] = value
+            if "body" in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                accessory = event_accessory_from_body(actor_parts.get("body", ""), prefs)
+                if accessory:
+                    actor_parts["accessory"] = accessory
             item.head_model = actor_parts.get("head", "")
             item.body_model = actor_parts.get("body", "")
             item.shoes_model = actor_parts.get("shoes", "")
+            item.accessory_model = actor_parts.get("accessory", "")
+            item.gloves_model = actor_parts.get("gloves", "")
+            item.armband_model = actor_parts.get("armband", "")
+            item.nameplate_model = actor_parts.get("nameplate", "")
+            item.attach_ball = bool(actor_parts.get("attach_ball", False))
+            item.ball_model = actor_parts.get("ball", "")
         return context.window_manager.invoke_props_dialog(self, width=820)
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Assign optional models. Empty Head uses the model encoded by the event.")
+        layout.label(text="Configure each event actor once. Changing Head re-fills its modular parts.")
         for item in self.parts:
             box = layout.box()
             box.label(text=item.actor_id, icon="ARMATURE_DATA")
@@ -2299,6 +2409,13 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             box.prop(item, "head_model")
             box.prop(item, "body_model")
             box.prop(item, "shoes_model")
+            box.prop(item, "accessory_model")
+            box.prop(item, "gloves_model")
+            box.prop(item, "armband_model")
+            box.prop(item, "nameplate_model")
+            box.prop(item, "attach_ball")
+            if item.attach_ball:
+                box.prop(item, "ball_model")
 
     def execute(self, context):
         selected = {}
@@ -2307,8 +2424,16 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 "head": bpy.path.abspath(item.head_model) if item.head_model else "",
                 "body": bpy.path.abspath(item.body_model) if item.body_model else "",
                 "shoes": bpy.path.abspath(item.shoes_model) if item.shoes_model else "",
+                "accessory": bpy.path.abspath(item.accessory_model) if item.accessory_model else "",
+                "gloves": bpy.path.abspath(item.gloves_model) if item.gloves_model else "",
+                "armband": bpy.path.abspath(item.armband_model) if item.armband_model else "",
+                "nameplate": bpy.path.abspath(item.nameplate_model) if item.nameplate_model else "",
+                "attach_ball": item.attach_ball,
+                "ball": bpy.path.abspath(item.ball_model) if item.ball_model else "",
             }
-            for path_value in actor_parts.values():
+            for key, path_value in actor_parts.items():
+                if key == "attach_ball":
+                    continue
                 path = Path(path_value) if path_value else None
                 if path is not None and (not path.is_file() or path.suffix.lower() not in {".g4md", ".g4pkm"}):
                     self.report({"ERROR"}, f"Character part not found or unsupported: {path}")
@@ -2442,6 +2567,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         p3lip_paths = discover_event_p3lip(directory, prefs)
         actors = []
         skipped_actors = {}
+        event_log = [f"event={directory}", f"actors={','.join(character_actors)}"]
         cut_frames = {}
         camera_object = None
         try:
@@ -2457,6 +2583,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 for actor, actor_packages in sorted(packages.items()):
                     actor_parts = character_parts.get(actor) or {}
                     if actor_parts.get("skip"):
+                        event_log.append(f"{actor}: skipped by selected generic profile")
                         for _ in actor_packages:
                             progress()
                         continue
@@ -2478,10 +2605,18 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             head_model=actor_parts.get("head", ""),
                             body_model=actor_parts.get("body", ""),
                             shoes_model=actor_parts.get("shoes", ""),
+                            accessory_model=actor_parts.get("accessory", ""),
+                            gloves_model=actor_parts.get("gloves", ""),
+                            armband_model=actor_parts.get("armband", ""),
+                            nameplate_model=actor_parts.get("nameplate", ""),
+                            attach_ball=bool(actor_parts.get("attach_ball", False)),
+                            ball_model=actor_parts.get("ball", ""),
                             manifest_model=actor_models.get(actor, actor_models.get(actor_base, "")),
+                            debug_log=event_log,
                         )
                     except Exception as exc:
                         skipped_actors[actor] = str(exc)
+                        event_log.append(f"{actor}: ERROR {exc}")
                         for _ in actor_packages:
                             progress()
                         continue
@@ -2513,7 +2648,11 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             scene["g4_event_effect_candidates"] = json.dumps(effect_candidates, sort_keys=True)
             scene["g4_event_effect_count"] = len(effect_roots)
             scene["g4_event_p3lip_count"] = len(p3lip_controllers)
+            scene["g4_event_import_log"] = "G4 Event Import Log"
+            write_event_import_log(event_log)
         except Exception as exc:
+            event_log.append(f"FATAL: {exc}")
+            write_event_import_log(event_log)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
