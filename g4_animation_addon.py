@@ -486,6 +486,10 @@ def import_model_for_animation(
             create_report_text=False,
             import_character_parts=import_character_parts,
             auto_character_parts=auto_character_parts,
+            # The animation flow has already collected the character parts.
+            # Without this flag the model operator schedules its setup dialog
+            # again and returns before an armature exists for the G4MT action.
+            character_setup_complete=True,
             body_model=body_model,
             shoes_model=shoes_model,
             accessory_model=accessory_model,
