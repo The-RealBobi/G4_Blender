@@ -104,6 +104,8 @@ CHARA_PARTS_DATA: dict | None = None
 UNIFORM_FAMILY_LOOKUP: dict[str, dict] | None = None
 UNIFORM_TEXTURE_LOOKUP: dict[str, list[tuple[int, str]]] | None = None
 UNIFORM_FAMILY_SKELETON_CACHE: dict[str, tuple[bytes | None, str | None]] = {}
+UNIFORM_CRC_SKELETON_CACHE: dict[str, tuple[bytes | None, str | None]] = {}
+UNIFORM_CRC_SKELETON_CANDIDATES: list[tuple[bytes, str, set[int], int]] | None = None
 SKELETON_CACHE = (
     Path(os.environ["LEVEL5_G4_SKELETON_CACHE"]).expanduser()
     if os.environ.get("LEVEL5_G4_SKELETON_CACHE")
@@ -190,7 +192,7 @@ def infer_raw_data_root(path: Path) -> Path | None:
 
 
 def configure_raw_data_root_from_path(path: Path) -> None:
-    global RAW_DATA_ROOT, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE
+    global RAW_DATA_ROOT, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CANDIDATES
     if os.environ.get("LEVEL5_G4_RAW_ROOT"):
         return
     inferred = infer_raw_data_root(path)
@@ -201,6 +203,8 @@ def configure_raw_data_root_from_path(path: Path) -> None:
         UNIFORM_FAMILY_LOOKUP = None
         UNIFORM_TEXTURE_LOOKUP = None
         UNIFORM_FAMILY_SKELETON_CACHE.clear()
+        UNIFORM_CRC_SKELETON_CACHE.clear()
+        UNIFORM_CRC_SKELETON_CANDIDATES = None
 
 
 @dataclass
@@ -1744,7 +1748,71 @@ def resolve_texture_from_chara_model(path: Path) -> Path | None:
     return None
 
 
-def resolve_uniform_generic_g4sk(path: Path) -> tuple[bytes | None, str | None]:
+def g4sk_entries_from_candidate(path: Path) -> Iterable[tuple[bytes, str]]:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return
+    if data[:4] == b"G4SK":
+        yield data, str(path)
+        return
+    if data[:4] != b"G4PK":
+        return
+    try:
+        pack = parse_g4pk(data)
+    except (ValueError, struct.error):
+        return
+    for entry in pack["entries"]:
+        if entry["magic"] == "G4SK":
+            start = entry["offset"]
+            yield data[start : start + entry["size"]], f"{path}::{entry['name']}"
+
+
+def uniform_used_joint_hashes(path: Path) -> set[int]:
+    try:
+        md_info = parse_g4md(path.read_bytes())
+    except (OSError, ValueError, struct.error):
+        return set()
+    joint_table = md_info.get("joint_hash_table", 0)
+    if joint_table <= 0:
+        return set()
+    indices = {
+        index
+        for record in md_info.get("records", [])
+        for index in joint_palette_for_record(md_info, record)
+    }
+    if not indices or joint_table + max(indices) * 4 + 4 > path.stat().st_size:
+        return set()
+    data = path.read_bytes()
+    return {u32(data, joint_table + index * 4) for index in indices}
+
+
+def uniform_crc_skeleton_candidates() -> list[tuple[bytes, str, set[int], int]]:
+    global UNIFORM_CRC_SKELETON_CANDIDATES
+    if UNIFORM_CRC_SKELETON_CANDIDATES is not None:
+        return UNIFORM_CRC_SKELETON_CANDIDATES
+
+    candidates: list[tuple[bytes, str, set[int], int]] = []
+    face_root = RAW_DATA_ROOT / "common" / "chr" / "_face"
+    if face_root.is_dir():
+        paths = list(face_root.rglob("*.g4sk")) + list(face_root.rglob("*.g4pkm"))
+        for path in paths:
+            for skeleton_data, source in g4sk_entries_from_candidate(path):
+                try:
+                    names = parse_g4sk(skeleton_data).get("names", [])
+                except (ValueError, struct.error):
+                    continue
+                hashes = {crc32b(name.encode("ascii")) for name in names if name}
+                if hashes:
+                    candidates.append((skeleton_data, source, hashes, len(names)))
+    UNIFORM_CRC_SKELETON_CANDIDATES = candidates
+    return candidates
+
+
+def resolve_uniform_generic_g4sk(
+    path: Path,
+    allow_common_fallback: bool = True,
+) -> tuple[bytes | None, str | None]:
     try:
         rel = path.relative_to(RAW_DATA_ROOT).as_posix()
     except ValueError:
@@ -1753,27 +1821,49 @@ def resolve_uniform_generic_g4sk(path: Path) -> tuple[bytes | None, str | None]:
         return None, None
 
     match = re.fullmatch(r"[us](\d{6,8})", path.stem, re.IGNORECASE)
-    if match:
-        character_root = RAW_DATA_ROOT / "common" / "chr"
+    if match is None and not allow_common_fallback:
+        return None, None
+    character_root = RAW_DATA_ROOT / "common" / "chr"
+    used_hashes = uniform_used_joint_hashes(path) if match is not None else set()
+    if used_hashes:
         character_stem = f"c{match.group(1)}"
         direct = character_root / character_stem
         candidates = [direct / f"{character_stem}.g4sk", direct / f"{character_stem}.g4pkm"]
-        if character_root.is_dir():
-            candidates.extend(character_root.rglob(f"{character_stem}.g4sk"))
-            candidates.extend(character_root.rglob(f"{character_stem}.g4pkm"))
         for candidate in dict.fromkeys(candidates):
-            if not candidate.is_file():
-                continue
-            data = candidate.read_bytes()
-            if data[:4] == b"G4SK":
-                return data, f"{candidate} via matching uniform ID"
-            if data[:4] == b"G4PK":
-                pack = parse_g4pk(data)
-                for entry in pack["entries"]:
-                    if entry["magic"] == "G4SK":
-                        start = entry["offset"]
-                        return data[start:start + entry["size"]], f"{candidate}::{entry['name']} via matching uniform ID"
+            for skeleton_data, source in g4sk_entries_from_candidate(candidate):
+                names = parse_g4sk(skeleton_data).get("names", [])
+                hashes = {crc32b(name.encode("ascii")) for name in names if name}
+                if used_hashes <= hashes:
+                    return skeleton_data, f"{source} via matching uniform ID"
+        marker = f"/{character_stem}/{character_stem}."
+        for skeleton_data, source, hashes, _joint_count in uniform_crc_skeleton_candidates():
+            if marker in source and used_hashes <= hashes:
+                return skeleton_data, f"{source} via matching uniform ID"
 
+    # Some story uniforms share the body of a neighbouring character model,
+    # so their numeric ID has no matching C-model.  Their G4MD palette still
+    # declares every required joint by CRC32.  Search only face-character
+    # packs and require complete coverage; this avoids spatial guesses and
+    # finds their embedded, dynamic G4SK when one is available.
+    cache_key = str(path)
+    if used_hashes and cache_key in UNIFORM_CRC_SKELETON_CACHE:
+        resolved = UNIFORM_CRC_SKELETON_CACHE[cache_key]
+        if resolved[0] is not None:
+            return resolved
+    if used_hashes:
+        matches: list[tuple[int, str, bytes, str]] = []
+        for skeleton_data, source, hashes, joint_count in uniform_crc_skeleton_candidates():
+            if used_hashes <= hashes:
+                matches.append((joint_count, source, skeleton_data, source))
+        if matches:
+            _, _, skeleton_data, source = min(matches, key=lambda item: (item[0], item[1]))
+            resolved = (skeleton_data, f"{source} via complete G4MD CRC32 palette")
+            UNIFORM_CRC_SKELETON_CACHE[cache_key] = resolved
+            return resolved
+        UNIFORM_CRC_SKELETON_CACHE[cache_key] = (None, None)
+
+    if not allow_common_fallback:
+        return None, None
     # Uniforms without an exact character skeleton use the common body rig.
     # Its raw palette indices follow c000101; similarly sized edit skeletons
     # have different helper-bone insertion points and silently misbind limbs.
@@ -1797,6 +1887,9 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
     if own is not None:
         return own.read_bytes(), str(own)
 
+    skeleton_data, skeleton_source = resolve_uniform_generic_g4sk(path, allow_common_fallback=False)
+    if skeleton_data is not None:
+        return skeleton_data, skeleton_source
     skeleton_data, skeleton_source = resolve_g4sk_from_chara_model(path)
     if skeleton_data is not None:
         return skeleton_data, skeleton_source
