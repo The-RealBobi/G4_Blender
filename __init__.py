@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 38),
+    "version": (0, 14, 39),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
@@ -3056,6 +3056,13 @@ def character_setup_head_changed(operator, _context) -> None:
         autofill_character_setup_parts(operator)
 
 
+def event_setup_actor_model(directory: Path, actor: str, prefs) -> Path | None:
+    packages = g4_animation_addon.collect_event_packages(directory).get(actor) or []
+    if not packages:
+        return None
+    return g4_animation_addon.resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
+
+
 class IMPORT_OT_level5_g4_character_setup(Operator):
     """Collect character cosmetics once, after the primary file picker."""
 
@@ -3066,6 +3073,10 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     model_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     animation_path: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     animation_settings_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    event_directory: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    event_actors_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    event_selected_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    event_actor_index: IntProperty(default=0, options={"HIDDEN", "SKIP_SAVE"})
     allow_head_override: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
     create_report_text: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
     head_model: StringProperty(name="Head", subtype="FILE_PATH", update=character_setup_head_changed)
@@ -3080,6 +3091,41 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
 
     def invoke(self, context, event):
         saved = saved_character_import_parts(addon_preferences())
+        if self.event_directory:
+            prefs = addon_preferences()
+            directory = Path(bpy.path.abspath(self.event_directory))
+            actors = json.loads(self.event_actors_json or "[]")
+            if self.event_actor_index >= len(actors):
+                self.report({"ERROR"}, "Event actor selection is out of range")
+                return {"CANCELLED"}
+            actor = actors[self.event_actor_index]
+            try:
+                event_saved = json.loads(getattr(prefs, "event_character_parts", "{}") or "{}")
+            except json.JSONDecodeError:
+                event_saved = {}
+            selected = dict(event_saved.get(actor) or {})
+            if not selected.get("head"):
+                model = event_setup_actor_model(directory, actor, prefs)
+                if model is not None:
+                    selected["head"] = str(model)
+            self.allow_head_override = True
+            self.model_path = selected.get("head") or self.model_path
+            self.head_model = selected.get("head") or self.model_path
+            autofill_character_setup_parts(self)
+            defaults = g4_animation_addon.event_part_defaults(directory, actor, prefs)
+            for key, value in defaults.items():
+                if not selected.get(key) or key in g4_animation_addon.EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                    selected[key] = value
+            self.body_model = selected.get("body") or self.body_model
+            self.shoes_model = selected.get("shoes") or self.shoes_model
+            self.accessory_model = selected.get("accessory") or self.accessory_model
+            self.gloves_model = selected.get("gloves") or self.gloves_model
+            self.armband_model = selected.get("armband") or self.armband_model
+            self.nameplate_model = selected.get("nameplate") or self.nameplate_model
+            self.attach_ball = bool(selected.get("attach_ball", False))
+            self.ball_model = selected.get("ball") or self.ball_model
+            return context.window_manager.invoke_props_dialog(self, width=660)
+
         selected_model = Path(bpy.path.abspath(self.model_path))
         if self.allow_head_override and not self.head_model:
             self.head_model = str(selected_model)
@@ -3098,7 +3144,12 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
 
     def draw(self, context):
         layout = self.layout
-        layout.label(text=f"Rig: {Path(self.model_path).name}", icon="ARMATURE_DATA")
+        if self.event_directory:
+            actors = json.loads(self.event_actors_json or "[]")
+            actor = actors[self.event_actor_index] if self.event_actor_index < len(actors) else "<unknown>"
+            layout.label(text=f"Event actor: {actor}", icon="ARMATURE_DATA")
+        else:
+            layout.label(text=f"Rig: {Path(self.model_path).name}", icon="ARMATURE_DATA")
         if self.allow_head_override:
             layout.prop(self, "head_model")
         layout.label(text="Body, shoes and sleeves are prefilled from the selected head.")
@@ -3126,6 +3177,56 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             )
         }
         values["attach_ball"] = self.attach_ball
+
+        if self.event_directory:
+            prefs = addon_preferences()
+            directory = Path(bpy.path.abspath(self.event_directory))
+            actors = json.loads(self.event_actors_json or "[]")
+            actor = actors[self.event_actor_index]
+            try:
+                selected = json.loads(self.event_selected_json or "{}")
+            except json.JSONDecodeError:
+                selected = {}
+            selected[actor] = {
+                "head": str(model_path),
+                "body": values["body_model"],
+                "shoes": values["shoes_model"],
+                "accessory": values["accessory_model"],
+                "gloves": values["gloves_model"],
+                "armband": values["armband_model"],
+                "nameplate": values["nameplate_model"],
+                "attach_ball": values["attach_ball"],
+                "ball": values["ball_model"],
+            }
+            next_index = self.event_actor_index + 1
+            if next_index < len(actors):
+                next_model = event_setup_actor_model(directory, actors[next_index], prefs)
+                g4_animation_addon.defer_blender_call(
+                    lambda: bpy.ops.import_scene.level5_g4_character_setup(
+                        "INVOKE_DEFAULT",
+                        model_path=str(next_model) if next_model is not None else "",
+                        event_directory=str(directory),
+                        event_actors_json=json.dumps(actors),
+                        event_selected_json=json.dumps(selected),
+                        event_actor_index=next_index,
+                    )
+                )
+                return {"FINISHED"}
+            prefs.event_character_parts = json.dumps(selected, sort_keys=True)
+            try:
+                bpy.ops.wm.save_userpref()
+            except RuntimeError:
+                pass
+            g4_animation_addon.defer_blender_call(
+                lambda: bpy.ops.import_scene.level5_g4_event_folder(
+                    "EXEC_DEFAULT",
+                    directory=str(directory),
+                    prompt_character_parts=False,
+                    character_parts_json=json.dumps(selected),
+                )
+            )
+            return {"FINISHED"}
+
         addon_preferences().character_import_parts = json.dumps(values, sort_keys=True)
 
         if self.animation_path:

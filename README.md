@@ -177,10 +177,11 @@ When importing a G4MT with a new actor, the shared character-parts dialog is
 shown once. It permits replacing the head and pre-fills the body, shoes and
 declared sleeves/collar from the selected head's character configuration.
 
-Event imports use one actor setup dialog as well. Each actor has the same head
-and cosmetic choices, with CFG-backed auto-fill; no secondary model-parts
-dialog is opened. Diagnostics for an event import are retained in Blender's
-Text Editor as `G4 Event Import Log`.
+Event imports use the same `Character Parts` dialog as model import, once for
+each actor. It identifies the current event actor and has the same head and
+cosmetic choices with CFG-backed auto-fill; `Event Character Parts` is not
+opened by the import flow. Diagnostics are retained in Blender's Text Editor
+as `G4 Event Import Log`.
 
 Bodies and shoes keep their native G4SK bind pose and weights. Their Blender
 vertex groups are named from the verified G4MD CRC32 palette so every weight

@@ -2537,7 +2537,20 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             and not self.character_parts_json
             and event_uses_modular_characters(directory, addon_preferences())
         ):
-            invoke_event_parts_dialog(directory, self.import_camera, character_actors)
+            prefs = addon_preferences()
+            first_model = None
+            packages = collect_event_packages(directory).get(character_actors[0]) or []
+            if packages:
+                first_model = resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
+            defer_blender_call(
+                lambda: bpy.ops.import_scene.level5_g4_character_setup(
+                    "INVOKE_DEFAULT",
+                    model_path=str(first_model) if first_model is not None else "",
+                    event_directory=str(directory),
+                    event_actors_json=json.dumps(character_actors),
+                    event_actor_index=0,
+                )
+            )
             return {"FINISHED"}
         character_parts = json.loads(self.character_parts_json or "{}")
         generic_by_slot = generic_actor_groups(character_actors)
