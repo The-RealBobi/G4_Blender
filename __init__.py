@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 15),
+    "version": (0, 14, 23),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -27,6 +27,10 @@ from mathutils import Matrix, Quaternion, Vector
 
 ADDON_ID = __name__
 MODEL_EXTENSIONS = {".g4md", ".g4pkm"}
+CHARACTER_PART_ACCESSORY_CACHE: dict[Path, dict[str, str]] = {}
+CHARACTER_PART_BODY_VARIANT_CACHE: dict[Path, dict[tuple[str, str], dict[int, str]]] = {}
+CHARACTER_BODY_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
+CHARACTER_BODY_MESH_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
 
 try:
     from . import g4_port_addon
@@ -2541,6 +2545,11 @@ def import_g4_model(
     if create_report_text:
         make_report_text(summary)
         make_debug_text(summary, debug)
+    if target_armature is None and is_character_model(path):
+        for object_name in imported_names:
+            obj = bpy.data.objects.get(object_name)
+            if obj is not None and obj.type == "ARMATURE":
+                obj["g4_character_model_source"] = str(path)
     cleanup_generated_files(summary, getattr(prefs, "cleanup_import_cache", True))
     return summary, imported_names
 
@@ -2569,6 +2578,19 @@ def load_model_lookup(prefs: G4ImporterPreferences) -> dict:
         return {}
 
 
+def lookup_model_row(path: Path, prefs: G4ImporterPreferences, models: dict | None = None) -> dict | None:
+    models = load_model_lookup(prefs) if models is None else models
+    relative = None
+    parts = path.parts
+    for index in range(len(parts) - 2):
+        if parts[index:index + 2] == ("common", "chr"):
+            relative = Path(*parts[index + 2:]).as_posix()
+            break
+    if relative is None:
+        return None
+    return models.get(relative) or models.get(Path(relative).with_suffix(".objbin").as_posix())
+
+
 def body_stem_from_row(row: dict | None) -> str | None:
     body_path = str((row or {}).get("body_path") or "").replace("\\", "/")
     match = re.search(r"(?:^|/)(c\d{6,8})(?:\.objbin)?$", body_path, re.IGNORECASE)
@@ -2587,18 +2609,172 @@ def lookup_body_stem_for_identifier(identifier: str, models: dict) -> str | None
 
 def lookup_body_stem(path: Path, prefs: G4ImporterPreferences, models: dict | None = None) -> str | None:
     models = load_model_lookup(prefs) if models is None else models
-    relative = None
-    parts = path.parts
-    for index in range(len(parts) - 2):
-        if parts[index:index + 2] == ("common", "chr"):
-            relative = Path(*parts[index + 2:]).as_posix()
-            break
-    row = None
-    if relative:
-        row = models.get(relative)
-        if row is None:
-            row = models.get(Path(relative).with_suffix(".objbin").as_posix())
-    return body_stem_from_row(row)
+    return body_stem_from_row(lookup_model_row(path, prefs, models))
+
+
+def body_profile_from_chara_model(path: Path, prefs: G4ImporterPreferences) -> int | None:
+    """Return the declared editable-body profile used by a character head."""
+    row = lookup_model_row(path, prefs)
+    if row is None:
+        return None
+    try:
+        return int(row.get("body_profile"))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        body_id = int(row.get("body_id"))
+    except (TypeError, ValueError):
+        return None
+    config_path = Path(bpy.path.abspath(getattr(prefs, "chara_model_xml", "") or ""))
+    if not config_path.is_file():
+        return None
+    profiles = CHARACTER_BODY_PROFILE_CACHE.get(config_path)
+    if profiles is None:
+        profiles = {}
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        for entry in re.finditer(
+            r'<entry index="\d+" name="CHARA_BODY_INFO">\s*<values>(.*?)</values>',
+            text,
+            re.DOTALL,
+        ):
+            values = {
+                int(index): value
+                for index, value in re.findall(
+                    r'<value index="(\d+)" type="(?:Integer|Unsigned Integer)">([^<]+)</value>',
+                    entry.group(1),
+                )
+            }
+            try:
+                profiles[int(values[0])] = int(values.get(4, ""))
+            except (KeyError, ValueError):
+                continue
+        CHARACTER_BODY_PROFILE_CACHE[config_path] = profiles
+    return profiles.get(body_id)
+
+
+def body_mesh_profile_from_chara_model(path: Path, prefs: G4ImporterPreferences) -> int | None:
+    row = lookup_model_row(path, prefs)
+    if row is None:
+        return None
+    try:
+        return int(row.get("body_mesh_profile"))
+    except (TypeError, ValueError):
+        pass
+    try:
+        body_id = int(row.get("body_id"))
+    except (TypeError, ValueError):
+        return None
+    config_path = Path(bpy.path.abspath(getattr(prefs, "chara_model_xml", "") or ""))
+    if not config_path.is_file():
+        return None
+    profiles = CHARACTER_BODY_MESH_PROFILE_CACHE.get(config_path)
+    if profiles is None:
+        profiles = {}
+        try:
+            text = config_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return None
+        for entry in re.finditer(
+            r'<entry index="\d+" name="CHARA_BODY_INFO">\s*<values>(.*?)</values>',
+            text,
+            re.DOTALL,
+        ):
+            values = {
+                int(index): value
+                for index, value in re.findall(
+                    r'<value index="(\d+)" type="(?:Integer|Unsigned Integer)">([^<]+)</value>',
+                    entry.group(1),
+                )
+            }
+            try:
+                profiles[int(values[0])] = int(values[6])
+            except (KeyError, ValueError):
+                continue
+        CHARACTER_BODY_MESH_PROFILE_CACHE[config_path] = profiles
+    return profiles.get(body_id)
+
+
+def declared_body_variant_for_character(body_path: Path, model_path: Path, prefs: G4ImporterPreferences) -> Path:
+    """Select the CFG-declared body-profile variant of a modular uniform.
+
+    G4 clothing families store compatible meshes side by side (for example
+    u000101, u000103 and u000105).  Their trailing number is not a cosmetic
+    choice: CHARA_PARTS_CLOTHES_INFO field 2 identifies the body profile.  A
+    direct import of the profile-0 mesh on c000201/c000301 has valid weights,
+    but its vertices are authored for different rest-bone positions.
+    """
+    profile = body_profile_from_chara_model(model_path, prefs)
+    if profile is None or not re.fullmatch(r"(?:u|s|sk|g|m|n)\d{6,8}", body_path.stem, re.IGNORECASE):
+        return body_path
+    for data_root in model_data_roots(body_path, prefs):
+        try:
+            relative = body_path.resolve().relative_to(data_root / "common" / "chr").as_posix().lower()
+        except ValueError:
+            continue
+        config_paths = sorted((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin.xml"))
+        for config_path in config_paths:
+            variants = CHARACTER_PART_BODY_VARIANT_CACHE.get(config_path)
+            if variants is None:
+                variants = {}
+                try:
+                    text = config_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for entry in re.finditer(
+                    r'<entry index="\d+" name="CHARA_PARTS_(?:CLOTHES|SHOES|GLOVE)_INFO">\s*<values>(.*?)</values>',
+                    text,
+                    re.DOTALL,
+                ):
+                    strings = {
+                        int(index): value.replace("\\", "/").lower()
+                        for index, value in re.findall(
+                            r'<value index="(\d+)" type="String">([^<]+\.g4md)</value>', entry.group(1)
+                        )
+                    }
+                    integers = {
+                        int(index): value
+                        for index, value in re.findall(
+                            r'<value index="(\d+)" type="(?:Integer|Unsigned Integer)">([^<]+)</value>', entry.group(1)
+                        )
+                    }
+                    try:
+                        candidate_profile = int(integers.get(2, ""))
+                    except ValueError:
+                        continue
+                    for candidate in strings.values():
+                        if not candidate.startswith("_uniform/") or not candidate.endswith(".g4md"):
+                            continue
+                        candidate_path = Path(candidate)
+                        if not re.fullmatch(r"(?:u|s|sk|g|m|n)\d{6,8}", candidate_path.stem, re.IGNORECASE):
+                            continue
+                        key = (candidate_path.parent.as_posix(), candidate_path.stem[:-2].lower())
+                        profile_variants = variants.setdefault(key, {})
+                        expected_suffix = f"{candidate_profile + 1:02d}"
+                        if candidate_path.stem.endswith(expected_suffix):
+                            profile_variants[candidate_profile] = candidate
+                        else:
+                            profile_variants.setdefault(candidate_profile, candidate)
+                CHARACTER_PART_BODY_VARIANT_CACHE[config_path] = variants
+            source = Path(relative)
+            key = (source.parent.as_posix(), source.stem[:-2].lower())
+            declared = variants.get(key, {}).get(profile)
+            if declared is None:
+                mesh_profile = body_mesh_profile_from_chara_model(model_path, prefs)
+                if mesh_profile is not None:
+                    declared = variants.get(key, {}).get(mesh_profile)
+            if declared:
+                candidate = data_root / "common" / "chr" / declared
+                if candidate.is_file():
+                    return candidate
+        if body_path.stem.lower().startswith("s"):
+            null_shoes = data_root / "common" / "chr" / "_uniform" / "s000001" / "s000001.g4md"
+            if null_shoes.is_file():
+                return null_shoes
+    return body_path
 
 
 def find_character_part(
@@ -2677,7 +2853,47 @@ def attach_part_to_armature(
     return attached
 
 
-def find_accessory_part_for_body(body_path: Path) -> Path | None:
+def declared_accessory_part_for_body(body_path: Path, prefs: G4ImporterPreferences) -> Path | None:
+    for data_root in model_data_roots(body_path, prefs):
+        try:
+            relative = body_path.resolve().relative_to(data_root / "common" / "chr").as_posix().lower()
+        except ValueError:
+            continue
+        config_paths = sorted((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin.xml"))
+        for config_path in config_paths:
+            lookup = CHARACTER_PART_ACCESSORY_CACHE.get(config_path)
+            if lookup is None:
+                try:
+                    text = config_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                lookup = {}
+                for entry in re.finditer(
+                    r'<entry index="\d+" name="CHARA_PARTS_CLOTHES_INFO">\s*<values>(.*?)</values>',
+                    text,
+                    re.DOTALL,
+                ):
+                    values = {
+                        int(index): value.replace("\\", "/").lower()
+                        for index, value in re.findall(
+                            r'<value index="(\d+)" type="String">([^<]+\.g4md)</value>', entry.group(1)
+                        )
+                    }
+                    if values.get(0, "").startswith("_uniform/") and values.get(6, "").startswith("_uniform/"):
+                        lookup.setdefault(values[0], values[6])
+                CHARACTER_PART_ACCESSORY_CACHE[config_path] = lookup
+            declared = lookup.get(relative)
+            if declared:
+                candidate = data_root / "common" / "chr" / declared
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
+def find_accessory_part_for_body(body_path: Path, prefs: G4ImporterPreferences) -> Path | None:
+    declared = declared_accessory_part_for_body(body_path, prefs)
+    if declared is not None:
+        return declared
     match = re.fullmatch(r"u(\d{6,8})", body_path.stem, re.IGNORECASE)
     if match is None:
         return None
@@ -2757,18 +2973,21 @@ def import_character_parts_for_armature(
     body = Path(bpy.path.abspath(body_path)) if body_path else find_character_part(
         model_path, "u", prefs, character_part_stem
     )
+    if body is not None:
+        body = declared_body_variant_for_character(body, model_path, prefs)
     shoes = Path(bpy.path.abspath(shoes_path)) if shoes_path else find_character_part(
         model_path, "s", prefs, character_part_stem
     )
     accessory = Path(bpy.path.abspath(accessory_path)) if accessory_path else None
     if accessory is None and body is not None:
-        accessory = find_accessory_part_for_body(body)
+        accessory = find_accessory_part_for_body(body, prefs)
     paths = [
         body,
         shoes,
         accessory,
         *(Path(bpy.path.abspath(value)) for value in (gloves_path, armband_path, nameplate_path) if value),
     ]
+    paths = [declared_body_variant_for_character(path, model_path, prefs) if path is not None else None for path in paths]
     selected = []
     for path in paths:
         if path is None:
@@ -3314,14 +3533,24 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
 
     def execute(self, context):
         target = context.active_object
+        prefs = addon_preferences()
+        model_source = Path(str(target.get("g4_character_model_source", "")))
+        body_model = Path(bpy.path.abspath(self.body_model)) if self.body_model else None
+        if body_model is not None and model_source.is_file():
+            body_model = declared_body_variant_for_character(body_model, model_source, prefs)
         paths = [
-            Path(bpy.path.abspath(value))
-            for value in (
-                self.body_model, self.shoes_model, self.accessory_model,
-                self.gloves_model, self.armband_model, self.nameplate_model,
+            path
+            for path in (
+                body_model,
+                *(Path(bpy.path.abspath(value)) for value in (
+                    self.shoes_model, self.accessory_model,
+                    self.gloves_model, self.armband_model, self.nameplate_model,
+                ) if value),
             )
-            if value
+            if path is not None
         ]
+        if model_source.is_file():
+            paths = [declared_body_variant_for_character(path, model_source, prefs) for path in paths]
         if not paths and not self.attach_ball:
             self.report({"WARNING"}, "No character part selected")
             return {"CANCELLED"}
@@ -3329,7 +3558,6 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
         if invalid:
             self.report({"ERROR"}, f"Character part not found or unsupported: {invalid[0]}")
             return {"CANCELLED"}
-        prefs = addon_preferences()
         try:
             attached = sum(attach_part_to_armature(path, target, prefs, False) for path in paths)
             if self.attach_ball:

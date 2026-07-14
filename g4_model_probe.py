@@ -761,6 +761,7 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
     material_records = parse_material_records(data, material_table, material_count)
     texture_hashes = parse_texture_hash_table(data)
     name_base_bias = u16(data, 0x0A) * 4
+    joint_hash_table = name_base_bias + u16(data, 0x74) * 4
     mesh_name_table = name_base_bias + u16(data, 0x84) * 4
     material_name_table = name_base_bias + u16(data, 0x86) * 4
     joint_palette_table = name_base_bias + u16(data, 0x82) * 4
@@ -810,6 +811,7 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
         "tail_names": names,
         "mesh_name_table": mesh_name_table,
         "material_name_table": material_name_table,
+        "joint_hash_table": joint_hash_table,
         "joint_palette_table": joint_palette_table,
         "joint_palette_count": len(joint_palette_indices),
         "joint_palette_indices": joint_palette_indices,
@@ -844,14 +846,14 @@ def remap_joint_palette_by_g4md_hashes(
     data: bytes,
     joint_palette: list[int],
     skeleton_info: dict | None,
-    palette_table_offset: int,
+    joint_hash_table_offset: int,
 ) -> tuple[list[int] | None, int]:
     """Resolve G4MD palette slots through its embedded CRC32 joint table.
 
-    G4MD stores local blend indices as u16 values.  The values address a
-    contiguous CRC32 name table in the model, rather than physical indices in
-    the assigned G4SK.  Matching the hashes to the selected skeleton makes
-    shared heads, clothes and dynamic body helpers independent of G4SK order.
+    G4MD stores the start of its CRC32 joint-name table at header offset
+    ``0x74``. Local blend indices address that table from zero. Matching the
+    hashes to the selected skeleton makes shared clothes and dynamic helpers
+    independent of physical G4SK order.
     """
     if not joint_palette or skeleton_info is None:
         return None, 0
@@ -864,24 +866,17 @@ def remap_joint_palette_by_g4md_hashes(
     if not hash_to_index:
         return None, 0
 
-    required_length = max(joint_palette) + 1
-    search_end = min(len(data), palette_table_offset)
-    best_offset = -1
-    best_length = 0
-    for offset in range(0, max(0, search_end - required_length * 4 + 1), 4):
-        length = 0
-        while offset + (length + 1) * 4 <= search_end:
-            value = u32(data, offset + length * 4)
-            if value not in hash_to_index:
-                break
-            length += 1
-        if length > best_length:
-            best_offset = offset
-            best_length = length
-
-    if best_length < required_length:
+    if min(joint_palette) < 0 or joint_hash_table_offset <= 0:
         return None, 0
-    remapped = [hash_to_index[u32(data, best_offset + index * 4)] for index in joint_palette]
+    last_offset = joint_hash_table_offset + max(joint_palette) * 4
+    if last_offset + 4 > len(data):
+        return None, 0
+    hashes = [u32(data, joint_hash_table_offset + index * 4) for index in joint_palette]
+    if any(value not in hash_to_index for value in hashes):
+        return None, 0
+    remapped = [
+        hash_to_index[value] for value in hashes
+    ]
     return remapped, sum(before != after for before, after in zip(joint_palette, remapped))
 
 
@@ -1624,6 +1619,8 @@ def build_skeleton_cache(cache_path: Path) -> dict:
                 "body_id": body_id,
                 "body_path": body_info.get(1, "").replace("\\", "/"),
                 "body_skeleton_crc": body_info.get(3, "0"),
+                "body_profile": body_info.get(4, ""),
+                "body_mesh_profile": body_info.get(6, ""),
             }
             break
 
@@ -3982,13 +3979,10 @@ def choose_uniform_joint_palette(
         palette, remap_count = refine_arm_palette_by_centroids(
             joint_palette, positions, influences, target_skeleton
         )
-        return (
-            palette,
-            remap_count,
-            "physical target G4SK indices"
-            + (" + arm centroid refinement" if remap_count else ""),
-            palette_spatial_error(positions, influences, palette, target_skeleton),
-        )
+        refined_score = palette_spatial_error(positions, influences, palette, target_skeleton)
+        direct_score = palette_spatial_error(positions, influences, joint_palette, target_skeleton)
+        if remap_count and refined_score < direct_score:
+            candidates.append((palette, remap_count, "physical target G4SK indices + arm centroid refinement"))
     if joint_palette and min(joint_palette) > 0 and max(joint_palette) <= len(ASSIGNED_SKELETON_JOINT_NAMES):
         remapped, changed = remap_compact_assigned_joint_palette(joint_palette, target_skeleton)
         candidates.append((remapped, changed, "shared uniform skeleton indices"))
@@ -4069,6 +4063,97 @@ def remap_shoe_point_helpers(joint_palette: list[int], target_skeleton: dict) ->
             remapped[palette_index] = replacement
             changed += 1
     return remapped, changed
+
+
+def remap_separated_shoe_palette(
+    data: bytes,
+    joint_palette: list[int],
+    target_skeleton: dict,
+    palette_table_offset: int,
+    source_skeletons: list[tuple[dict, str]],
+) -> tuple[list[int] | None, int]:
+    """Resolve the compact lower-body palette used by separated shoes.
+
+    Cross exports this family as six named SkinnedMeshRenderer bones in the
+    order left foot helper, left ankle helper, left shin helper, then the
+    matching right-side trio.  In Victory Road the G4MD palette addresses
+    that model's CRC32 name table with a three-entry prefix included.  It is
+    neither a physical target-G4SK index nor the normal one-based CRC slot.
+    """
+    if len(joint_palette) != 6:
+        return None, 0
+
+    target_indices = {name: index for index, name in enumerate(target_skeleton.get("names", [])) if name}
+    if not target_indices:
+        return None, 0
+
+    leg_helper = re.compile(r"[lr]_(?:foot|l)_1_[01]_wgt_1_0")
+    target_hashes = {crc32b(name.encode("ascii")): name for name in target_indices}
+
+    # The G4MD has a contiguous hash table immediately before its local
+    # palette data.  Locate it by its complete overlap with the assigned
+    # skeleton, then apply the shoe-specific three-entry displacement.  This
+    # is portable across c000*/c050*/c060* bodies because final resolution is
+    # performed by bone name rather than by an ordinal from c000201.
+    if min(joint_palette) > 3:
+        required_length = max(joint_palette)
+        search_end = min(len(data), palette_table_offset)
+        best_offset = -1
+        best_length = 0
+        for offset in range(0, max(0, search_end - required_length * 4 + 1), 4):
+            length = 0
+            while offset + (length + 1) * 4 <= search_end:
+                if u32(data, offset + length * 4) not in target_hashes:
+                    break
+                length += 1
+            if length > best_length:
+                best_offset = offset
+                best_length = length
+        if best_length >= required_length:
+            names = [
+                target_hashes.get(u32(data, best_offset + (index - 4) * 4), "")
+                for index in joint_palette
+            ]
+            if (
+                len(set(names)) == 6
+                and all(leg_helper.fullmatch(name) is not None for name in names)
+                and sum(name.startswith("l_") for name in names) == 3
+                and sum(name.startswith("r_") for name in names) == 3
+            ):
+                remapped = [target_indices[name] for name in names]
+                return remapped, sum(before != after for before, after in zip(joint_palette, remapped))
+
+    # Older extracted model variants can lack the full table. Keep the
+    # verified c000201 fallback for those files only.
+    # The ``141, 142, 143`` prefix identifies the common c000201-derived
+    # shoe template.  Its right-side palette is discontinuous (the exact
+    # stored values vary by shoe), whereas the semantic slot order does not.
+    # Cross's exported prefabs make that order explicit.
+    c000201_template = joint_palette[:3] == [141, 142, 143]
+    for source_skeleton, source in source_skeletons:
+        if "/c000201/" not in source.replace("\\", "/"):
+            continue
+        source_names = source_skeleton.get("names", [])
+        source_palette = (
+            [144, 145, 146, 153, 154, 155]
+            if c000201_template
+            else [index + 3 for index in joint_palette]
+        )
+        if any(index >= len(source_names) for index in source_palette):
+            continue
+        names = [source_names[index] for index in source_palette]
+        # Only claim the special encoding if it resolves to Cross's complete
+        # bilateral lower-body helper set. Other shoe families use ordinary
+        # physical G4SK indices and continue through the general path.
+        if len(set(names)) != 6 or any(leg_helper.fullmatch(name or "") is None for name in names):
+            continue
+        if sum(name.startswith("l_") for name in names) != 3 or sum(name.startswith("r_") for name in names) != 3:
+            continue
+        if any(name not in target_indices for name in names):
+            continue
+        remapped = [target_indices[name] for name in names]
+        return remapped, sum(before != after for before, after in zip(joint_palette, remapped))
+    return None, 0
 
 
 def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path:
@@ -4193,12 +4278,62 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             md_data,
             joint_palette,
             skeleton_info,
-            md_info.get("joint_palette_table", 0),
+            md_info.get("joint_hash_table", 0),
         )
-        if hash_palette is not None:
+        direct_palette_score = palette_spatial_error(
+            position_tuples,
+            skin_influences,
+            joint_palette,
+            skeleton_info,
+        )
+        hash_palette_score = (
+            palette_spatial_error(position_tuples, skin_influences, hash_palette, skeleton_info)
+            if hash_palette is not None
+            else None
+        )
+        shoe_palette, shoe_palette_remap_count = (
+            remap_separated_shoe_palette(
+                joint_palette,
+                skeleton_info,
+                uniform_palette_sources,
+            )
+            if hash_palette is None and uniform_model and path.stem.lower().startswith("s")
+            else (None, 0)
+        )
+        # The separated neck/arm meshes have a shuffled local palette.  Their
+        # embedded CRC table is the only stable relationship to the actor
+        # skeleton; selecting a source G4SK by proximity swaps finger groups
+        # on otherwise compatible body types.
+        crc_palette_is_authoritative = (
+            uniform_model
+            and path.stem.lower().startswith(("sk", "s", "g", "m", "n"))
+        )
+        if crc_palette_is_authoritative and hash_palette is not None:
             joint_palette = hash_palette
             palette_remap_count = hash_remap_count
-            palette_remap_source = "G4MD CRC32 joint table"
+            palette_remap_source = "G4MD CRC32 joint table (named character part)"
+            palette_spatial_score = hash_palette_score
+        elif shoe_palette is not None:
+            joint_palette = shoe_palette
+            palette_remap_count = shoe_palette_remap_count
+            palette_remap_source = "c000201 compact lower-body helper palette (legacy fallback)"
+            palette_spatial_score = palette_spatial_error(
+                position_tuples, skin_influences, joint_palette, skeleton_info
+            )
+        # A G4MD can contain a full CRC32 skeleton-name table while some of
+        # its submeshes still use physical G4SK indices.  This is common in
+        # bodies and shoes, so keep a geometrically better physical palette.
+        # Conversely, gloves can be compact CRC palettes even when their
+        # physical indices happen to be near the mesh in bind pose.
+        elif direct_palette_score <= 0.35:
+            if hash_palette is not None and hash_palette_score is not None and hash_palette_score < direct_palette_score:
+                joint_palette = hash_palette
+                palette_remap_count = hash_remap_count
+                palette_remap_source = "G4MD CRC32 joint table (spatially verified)"
+                palette_spatial_score = hash_palette_score
+            else:
+                palette_remap_source = "physical target G4SK indices (spatially verified)"
+                palette_spatial_score = direct_palette_score
         elif uniform_model and len(joint_palette) > 1:
             joint_palette, palette_remap_count, palette_remap_source, palette_spatial_score = choose_uniform_joint_palette(
                 joint_palette,
@@ -4207,6 +4342,11 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 skeleton_info,
                 uniform_palette_sources,
             )
+            if hash_palette is not None and hash_palette_score is not None and hash_palette_score < palette_spatial_score:
+                joint_palette = hash_palette
+                palette_remap_count = hash_remap_count
+                palette_remap_source = "G4MD CRC32 joint table (spatially verified)"
+                palette_spatial_score = hash_palette_score
             if path.stem.lower().startswith("s"):
                 joint_palette, shoe_remaps = remap_shoe_point_helpers(joint_palette, skeleton_info)
                 if shoe_remaps:
@@ -4215,6 +4355,11 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                     palette_spatial_score = palette_spatial_error(
                         position_tuples, skin_influences, joint_palette, skeleton_info
                     )
+        elif hash_palette is not None and hash_palette_score is not None and hash_palette_score < direct_palette_score:
+            joint_palette = hash_palette
+            palette_remap_count = hash_remap_count
+            palette_remap_source = "G4MD CRC32 joint table (spatially verified)"
+            palette_spatial_score = hash_palette_score
         elif assigned_skeleton:
             if shared_face_uses_compact_joint_palette(path, joint_palette):
                 joint_palette, palette_remap_count = remap_compact_assigned_joint_palette(
