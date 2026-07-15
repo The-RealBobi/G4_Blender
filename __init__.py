@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 15, 0),
+    "version": (0, 15, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import bpy
 from bpy.app.handlers import persistent
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
 from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
@@ -2151,6 +2151,12 @@ def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
             socket = input_sockets.get(label)
             if socket is not None and socket.identifier not in modifier:
                 modifier[socket.identifier] = default
+        if modifier.get("g4_mask_recolor_schema") != 1:
+            for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
+                socket = input_sockets.get(label)
+                if socket is not None:
+                    modifier[socket.identifier] = default
+            modifier["g4_mask_recolor_schema"] = 1
         for slot in obj.material_slots:
             if slot.material is not None:
                 connect_character_parameter_material(slot.material)
@@ -3799,6 +3805,86 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
         return {"FINISHED"}
 
 
+def level5_character_parameter_modifier(obj):
+    if obj is None or obj.type != "MESH":
+        return None
+    modifier = obj.modifiers.get("Level-5 Character Parameters")
+    return modifier if modifier is not None and modifier.type == "NODES" else None
+
+
+class OBJECT_OT_level5_mask_recolor(bpy.types.Operator):
+    bl_idname = "object.level5_mask_recolor"
+    bl_label = "Mask Recolor"
+    bl_description = "Choose the colors applied to the red, green and blue mask channels"
+    bl_options = {"REGISTER", "UNDO"}
+
+    red_color: FloatVectorProperty(name="Red Mask", subtype="COLOR", size=4, min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0))
+    green_color: FloatVectorProperty(name="Green Mask", subtype="COLOR", size=4, min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0))
+    blue_color: FloatVectorProperty(name="Blue Mask", subtype="COLOR", size=4, min=0.0, max=1.0, default=(1.0, 1.0, 1.0, 1.0))
+
+    @staticmethod
+    def socket(modifier, label):
+        group = modifier.node_group
+        if group is None:
+            return None
+        return next(
+            (
+                item
+                for item in group.interface.items_tree
+                if getattr(item, "in_out", None) == "INPUT" and item.name == label
+            ),
+            None,
+        )
+
+    @staticmethod
+    def color_property(attribute_name):
+        return f"{attribute_name.removeprefix('g4_mask_').removesuffix('_color')}_color"
+
+    def invoke(self, context, event):
+        modifier = level5_character_parameter_modifier(context.object)
+        if modifier is None:
+            self.report({"ERROR"}, "Select a mesh with Level-5 Character Parameters")
+            return {"CANCELLED"}
+        for label, attribute_name, _ in CHARACTER_MASK_COLOR_SOCKETS:
+            socket = self.socket(modifier, label)
+            if socket is not None:
+                setattr(self, self.color_property(attribute_name), modifier.get(socket.identifier, (1.0, 1.0, 1.0, 1.0)))
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Recolor mask channels", icon="COLOR")
+        layout.prop(self, "red_color")
+        layout.prop(self, "green_color")
+        layout.prop(self, "blue_color")
+
+    def execute(self, context):
+        modifier = level5_character_parameter_modifier(context.object)
+        if modifier is None:
+            self.report({"ERROR"}, "Select a mesh with Level-5 Character Parameters")
+            return {"CANCELLED"}
+        for label, attribute_name, _ in CHARACTER_MASK_COLOR_SOCKETS:
+            socket = self.socket(modifier, label)
+            if socket is not None:
+                modifier[socket.identifier] = getattr(self, self.color_property(attribute_name))
+        return {"FINISHED"}
+
+
+class OBJECT_PT_level5_mask_recolor(bpy.types.Panel):
+    bl_label = "Level-5 Mask Recolor"
+    bl_idname = "OBJECT_PT_level5_mask_recolor"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "modifier"
+
+    @classmethod
+    def poll(cls, context):
+        return level5_character_parameter_modifier(context.object) is not None
+
+    def draw(self, context):
+        self.layout.operator(OBJECT_OT_level5_mask_recolor.bl_idname, icon="COLOR")
+
+
 class MATERIAL_PT_level5_character(bpy.types.Panel):
     bl_label = "Level-5 Character"
     bl_idname = "MATERIAL_PT_level5_character"
@@ -3872,6 +3958,8 @@ classes = [
     IMPORT_OT_level5_g4,
     IMPORT_OT_level5_g4_folder,
     IMPORT_OT_level5_g4_character_parts,
+    OBJECT_OT_level5_mask_recolor,
+    OBJECT_PT_level5_mask_recolor,
     MATERIAL_PT_level5_character,
 ]
 
