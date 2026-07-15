@@ -491,8 +491,11 @@ def import_model_for_animation(
         result = bpy.ops.import_scene.level5_g4(
             filepath=str(model_path),
             create_report_text=False,
-            import_character_parts=import_character_parts,
-            auto_character_parts=auto_character_parts,
+            # Modular meshes must be attached after the actor's rest pose is
+            # aligned to the motion.  Binding them first leaves their skin
+            # data authored against the previous rest skeleton.
+            import_character_parts=False,
+            auto_character_parts=False,
             # The animation flow has already collected the character parts.
             # Without this flag the model operator schedules its setup dialog
             # again and returns before an armature exists for the G4MT action.
@@ -520,6 +523,38 @@ def import_model_for_animation(
     resolve_track_names_from_armature(motion, armature)
     if align_to_motion_rest:
         align_armature_to_motion_rest(armature, motion)
+    if import_character_parts:
+        importer = model_importer_module()
+        attach_parts = getattr(importer, "import_character_parts_for_armature", None) if importer is not None else None
+        model_preferences = getattr(importer, "addon_preferences", None) if importer is not None else None
+        if attach_parts is None:
+            raise RuntimeError("The Level-5 G4 Model Importer cannot attach character parts")
+        model_prefs = model_preferences() if model_preferences is not None else prefs
+        attach_parts(
+            model_path,
+            armature,
+            model_prefs,
+            auto_character_parts,
+            body_model,
+            shoes_model,
+            accessory_model,
+            gloves_model,
+            armband_model,
+            nameplate_model,
+            False,
+            character_part_stem,
+            False,
+        )
+        if attach_ball:
+            find_ball = getattr(importer, "find_default_ball_model", None)
+            attach_ball_to_armature = getattr(importer, "attach_ball_to_armature", None)
+            configured_ball = Path(bpy.path.abspath(ball_model)) if ball_model else None
+            selected_ball = configured_ball if configured_ball is not None and configured_ball.is_file() else (
+                find_ball(model_path, model_prefs) if find_ball is not None else None
+            )
+            if selected_ball is None or attach_ball_to_armature is None:
+                raise RuntimeError("Default ball model b000001 was not found")
+            attach_ball_to_armature(selected_ball, armature, model_prefs, False)
     return armature, model_path
 
 
