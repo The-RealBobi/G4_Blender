@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 from collections import defaultdict
 from pathlib import Path
@@ -401,14 +402,20 @@ def animate_character_parts(
     duration: int | None = None,
     strip_name: str | None = None,
     rotation_only_retarget: bool = False,
+    progress_callback=None,
 ) -> tuple[int, int]:
     parts = character_part_armatures(actor)
     if not parts:
         return 0, 0
     created = 0
     keyed = 0
-    for part_armature in parts:
-        action, keyed_bones = create_action(part_armature, motion, frame_origin)
+    for part_index, part_armature in enumerate(parts):
+        part_progress = None
+        if progress_callback is not None:
+            def part_progress(completed, total, offset=part_index * len(motion["tracks"])):
+                progress_callback(offset + completed, len(parts) * total)
+
+        action, keyed_bones = create_action(part_armature, motion, frame_origin, part_progress)
         if rotation_only_retarget:
             remove_nonroot_translation_curves(action, part_armature)
         keyed += keyed_bones
@@ -643,6 +650,7 @@ def append_motion_to_action(
     action,
     frame_origin: int,
     curve_cache: dict | None = None,
+    progress_callback=None,
 ) -> tuple[int, int]:
     cache = curve_cache if curve_cache is not None else {}
     rest_by_name = motion_rest_matrices(motion)
@@ -663,11 +671,14 @@ def append_motion_to_action(
             parent_by_name[name] = skeleton_names[parent_index]
     keyed_bones = 0
     relative_rest_tracks = 0
-    for track in motion["tracks"]:
+    track_count = len(motion["tracks"])
+    for track_index, track in enumerate(motion["tracks"], start=1):
         name = track.get("target_name")
         rest = rest_by_name.get(name)
         pose_bones = [armature.pose.bones[name]] if name and name in armature.pose.bones else []
         if not pose_bones:
+            if progress_callback is not None:
+                progress_callback(track_index, track_count)
             continue
         if rest is None and frames:
             rest = source_matrix(
@@ -679,6 +690,8 @@ def append_motion_to_action(
             )
             relative_rest_tracks += 1
         if rest is None:
+            if progress_callback is not None:
+                progress_callback(track_index, track_count)
             continue
         parent_track = tracks_by_name.get(parent_by_name.get(name))
         primary_pose_bone = next((bone for bone in pose_bones if bone.name == name), pose_bones[0])
@@ -735,17 +748,30 @@ def append_motion_to_action(
                         [sample[component] for sample in reduced_samples],
                     )
             keyed_bones += 1
+        if progress_callback is not None:
+            progress_callback(track_index, track_count)
     return keyed_bones, relative_rest_tracks
 
 
-def create_action(armature, motion: dict, frame_origin: int | None = None) -> tuple[bpy.types.Action, int]:
+def create_action(
+    armature,
+    motion: dict,
+    frame_origin: int | None = None,
+    progress_callback=None,
+) -> tuple[bpy.types.Action, int]:
     clip = motion["clip"]
     action = bpy.data.actions.new(name=clip["name"] or "G4MT Animation")
     action.use_fake_user = True
     armature.animation_data_create()
     clear_pose(armature)
     source_start = clip["start_frame"] if frame_origin is None else frame_origin
-    keyed_bones, relative_rest_tracks = append_motion_to_action(armature, motion, action, source_start)
+    keyed_bones, relative_rest_tracks = append_motion_to_action(
+        armature,
+        motion,
+        action,
+        source_start,
+        progress_callback=progress_callback,
+    )
     armature.animation_data.action = None
     armature.animation_data.action = action
 
@@ -1069,6 +1095,8 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         camera_object = None
         camera_path = None
         camera_motion = None
+        progress_active = False
+        last_progress_refresh = 0.0
         try:
             g4mt_path, extracted_g4mt_path, package_entry_name = materialize_g4mt(path, self.entry)
             selected = context.active_object if self.reuse_selected_armature else None
@@ -1152,8 +1180,43 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 ends.append(camera_motion["clip"]["end_frame"])
             frame_origin = min(starts)
 
-            action, keyed_bones = create_action(armature, motion, frame_origin)
-            part_actions, part_keyed_bones = animate_character_parts(armature, motion, frame_origin)
+            track_count = len(motion["tracks"])
+            part_count = len(character_part_armatures(armature))
+            progress_total = max(1, track_count * (1 + part_count))
+            context.window_manager.progress_begin(0, progress_total)
+            progress_active = True
+
+            def update_progress(completed, total, offset=0):
+                nonlocal last_progress_refresh
+                current = min(progress_total, offset + completed)
+                context.window_manager.progress_update(current)
+                now = time.monotonic()
+                if now - last_progress_refresh < 0.12 and current < progress_total:
+                    return
+                last_progress_refresh = now
+                context.workspace.status_text_set(
+                    f"Importing animation: {current}/{progress_total} bone tracks"
+                )
+                for window in context.window_manager.windows:
+                    for area in window.screen.areas:
+                        area.tag_redraw()
+                try:
+                    bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+                except RuntimeError:
+                    pass
+
+            action, keyed_bones = create_action(
+                armature,
+                motion,
+                frame_origin,
+                lambda completed, total: update_progress(completed, total),
+            )
+            part_actions, part_keyed_bones = animate_character_parts(
+                armature,
+                motion,
+                frame_origin,
+                progress_callback=lambda completed, total: update_progress(completed, total, track_count),
+            )
             frame_count = len(motion["frames"])
             context.scene.frame_start = 1
             context.scene.frame_end = max(1, max(ends) - frame_origin + 1)
@@ -1193,6 +1256,9 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
+            if progress_active:
+                context.window_manager.progress_end()
+                context.workspace.status_text_set(None)
             if decoded_path and not getattr(prefs, "keep_decode_json", False):
                 try:
                     decoded_path.unlink()
@@ -2316,7 +2382,7 @@ class G4EventCharacterPart(PropertyGroup):
     head_model: StringProperty(name="Head", subtype="FILE_PATH", update=event_part_head_changed)
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
-    accessory_model: StringProperty(name="Sleeves / Collar", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Arms/Neck", subtype="FILE_PATH")
     gloves_model: StringProperty(name="Gloves", subtype="FILE_PATH")
     armband_model: StringProperty(name="Captain Armband", subtype="FILE_PATH")
     nameplate_model: StringProperty(name="Nameplate", subtype="FILE_PATH")

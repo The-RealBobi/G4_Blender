@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 40),
+    "version": (0, 14, 41),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1997,13 +1997,26 @@ CHARACTER_PARAMETER_SOCKETS = (
     ("Wetness", "g4_wetness", 0.0, 0.0, 1.0),
 )
 
+CHARACTER_MASK_COLOR_SOCKETS = (
+    ("Mask Red Color", "g4_mask_red_color", (1.0, 1.0, 1.0, 1.0)),
+    ("Mask Green Color", "g4_mask_green_color", (1.0, 1.0, 1.0, 1.0)),
+    ("Mask Blue Color", "g4_mask_blue_color", (1.0, 1.0, 1.0, 1.0)),
+)
+
 
 def character_parameter_node_group():
     name = "Level-5 Character Parameters"
     group = bpy.data.node_groups.get(name)
-    if group is not None:
+    if group is None:
+        group = bpy.data.node_groups.new(name, "GeometryNodeTree")
+    elif group.get("g4_parameter_schema") != 3:
+        group.nodes.clear()
+        for item in tuple(group.interface.items_tree):
+            group.interface.remove(item)
+
+    if group.get("g4_parameter_schema") == 3:
         return group
-    group = bpy.data.node_groups.new(name, "GeometryNodeTree")
+
     geometry_in = group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
     geometry_out = group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
     sockets = []
@@ -2013,15 +2026,33 @@ def character_parameter_node_group():
         socket.min_value = minimum
         socket.max_value = maximum
         sockets.append(socket)
+    mask_panel = group.interface.new_panel(name="Mask Recolor")
+    for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
+        socket = group.interface.new_socket(
+            name=label,
+            in_out="INPUT",
+            socket_type="NodeSocketColor",
+            parent=mask_panel,
+        )
+        socket.default_value = default
+        sockets.append(socket)
 
     input_node = group.nodes.new("NodeGroupInput")
     input_node.location = (-520, 0)
     output_node = group.nodes.new("NodeGroupOutput")
     output_node.location = (420, 0)
     geometry = input_node.outputs[geometry_in.identifier]
-    for index, ((label, attribute_name, _, _, _), socket) in enumerate(zip(CHARACTER_PARAMETER_SOCKETS, sockets)):
+    attribute_sockets = [
+        (label, attribute_name, "FLOAT", socket)
+        for (label, attribute_name, _, _, _), socket in zip(CHARACTER_PARAMETER_SOCKETS, sockets)
+    ]
+    attribute_sockets.extend(
+        (label, attribute_name, "FLOAT_COLOR", socket)
+        for (label, attribute_name, _), socket in zip(CHARACTER_MASK_COLOR_SOCKETS, sockets[len(CHARACTER_PARAMETER_SOCKETS):])
+    )
+    for index, (label, attribute_name, data_type, socket) in enumerate(attribute_sockets):
         store = group.nodes.new("GeometryNodeStoreNamedAttribute")
-        store.data_type = "FLOAT"
+        store.data_type = data_type
         store.domain = "POINT"
         store.label = label
         store.location = (-300 + index * 100, -index * 90)
@@ -2030,17 +2061,18 @@ def character_parameter_node_group():
         group.links.new(input_node.outputs[socket.identifier], store.inputs["Value"])
         geometry = store.outputs["Geometry"]
     group.links.new(geometry, output_node.inputs[geometry_out.identifier])
+    group["g4_parameter_schema"] = 3
     return group
 
 
-def character_shader_attribute(material, label: str, attribute_name: str):
+def character_shader_attribute(material, label: str, attribute_name: str, color: bool = False):
     nodes = material.node_tree.nodes
     node_name = f"G4 Control {label}"
     node = nodes.get(node_name) or nodes.new("ShaderNodeAttribute")
     node.name = node_name
     node.label = label
     node.attribute_name = attribute_name
-    return node.outputs["Fac"]
+    return node.outputs["Color"] if color else node.outputs["Fac"]
 
 
 def connect_character_parameter_material(material) -> None:
@@ -2072,6 +2104,11 @@ def connect_character_parameter_material(material) -> None:
             continue
         socket = node.inputs.get(target_spec[1]) if isinstance(target_spec[1], str) else node.inputs[target_spec[1]]
         links.new(source, socket)
+    for label, attribute_name, _ in CHARACTER_MASK_COLOR_SOCKETS:
+        channel = label.split()[1]
+        tint = nodes.get(f"G4 Mask {channel} Tint")
+        if tint is not None:
+            links.new(character_shader_attribute(material, label, attribute_name, color=True), tint.inputs[2])
 
 
 def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
@@ -2095,6 +2132,10 @@ def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
             created += 1
         modifier.node_group = group
         for label, _, default, _, _ in CHARACTER_PARAMETER_SOCKETS:
+            socket = input_sockets.get(label)
+            if socket is not None and socket.identifier not in modifier:
+                modifier[socket.identifier] = default
+        for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
             socket = input_sockets.get(label)
             if socket is not None and socket.identifier not in modifier:
                 modifier[socket.identifier] = default
@@ -2945,7 +2986,7 @@ def attach_ball_to_armature(
     if ball_bone is None:
         raise RuntimeError(f"Target rig has no ball bone: {target_armature.name}")
 
-    _, imported_names = import_g4_model(path, prefs, create_report_text, apply_styling=False)
+    _, imported_names = import_g4_model(path, prefs, create_report_text)
     imported_objects = [bpy.data.objects.get(name) for name in imported_names]
     imported_objects = [obj for obj in imported_objects if obj is not None]
     source_armatures = {obj for obj in imported_objects if obj.type == "ARMATURE"}
@@ -3082,7 +3123,7 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     head_model: StringProperty(name="Head", subtype="FILE_PATH", update=character_setup_head_changed)
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
-    accessory_model: StringProperty(name="Sleeves / Collar", subtype="FILE_PATH")
+    accessory_model: StringProperty(name="Arms/Neck", subtype="FILE_PATH")
     gloves_model: StringProperty(name="Gloves", subtype="FILE_PATH")
     armband_model: StringProperty(name="Captain Armband", subtype="FILE_PATH")
     nameplate_model: StringProperty(name="Nameplate", subtype="FILE_PATH")
@@ -3152,7 +3193,7 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             layout.label(text=f"Rig: {Path(self.model_path).name}", icon="ARMATURE_DATA")
         if self.allow_head_override:
             layout.prop(self, "head_model")
-        layout.label(text="Body, shoes and sleeves are prefilled from the selected head.")
+        layout.label(text="Body, shoes and arms/neck are prefilled from the selected head.")
         layout.prop(self, "body_model")
         layout.prop(self, "shoes_model")
         layout.prop(self, "accessory_model")

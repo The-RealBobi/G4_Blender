@@ -20,7 +20,8 @@ The importer automatically converts G4 assets into Blender-compatible data, recr
 * Automatic material generation.
 * Automatic texture assignment.
 * Character rigging support.
-* Manual body, shoes, sleeves/collar, gloves, captain armband and nameplate composition for character rigs.
+* Manual body, shoes, arms/neck, gloves, captain armband and nameplate composition for character rigs.
+* Character-parameter modifier controls, including independent red, green and blue recolor-mask tints.
 * Shared skeleton resolution.
 * G4SK rest bone orientation reconstruction.
 * Full map importing.
@@ -105,7 +106,7 @@ The importer supports character skeletons and skinning data.
 
 Character heads named `cXXXXXXXX` can be completed with their separate
 `uXXXXXXXX` body and `sXXXXXXXX` shoes. Some modular outfits also provide an
-`skXXXXXXXX` sleeves/collar part, while `g`, `m` and `n` identify optional
+`skXXXXXXXX` arms/neck part, while `g`, `m` and `n` identify optional
 gloves, captain armband and nameplate parts. The character-parts dialog can
 also attach `b000001` to the rig's `c_ball_1_0` ball bone. After selecting a
 single animation,
@@ -175,7 +176,7 @@ bind pose and the animation.
 
 When importing a G4MT with a new actor, the shared character-parts dialog is
 shown once. It permits replacing the head and pre-fills the body, shoes and
-declared sleeves/collar from the selected head's character configuration.
+declared arms/neck from the selected head's character configuration.
 
 Event imports use the same `Character Parts` dialog as model import, once for
 each actor. It identifies the current event actor and has the same head and
@@ -188,7 +189,7 @@ Bodies and shoes keep their native G4SK bind pose and weights. Their Blender
 vertex groups are named from the verified G4MD CRC32 palette so every weight
 targets the matching bone on the actor armature. G4MT tracks are applied
 independently to every character part whose bone CRC/name matches a motion
-target. Uniform-only helpers such as `_wgt_1_0`, sleeves and accessories remain
+target. Uniform-only helpers such as `_wgt_1_0`, arms/neck and accessories remain
 unkeyed and inherit motion through their native hierarchy.
 
 Imported materials use a Level-5-style Eevee node graph with two hard shadow
