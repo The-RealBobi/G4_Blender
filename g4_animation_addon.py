@@ -1088,6 +1088,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 )
             return {"FINISHED"}
         prefs = addon_preferences()
+        window_manager = context.window_manager
         decoded_path = None
         extracted_g4mt_path = None
         package_entry_name = None
@@ -1095,10 +1096,30 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         camera_object = None
         camera_path = None
         camera_motion = None
-        progress_active = False
+        progress_active = True
         last_progress_refresh = 0.0
+        window_manager.progress_begin(0, 100)
+
+        def refresh_progress(current: int, status: str):
+            nonlocal last_progress_refresh
+            window_manager.progress_update(current)
+            now = time.monotonic()
+            if now - last_progress_refresh < 0.12 and current < 100:
+                return
+            last_progress_refresh = now
+            context.workspace.status_text_set(status)
+            for window in window_manager.windows:
+                for area in window.screen.areas:
+                    area.tag_redraw()
+            try:
+                bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+            except RuntimeError:
+                pass
+
+        refresh_progress(0, "Preparing G4 animation import…")
         try:
             g4mt_path, extracted_g4mt_path, package_entry_name = materialize_g4mt(path, self.entry)
+            refresh_progress(5, "Decoding G4 animation…")
             selected = context.active_object if self.reuse_selected_armature else None
             configured_model = bpy.path.abspath(self.model_path or "")
             model_path_hint = Path(configured_model) if configured_model else None
@@ -1119,6 +1140,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             if skeleton_hint is None:
                 skeleton_hint = resolve_skeleton_path(skeleton_model_hint)
             motion, decoded_path = decode_g4mt(g4mt_path, self.clip, prefs, skeleton_hint)
+            refresh_progress(15, "Preparing G4 animation rig…")
             if self.import_camera:
                 camera_path = resolve_companion_g4cm(path, getattr(prefs, "raw_data_root", ""))
                 if camera_path is not None:
@@ -1165,6 +1187,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                     self.attach_ball,
                     self.ball_model,
                 )
+                refresh_progress(30, "Creating G4 animation keyframes…")
             if armature is None:
                 armature = best_armature(bpy.data.objects, names)
                 if armature is not None:
@@ -1183,27 +1206,11 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             track_count = len(motion["tracks"])
             part_count = len(character_part_armatures(armature))
             progress_total = max(1, track_count * (1 + part_count))
-            context.window_manager.progress_begin(0, progress_total)
-            progress_active = True
 
             def update_progress(completed, total, offset=0):
-                nonlocal last_progress_refresh
                 current = min(progress_total, offset + completed)
-                context.window_manager.progress_update(current)
-                now = time.monotonic()
-                if now - last_progress_refresh < 0.12 and current < progress_total:
-                    return
-                last_progress_refresh = now
-                context.workspace.status_text_set(
-                    f"Importing animation: {current}/{progress_total} bone tracks"
-                )
-                for window in context.window_manager.windows:
-                    for area in window.screen.areas:
-                        area.tag_redraw()
-                try:
-                    bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
-                except RuntimeError:
-                    pass
+                percent = 30 + round(70 * current / progress_total)
+                refresh_progress(percent, f"Importing animation: {current}/{progress_total} bone tracks")
 
             action, keyed_bones = create_action(
                 armature,
@@ -1257,7 +1264,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             return {"CANCELLED"}
         finally:
             if progress_active:
-                context.window_manager.progress_end()
+                window_manager.progress_end()
                 context.workspace.status_text_set(None)
             if decoded_path and not getattr(prefs, "keep_decode_json", False):
                 try:
@@ -2633,11 +2640,30 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         completed_steps = 0
         window_manager = context.window_manager
         window_manager.progress_begin(0, max(1, total_steps))
+        last_progress_refresh = 0.0
+
+        def refresh_batch_progress(status: str):
+            nonlocal last_progress_refresh
+            now = time.monotonic()
+            if now - last_progress_refresh < 0.12 and completed_steps < total_steps:
+                return
+            last_progress_refresh = now
+            context.workspace.status_text_set(status)
+            for window in window_manager.windows:
+                for area in window.screen.areas:
+                    area.tag_redraw()
+            try:
+                bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+            except RuntimeError:
+                pass
 
         def progress():
             nonlocal completed_steps
             completed_steps += 1
             window_manager.progress_update(completed_steps)
+            refresh_batch_progress(f"Importing event: {completed_steps}/{total_steps} cuts")
+
+        refresh_batch_progress("Preparing G4 event import…")
 
         prefs = addon_preferences()
         actor_models = resolve_event_actor_models(directory, prefs)
@@ -2736,6 +2762,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             return {"CANCELLED"}
         finally:
             window_manager.progress_end()
+            context.workspace.status_text_set(None)
 
         message = (
             f"Imported event {directory.name}: {len(actors)} actors, "

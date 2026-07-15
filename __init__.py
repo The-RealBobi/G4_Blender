@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 14, 41),
+    "version": (0, 15, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -31,6 +31,18 @@ CHARACTER_PART_ACCESSORY_CACHE: dict[Path, dict[str, str]] = {}
 CHARACTER_PART_BODY_VARIANT_CACHE: dict[Path, dict[tuple[str, str], dict[int, str]]] = {}
 CHARACTER_BODY_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
 CHARACTER_BODY_MESH_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
+
+
+def update_import_progress(context, completed: int, total: int, status: str) -> None:
+    context.window_manager.progress_update(min(max(0, completed), max(1, total)))
+    context.workspace.status_text_set(status)
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
+    try:
+        bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+    except RuntimeError:
+        pass
 
 try:
     from . import g4_port_addon
@@ -3407,8 +3419,13 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         part_mesh_total = 0
         imported_parts = []
         summaries = []
+        window_manager = context.window_manager
+        total_paths = len(paths)
+        window_manager.progress_begin(0, max(1, total_paths))
+        update_import_progress(context, 0, total_paths, "Preparing G4 model import…")
         try:
-            for path in paths:
+            for index, path in enumerate(paths, start=1):
+                update_import_progress(context, index - 1, total_paths, f"Importing model {index}/{total_paths}: {path.name}")
                 summary, imported_names = import_g4_model(path, prefs, self.create_report_text)
                 summaries.append(summary)
                 imported_total += len(imported_names)
@@ -3436,9 +3453,13 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         if ball_path is None:
                             raise RuntimeError("Default ball model b000001 was not found")
                         part_mesh_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
+                update_import_progress(context, index, total_paths, f"Imported model {index}/{total_paths}: {path.name}")
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        finally:
+            window_manager.progress_end()
+            context.workspace.status_text_set(None)
 
         summary = summaries[-1]
         materials = summary.get("material_textures", {})
@@ -3642,8 +3663,13 @@ class IMPORT_OT_level5_g4_folder(Operator):
         placements_by_asset = map_scene_placements(directory, stems)
         placed_total = 0
         hidden_total = 0
+        window_manager = context.window_manager
+        total_paths = len(paths)
+        window_manager.progress_begin(0, max(1, total_paths))
+        update_import_progress(context, 0, total_paths, "Preparing G4 folder import…")
         try:
-            for path in paths:
+            for index, path in enumerate(paths, start=1):
+                update_import_progress(context, index - 1, total_paths, f"Importing model {index}/{total_paths}: {path.name}")
                 character_model = is_character_model(path)
                 _, imported_names = import_g4_model(
                     path,
@@ -3681,9 +3707,13 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         if ball_path is None:
                             raise RuntimeError("Default ball model b000001 was not found")
                         imported_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
+                update_import_progress(context, index, total_paths, f"Imported model {index}/{total_paths}: {path.name}")
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        finally:
+            window_manager.progress_end()
+            context.workspace.status_text_set(None)
 
         message = f"Imported {len(paths)} G4 models from folder: {imported_total} objects"
         if placements_by_asset:
