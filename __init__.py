@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 15, 2),
+    "version": (0, 15, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1415,7 +1415,10 @@ def apply_level5_toon_shader(
     light_chroma_limit.location = (40, -250)
     light_tint = nodes.new("ShaderNodeMixRGB")
     light_tint.name = "G4 Point Light Color"
-    light_tint.inputs[0].default_value = 0.18
+    # Scene-light chroma can turn the underside of animated clothing brown
+    # when a normal swings through a grazing angle. Keep the imported shader
+    # neutral unless a material explicitly needs a coloured light treatment.
+    light_tint.inputs[0].default_value = 0.0
     light_tint.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
     light_tint.location = (220, -250)
     links.new(diffuse_bw.outputs["Val"], safe_brightness.inputs[0])
@@ -1703,12 +1706,12 @@ def apply_level5_toon_shader(
     highlight_add = nodes.new("ShaderNodeMixRGB")
     highlight_add.name = "G4 Highlight"
     highlight_add.blend_type = "ADD"
-    highlight_add.inputs[2].default_value = (0.16, 0.12, 0.09, 1.0)
+    highlight_add.inputs[2].default_value = (0.06, 0.06, 0.06, 1.0)
     highlight_add.location = (800, 250)
     underlight_add = nodes.new("ShaderNodeMixRGB")
     underlight_add.name = "G4 Under Light"
     underlight_add.blend_type = "ADD"
-    underlight_add.inputs[2].default_value = (0.05, 0.025, 0.022, 1.0)
+    underlight_add.inputs[2].default_value = (0.0, 0.0, 0.0, 1.0)
     underlight_add.location = (980, 250)
     links.new(layer_weight.outputs["Facing"], grazing.inputs[1])
     links.new(toon_factor, inverse_toon.inputs[1])
