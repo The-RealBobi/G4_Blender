@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 15, 3),
+    "version": (0, 15, 6),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -284,7 +284,7 @@ class G4ImporterPreferences(AddonPreferences):
             ),
             ("OFF", "Off", "Do not add render or viewport outlines"),
         ),
-        default="SIMPLE",
+        default="HULL",
         update=outline_mode_changed,
     )
     outline_thickness: FloatProperty(
@@ -2216,27 +2216,100 @@ def configure_character_color_management(debug: list[str] | None = None) -> None
         debug.append("[color] character display transform=Standard exposure=0 gamma=1")
 
 
-def mark_level5_internal_edges(obj, angle: float = math.radians(48.0)) -> int:
-    """Mark authored hard folds without enabling Freestyle on every triangle."""
+def mark_level5_internal_edges(obj) -> int:
+    """Mark authored split seams without enabling Freestyle on every triangle."""
     mesh = obj.data
     finger_group = re.compile(r"^[lr]_(?:thb|idx|mid|rng|pky)", re.IGNORECASE)
+    facial_detail_group = re.compile(
+        r"(?:head|hair|face|ear|neck|cheek|jaw|brow|nose|lip|mouth|eye)",
+        re.IGNORECASE,
+    )
+    detail_name = re.compile(r"(?:head|hair|face|ear)", re.IGNORECASE)
 
-    def belongs_to_finger(vertex) -> bool:
+    material_names = " ".join(
+        slot.material.name for slot in obj.material_slots if slot.material is not None
+    )
+    detail_name_hint = bool(detail_name.search(f"{obj.name} {material_names}"))
+
+    def vertex_group_matches(vertex, pattern) -> bool:
         return any(
             item.group < len(obj.vertex_groups)
-            and finger_group.match(obj.vertex_groups[item.group].name)
+            and pattern.search(obj.vertex_groups[item.group].name)
             for item in vertex.groups
         )
+
+    def belongs_to_finger(vertex) -> bool:
+        return vertex_group_matches(vertex, finger_group)
+
+    def belongs_to_facial_detail(vertex) -> bool:
+        return vertex_group_matches(vertex, facial_detail_group)
+
+    bounds = [obj.matrix_world @ vertex.co for vertex in mesh.vertices]
+    if bounds:
+        min_bound = Vector((min(co.x for co in bounds), min(co.y for co in bounds), min(co.z for co in bounds)))
+        max_bound = Vector((max(co.x for co in bounds), max(co.y for co in bounds), max(co.z for co in bounds)))
+        diagonal = (max_bound - min_bound).length
+    else:
+        diagonal = 1.0
+    position_epsilon = max(diagonal * 1e-5, 1e-5)
+    min_duplicate_length = max(diagonal * 0.006, 1e-4)
+
+    def position_key(co: Vector) -> tuple[int, int, int]:
+        world = obj.matrix_world @ co
+        return (
+            round(world.x / position_epsilon),
+            round(world.y / position_epsilon),
+            round(world.z / position_epsilon),
+        )
+
+    def duplicate_edge_key(edge) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+        first, second = (position_key(mesh.vertices[index].co) for index in edge.vertices)
+        return tuple(sorted((first, second)))
 
     polygons_by_edge: dict[tuple[int, int], list] = {}
     for polygon in mesh.polygons:
         for edge_key in polygon.edge_keys:
             polygons_by_edge.setdefault(tuple(sorted(edge_key)), []).append(polygon)
 
+    duplicated_boundaries: dict[tuple[tuple[int, int, int], tuple[int, int, int]], list[tuple]] = {}
+    for edge in mesh.edges:
+        polygons = polygons_by_edge.get(tuple(sorted(edge.key)), ())
+        if len(polygons) == 1:
+            duplicated_boundaries.setdefault(duplicate_edge_key(edge), []).append((edge, polygons[0]))
+
+    authored_duplicate_edges: set[int] = set()
+    for boundary_edges in duplicated_boundaries.values():
+        if len(boundary_edges) < 2:
+            continue
+        material_indices = {polygon.material_index for _edge, polygon in boundary_edges}
+        has_material_seam = len(material_indices) > 1
+        has_normal_split = any(
+            first_polygon.normal.angle(second_polygon.normal) >= math.radians(12.0)
+            for index, (_first_edge, first_polygon) in enumerate(boundary_edges)
+            for _second_edge, second_polygon in boundary_edges[index + 1:]
+        )
+        if not (has_material_seam or has_normal_split or detail_name_hint):
+            continue
+        for edge, _polygon in boundary_edges:
+            start, end = (mesh.vertices[index].co for index in edge.vertices)
+            direction = obj.matrix_world.to_3x3() @ (end - start)
+            if direction.length < min_duplicate_length:
+                continue
+            has_facial_detail_weight = any(
+                belongs_to_facial_detail(mesh.vertices[index]) for index in edge.vertices
+            )
+            strong_authored_split = has_material_seam and has_normal_split
+            if detail_name_hint or has_facial_detail_weight or strong_authored_split:
+                authored_duplicate_edges.add(edge.index)
+
     marked = 0
     for edge in mesh.edges:
         edge.use_freestyle_mark = False
         polygons = polygons_by_edge.get(tuple(sorted(edge.key)), ())
+        if edge.index in authored_duplicate_edges:
+            edge.use_freestyle_mark = True
+            marked += 1
+            continue
         if len(polygons) == 1 and all(
             belongs_to_finger(mesh.vertices[index]) for index in edge.vertices
         ):
@@ -2246,20 +2319,6 @@ def mark_level5_internal_edges(obj, angle: float = math.radians(48.0)) -> int:
             edge.use_freestyle_mark = True
             marked += 1
             continue
-        if len(polygons) != 2:
-            continue
-        first, second = polygons
-        material_seam = first.material_index != second.material_index
-        hard_fold = first.normal.angle(second.normal) >= angle
-        start, end = (mesh.vertices[index].co for index in edge.vertices)
-        direction = obj.matrix_world.to_3x3() @ (end - start)
-        vertical_fold = direction.length > 1e-8 and abs(direction.normalized().z) >= 0.55
-        authored_finger_fold = hard_fold and all(
-            belongs_to_finger(mesh.vertices[index]) for index in edge.vertices
-        )
-        if authored_finger_fold or vertical_fold and (material_seam or hard_fold):
-            edge.use_freestyle_mark = True
-            marked += 1
     return marked
 
 
@@ -2384,7 +2443,7 @@ def configure_level5_outlines(
             detail_set.select_edge_mark = True
             detail_set.edge_type_combination = "OR"
             detail_style.color = (0.055, 0.025, 0.028)
-            detail_style.thickness = outline_thickness * 0.44
+            detail_style.thickness = outline_thickness
             detail_style.caps = "ROUND"
         elif detail_set is not None:
             settings.linesets.remove(detail_set)
@@ -2412,7 +2471,7 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
         "Level-5 G4 Internal Detail",
     }
     if mode is None:
-        mode = getattr(addon_preferences(), "outline_mode", "SIMPLE")
+        mode = getattr(addon_preferences(), "outline_mode", "HULL")
     has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
     if not has_level5_lines:
         if mode == "OFF":
@@ -2590,7 +2649,7 @@ def import_g4_model(
     compact_skeleton_summary(summary)
     collapse_duplicate_materials(imported_names)
     apply_material_texture_variants(summary, debug)
-    outline_mode = getattr(prefs, "outline_mode", "SIMPLE") if apply_styling else "OFF"
+    outline_mode = getattr(prefs, "outline_mode", "HULL") if apply_styling else "OFF"
     apply_auxiliary_textures_to_imported_materials(
         imported_names,
         summary,

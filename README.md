@@ -211,19 +211,22 @@ zero, so ordinary imports remain unchanged. RGB channels from `msk` are exposed 
 nodes so recolour and skin parameters can be applied without using the mask as
 alpha. Source-painted line work remains in the base texture.
 
-The **Character Outline** preference controls character contours. **Simple**
-(the default) combines a filtered Freestyle silhouette with Blender's
-screen-space viewport outline. **Detailed** adds selected structural edge marks
-and a screen-space cavity pass in the viewport. Both modes exclude auxiliary
+The **Character Outline** preference controls character contours. **Detailed**
+(the default) combines a filtered Freestyle silhouette with selected authored
+split-seam edge marks and a screen-space cavity pass in the viewport. **Simple**
+keeps only the filtered silhouette and viewport outline. Both modes exclude auxiliary
 eye and mouth planes, preventing those submeshes from producing false contours.
 Changing the preference refreshes an existing G4 scene immediately; saved G4
 scenes are also refreshed safely when opened or rendered in background mode.
 **Outline Thickness** controls the main render silhouette in pixels (default
-`1.65`, matched to the game reference); thin and internal lines follow it at
-restrained proportional weights.
-Hard modelled folds and material seams are marked selectively for a thinner
-internal render line, preserving details such as ears, neck folds, fingers and
-nails without exposing the mesh triangulation. Objects whose source `COLOR.B` weight is low receive a
+`1.65`, matched to the game reference); authored internal detail lines use the
+same thickness, while the secondary thin silhouette remains proportionally
+restrained.
+Coincident non-manifold boundary pairs are recognised as authored split seams
+when they belong to head/hair/face regions, or when a strong material and
+normal break confirms a real surface split. This recovers more of the in-game
+hair and ear ink while discarding most open-edge clutter; fingernail inset
+perimeters remain preserved as small authored open-surface details. Objects whose source `COLOR.B` weight is low receive a
 second, thinner silhouette style. Character `line` textures larger than the
 uniform 8x8 default are detected as authored UV outline controls and select the
 same restrained silhouette style. Their blue channel also masks a narrow,
