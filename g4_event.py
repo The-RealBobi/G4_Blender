@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import fnmatch
 import re
 import struct
 import xml.etree.ElementTree as ET
@@ -144,6 +145,64 @@ def actor_points_from_entries(entries: list[dict]) -> dict[str, str]:
     return points
 
 
+def actor_point_assignments_from_entries(entries: list[dict]) -> dict[str, dict[str, tuple[str, str]]]:
+    """Resolve per-cut point attachments, including Victory Road's TYPE templates."""
+    assignments: dict[str, dict[str, tuple[str, str]]] = {}
+    command = None
+    cut = ""
+    template_types: dict[str, str] = {}
+    for entry in entries:
+        values = {
+            int(value.get("Index", index)): value.get("Value")
+            for index, value in enumerate(entry.get("Values") or ())
+        }
+        if entry.get("Name") == "EVENT_COMMAND_HEADER":
+            command = values.get(1)
+            continue
+        if entry.get("Name") != "EVENT_COMMAND_ARGS":
+            continue
+        ordered = [values.get(index) for index in range(max(values, default=-1) + 1)]
+        if len(ordered) >= 2 and str(ordered[1] or "").upper() == "RESET_DEF":
+            candidate = str(ordered[0] or "").lower()
+            if re.fullmatch(r"c\d+", candidate):
+                cut = candidate
+        if len(ordered) >= 4 and str(ordered[0] or "").lower().startswith("point_s"):
+            candidate = str(ordered[-1] or "").lower()
+            if re.fullmatch(r"c\d+", candidate):
+                cut = candidate
+        if len(ordered) >= 3 and "<type>" in str(ordered[0] or "").lower() and ordered[1] == "TYPE":
+            template_types[str(ordered[0]).lower()] = str(ordered[2]).zfill(2)
+        if command != EVENT_ATTACH_POINT_COMMAND or len(ordered) < 3:
+            continue
+        actor = str(ordered[0] or "").lower()
+        source = str(ordered[1] or "").lower()
+        point = str(ordered[2] or "").lower()
+        if not cut or not source.startswith("point_s") or not re.fullmatch(r"evp\d+", point):
+            continue
+        if "<type>" in actor:
+            actor = actor.replace("<type>", template_types.get(actor, "??"))
+            actor = actor.replace("<no>", "*").replace("_p<variation>", "")
+        else:
+            match = ACTOR_INSTANCE_RE.fullmatch(actor)
+            if match is None:
+                continue
+            actor = match.group(1).lower()
+        assignments.setdefault(cut, {})[actor] = (source, point)
+    return assignments
+
+
+def point_assignment_for_actor(
+    assignments: dict[str, dict[str, tuple[str, str]]], cut: str, actor: str
+) -> tuple[str, str] | None:
+    candidates = assignments.get(cut.lower()) or {}
+    actor = actor.lower()
+    base = re.sub(r"_s\d+$", "", actor)
+    for candidate in (actor, base):
+        if candidate in candidates:
+            return candidates[candidate]
+    return next((value for pattern, value in candidates.items() if fnmatch.fnmatchcase(actor, pattern)), None)
+
+
 def actor_points_from_raw_records(path: Path) -> dict[str, str]:
     """Read the inline command layout used by YK4 event_cfg/vis files."""
     points = {}
@@ -219,3 +278,15 @@ def load_event_actor_points(path: Path) -> dict[str, str]:
         points = actor_points_from_entries(event_command_entries_from_binary(path))
         return points or actor_points_from_raw_records(path)
     return {}
+
+
+def load_event_actor_point_assignments(path: Path) -> dict[str, dict[str, tuple[str, str]]]:
+    if path.suffix.lower() == ".json":
+        entries = json.loads(path.read_text(encoding="utf-8")).get("Entries") or []
+    elif path.suffix.lower() == ".xml":
+        entries = entries_from_xml(path)
+    elif path.name.lower().endswith(".cfg.bin"):
+        entries = event_command_entries_from_binary(path)
+    else:
+        return {}
+    return actor_point_assignments_from_entries(entries)

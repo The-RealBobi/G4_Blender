@@ -212,8 +212,9 @@ def companion_g4sk(path: Path, target_hashes: set[int] | None = None) -> Path | 
 
 def parse_g4mt(path: Path, skeleton: Path | None = None) -> dict:
     data = path.read_bytes()
-    if len(data) < 0x40 or data[:4] != b"G4MT":
-        raise ValueError(f"{path} is not a G4MT file")
+    magic = data[:4]
+    if len(data) < 0x40 or magic not in {b"G4MT", b"G4MA", b"G4TP"}:
+        raise ValueError(f"{path} is not a G4MT, G4MA or G4TP file")
 
     header_size = u16(data, 0x04)
     header_words = u16(data, 0x0A)
@@ -309,7 +310,7 @@ def parse_g4mt(path: Path, skeleton: Path | None = None) -> dict:
     return {
         "source": str(path),
         "skeleton": str(skeleton_path) if skeleton_path else None,
-        "magic": "G4MT",
+        "magic": magic.decode("ascii"),
         "header_size": header_size,
         "offset_shift": offset_shift,
         "file_type": u16(data, 0x06),
@@ -344,7 +345,17 @@ def parse_g4mt(path: Path, skeleton: Path | None = None) -> dict:
         "target_infos": [asdict(value) for value in target_infos],
         "channels": [asdict(value) for value in channels],
         "notes": {
-            "channel_values": "Use g4mt_motion.py to decode and export transform curves.",
+            "channel_values": (
+                "Use g4mt_motion.py to decode and export transform curves."
+                if magic == b"G4MT"
+                else (
+                    "G4MA uses the same curve container for material parameters; its channel types "
+                    "must be decoded as material values, not transforms."
+                    if magic == b"G4MA"
+                    else "G4TP uses the shared curve container, but its target semantics remain "
+                    "unresolved and must not be treated as skeletal transforms by default."
+                )
+            ),
             "clip_fps": "Confirmed by the runtime sampler in nie_602.exe.",
         },
     }
@@ -352,7 +363,7 @@ def parse_g4mt(path: Path, skeleton: Path | None = None) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("g4mt", type=Path)
+    parser.add_argument("g4mt", type=Path, help="G4MT, G4MA or G4TP curve container")
     parser.add_argument("--skeleton", type=Path, help="Optional companion G4SK used to resolve target hashes")
     parser.add_argument("--output", type=Path, help="Write JSON to this path instead of stdout")
     parser.add_argument("--compact", action="store_true", help="Omit target-info and channel arrays")

@@ -559,12 +559,19 @@ def infer_material_ref_table(data: bytes, material_table: int, material_count: i
         off = material_table + index * 0x10
         if off + 0x10 > len(data):
             return fallback_base
-        starts_counts.append((u16(data, off + 0x0E), u16(data, off + 0x0C)))
+        # The high byte is a material flag (commonly 0x01 for effect
+        # materials), not part of the reference count.  Treating 0x0101 as
+        # 257 made the table probe run straight into unrelated parameter
+        # data and favoured its first texture, usually whd0001_ef_51.
+        starts_counts.append((u16(data, off + 0x0E), u8(data, off + 0x0C)))
 
     best_base = fallback_base
-    best_score: tuple[int, int, int] | None = None
+    best_score: tuple[int, int, int, int] | None = None
     candidate = align(fallback_base, 0x10)
-    search_end = min(len(data) - 6, fallback_base + 0x100)
+    # Effect G4MDs place their texture-slot table after their initial shader
+    # parameter blocks.  The known VR sample is 0x240 bytes past the old
+    # fallback, so keep the scan bounded but wide enough for that layout.
+    search_end = min(len(data) - 6, fallback_base + 0x1000)
     while candidate <= search_end:
         score = 0
         for ref_start, ref_count in starts_counts:
@@ -575,19 +582,31 @@ def infer_material_ref_table(data: bytes, material_table: int, material_count: i
                     continue
                 tex_index = data[ref_off]
                 slot_type = data[ref_off + 1]
-                if slot_type in (3, 4, 5, 6, 7):
-                    score += 6
-                elif slot_type == 0:
-                    score -= 2
-                else:
-                    score -= 5
-                if all(value <= 0x10 for value in data[ref_off + 2 : ref_off + 6]):
+                # The material texture table uses slot 3.  The preceding
+                # parameter block is mostly floats and zeros, so require this
+                # signature rather than accepting arbitrary small bytes.
+                if slot_type == 3:
+                    score += 12
+                elif slot_type in (4, 5, 6, 7):
                     score += 2
                 else:
-                    score -= 4
+                    score -= 10
+                if all(value <= 0x10 for value in data[ref_off + 2 : ref_off + 4]):
+                    score += 3
+                else:
+                    score -= 6
                 if tex_index <= 0x40:
                     score += 1
-        candidate_score = (score, -abs(candidate - fallback_base), -candidate)
+        # A real texture table begins with a contiguous run of slot-3
+        # descriptors.  Shader parameter blocks can accidentally score well
+        # when sampled at a shifted offset, but never provide that run.
+        run_length = 0
+        while candidate + run_length * 6 + 6 <= len(data):
+            ref_off = candidate + run_length * 6
+            if data[ref_off + 1] != 3 or data[ref_off] > 0x40:
+                break
+            run_length += 1
+        candidate_score = (run_length, score, -abs(candidate - fallback_base), -candidate)
         if best_score is None or candidate_score > best_score:
             best_score = candidate_score
             best_base = candidate
@@ -601,13 +620,21 @@ def parse_material_records(data: bytes, material_table: int, material_count: int
         return records
     fallback_ref_table = material_table + material_count * 0x10 + 0x30
     ref_table = infer_material_ref_table(data, material_table, material_count, fallback_ref_table)
+    ref_table_length = 0
+    while ref_table + ref_table_length * 6 + 6 <= len(data):
+        ref_off = ref_table + ref_table_length * 6
+        if data[ref_off + 1] != 3 or data[ref_off] > 0x40:
+            break
+        ref_table_length += 1
     for index in range(material_count):
         off = material_table + index * 0x10
         values = struct.unpack_from("<8H", data, off)
-        texture_ref_count = values[6]
+        texture_ref_count = values[6] & 0xFF
         texture_ref_start = values[7]
         refs = []
         for ref_index in range(texture_ref_count):
+            if texture_ref_start + ref_index >= ref_table_length:
+                break
             ref_off = ref_table + (texture_ref_start + ref_index) * 6
             if ref_off + 6 > len(data):
                 break
@@ -629,6 +656,7 @@ def parse_material_records(data: bytes, material_table: int, material_count: int
                 "texture_ref_start": texture_ref_start,
                 "texture_refs": refs,
                 "material_ref_table": ref_table,
+                "material_ref_table_length": ref_table_length,
             }
         )
     return records
@@ -2065,8 +2093,50 @@ def find_texture_for_model(path: Path) -> Path | None:
     return None
 
 
+def find_effect_texture_containers(path: Path) -> list[Path]:
+    """Resolve effect G4TX containers, with optional OBJBIN enrichment."""
+    try:
+        relative = path.relative_to(RAW_DATA_ROOT)
+    except ValueError:
+        return []
+    if len(relative.parts) < 2 or relative.parts[1].lower() != "effect":
+        return []
+    candidates: list[Path] = []
+    # This library is shared by a large portion of Victory Road's effects.
+    # It deliberately does not depend on an exported .objbin.cfg being next
+    # to the model.
+    for platform in ("dx11", "nx"):
+        candidates.append(
+            RAW_DATA_ROOT / platform / "effect" / "battle" / "common" / "effCmnTex" / "effCmnTex.g4tx"
+        )
+
+    cfg_path = path.with_suffix(".objbin.cfg")
+    declared: list[str] = []
+    if cfg_path.is_file():
+        try:
+            source = cfg_path.read_text(encoding="utf-8-sig", errors="replace")
+            declared = re.findall(r'SETUP_PARAM\s+"Texture",\s+"([^"]+\.g4tx)"', source, re.IGNORECASE)
+        except OSError:
+            pass
+    for raw_path in declared:
+        normalized = raw_path.replace("\\", "/").lstrip("#/")
+        relative_texture = Path(normalized)
+        candidates.append(RAW_DATA_ROOT / relative_texture)
+        parts = relative_texture.parts
+        if parts and parts[0].lower() == "common":
+            relative_texture = Path(*parts[1:])
+        for platform in ("dx11", "nx"):
+            candidates.append(RAW_DATA_ROOT / platform / relative_texture)
+    seen = set()
+    return [
+        candidate for candidate in candidates
+        if candidate.is_file() and not (candidate in seen or seen.add(candidate))
+    ]
+
+
 def find_texture_containers_for_model(path: Path) -> list[Path]:
     candidates: list[Path] = []
+    candidates.extend(find_effect_texture_containers(path))
     primary = find_texture_for_model(path)
     if primary is not None:
         candidates.append(primary)

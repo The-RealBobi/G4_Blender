@@ -75,6 +75,7 @@ The add-on package includes:
 |-- g4_event.py
 |-- g4mt_motion.py
 |-- g4mt_probe.py
+|-- g4ma_motion.py
 |-- g4cm_camera.py
 |-- g4pk_extract_g4mt.py
 |-- g4_p3lip.py
@@ -290,12 +291,25 @@ source ranges preserve their original timing. Alternative cuts whose source
 ranges overlap are concatenated by cut number so Blender can represent them in
 a single non-overlapping NLA scene.
 
+`Import Effects` is enabled by default and loads the matching assets from
+`data/common/effect/event` for the selected event. Disable it in the import
+dialog to load only the animation, actors and optional camera.
+
 When the extracted `event_cfg/evt/<event>.cfg.bin.json` or XML is available,
 the importer reads actor placement links such as `c11010019 -> evp01`. Each
 cut's `point_s00` G4MT is composed through `Ex/all/evpXX`, converted to
 Blender's axes and composed with the model's imported base orientation before
 being written into the actor Action. Actors absent from a cut stay hidden
 instead of appearing in their rest pose at the origin.
+
+Some Victory Road cuts, including `ev60_00010/c0050`, deliberately keep their
+`point_sXX` transforms at identity. Their world motion is instead carried by
+the animated character root (normally `c_c_1_0`, below static
+`c_global_0_0`). Event import extracts that root delta to the Armature object
+and removes the corresponding root-bone curves, so the actor is placed in the
+3D scene without applying its motion twice. `RESET_DEF cXXXX` in the event CFG
+defines the active cut for point attachment commands; resource preloads for a
+later cut do not change those assignments.
 
 Animation rigs are aligned to the exact G4SK rest axes before Actions are
 created. This avoids the TRS approximation that Blender's Collada bone-axis
@@ -339,6 +353,14 @@ places its `g4_lip_viseme` and `g4_lip_weight` channels at the matching cut.
 They remain separate from actor Actions because P3LIP itself does not identify
 the speaking actor. A single `.p3lip` can also be imported directly onto the
 active object from File > Import.
+
+Facial expressions are instead carried by the character cut's sidecar
+`<cut>.g4ma`. Channel 32 targets the material CRCs for `eye_10M` and
+`mouth_10M` and selects a discrete cell in their 4×2 texture atlas. Event
+import creates an actor-local copy of each affected material, inserts a **G4
+Face UV** mapping node before its base texture and keys its UV offset with
+constant interpolation. This keeps simultaneous actors independent while
+preserving the source expression timing.
 
 Event effect G4PKM models are discovered in the matching
 `common/effect/event/<family>/<event>` tree, imported with their native

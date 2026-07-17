@@ -178,9 +178,15 @@ def decode_key(data: bytes, data_base: int, channel: dict, scale: float, key_ind
         return list(struct.unpack_from(f"<{component_count}h", data, offset))
     if codec == 1 and variant == 4:
         return list(struct.unpack_from(f"<{component_count}f", data, offset))
+    if codec == 2 and variant == 1:
+        values = struct.unpack_from(f"<{component_count}B", data, offset)
+        return [value * scale / 256.0 for value in values]
     if codec == 2 and variant == 2:
         values = struct.unpack_from(f"<{component_count}H", data, offset)
         return [value * scale / 65536.0 for value in values]
+    if codec == 3 and variant == 1:
+        values = struct.unpack_from(f"<{component_count}b", data, offset)
+        return [value * scale / 128.0 for value in values]
     if codec == 3 and variant == 2:
         values = struct.unpack_from(f"<{component_count}h", data, offset)
         return [value * scale / 32768.0 for value in values]

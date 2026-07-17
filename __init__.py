@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 15, 6),
+    "version": (0, 15, 36),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 import bpy
@@ -3198,6 +3199,7 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     event_actors_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     event_selected_json: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
     event_actor_index: IntProperty(default=0, options={"HIDDEN", "SKIP_SAVE"})
+    event_import_effects: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
     allow_head_override: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
     create_report_text: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
     head_model: StringProperty(name="Head", subtype="FILE_PATH", update=character_setup_head_changed)
@@ -3215,11 +3217,20 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
         if self.event_directory:
             prefs = addon_preferences()
             directory = Path(bpy.path.abspath(self.event_directory))
+            g4_animation_addon.append_event_file_log(
+                f"character setup invoke: event={directory}; actor_index={self.event_actor_index}"
+            )
             actors = json.loads(self.event_actors_json or "[]")
             if self.event_actor_index >= len(actors):
+                g4_animation_addon.append_event_file_log(
+                    f"character setup cancelled: actor index outside list (count={len(actors)})"
+                )
                 self.report({"ERROR"}, "Event actor selection is out of range")
                 return {"CANCELLED"}
             actor = actors[self.event_actor_index]
+            g4_animation_addon.append_event_file_log(
+                f"character setup dialog requested: actor={actor}; actor_count={len(actors)}"
+            )
             try:
                 event_saved = json.loads(getattr(prefs, "event_character_parts", "{}") or "{}")
             except json.JSONDecodeError:
@@ -3287,6 +3298,10 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     def execute(self, context):
         model_path = Path(bpy.path.abspath(self.head_model or self.model_path))
         if not model_path.is_file() or model_path.suffix.lower() not in MODEL_EXTENSIONS:
+            if self.event_directory:
+                g4_animation_addon.append_event_file_log(
+                    f"character setup cancelled: invalid model={model_path}"
+                )
             self.report({"ERROR"}, f"Character model not found or unsupported: {model_path}")
             return {"CANCELLED"}
 
@@ -3304,6 +3319,10 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             directory = Path(bpy.path.abspath(self.event_directory))
             actors = json.loads(self.event_actors_json or "[]")
             actor = actors[self.event_actor_index]
+            import_effects = self.event_import_effects
+            g4_animation_addon.append_event_file_log(
+                f"character setup accepted: actor={actor}; model={model_path}"
+            )
             try:
                 selected = json.loads(self.event_selected_json or "{}")
             except json.JSONDecodeError:
@@ -3322,15 +3341,20 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             next_index = self.event_actor_index + 1
             if next_index < len(actors):
                 next_model = event_setup_actor_model(directory, actors[next_index], prefs)
+                g4_animation_addon.append_event_file_log(
+                    f"character setup advancing: next_actor={actors[next_index]}; index={next_index}"
+                )
                 g4_animation_addon.defer_blender_call(
-                    lambda: bpy.ops.import_scene.level5_g4_character_setup(
+                    lambda import_effects=import_effects: bpy.ops.import_scene.level5_g4_character_setup(
                         "INVOKE_DEFAULT",
                         model_path=str(next_model) if next_model is not None else "",
                         event_directory=str(directory),
                         event_actors_json=json.dumps(actors),
                         event_selected_json=json.dumps(selected),
                         event_actor_index=next_index,
-                    )
+                        event_import_effects=import_effects,
+                    ),
+                    label="Open next event character setup",
                 )
                 return {"FINISHED"}
             prefs.event_character_parts = json.dumps(selected, sort_keys=True)
@@ -3338,13 +3362,18 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
                 bpy.ops.wm.save_userpref()
             except RuntimeError:
                 pass
+            g4_animation_addon.append_event_file_log(
+                f"character setup complete: starting event import; import_effects={self.event_import_effects}"
+            )
             g4_animation_addon.defer_blender_call(
-                lambda: bpy.ops.import_scene.level5_g4_event_folder(
+                lambda import_effects=import_effects: bpy.ops.import_scene.level5_g4_event_folder(
                     "EXEC_DEFAULT",
                     directory=str(directory),
+                    import_effects=import_effects,
                     prompt_character_parts=False,
                     character_parts_json=json.dumps(selected),
-                )
+                ),
+                label="Start event import after character setup",
             )
             return {"FINISHED"}
 
@@ -3455,12 +3484,20 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         else:
             paths = [base_path]
 
+        g4_animation_addon.append_event_file_log(
+            f"model batch execute: paths={len(paths)}; character_parts={self.import_character_parts}; "
+            f"setup_complete={self.character_setup_complete}; skip_setup={self.skip_character_setup}; "
+            f"models={[str(path) for path in paths]}"
+        )
+
         unsupported = [path for path in paths if path.suffix.lower() not in MODEL_EXTENSIONS]
         if unsupported:
+            g4_animation_addon.append_event_file_log(f"model batch cancelled: unsupported={unsupported}")
             suffixes = ", ".join(sorted({path.suffix or "<none>" for path in unsupported}))
             self.report({"ERROR"}, f"Unsupported G4 model extension: {suffixes}")
             return {"CANCELLED"}
         if not paths:
+            g4_animation_addon.append_event_file_log("model batch cancelled: no supported paths")
             self.report({"ERROR"}, "No supported G4 model files selected")
             return {"CANCELLED"}
 
@@ -3472,15 +3509,20 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         ):
             selected_path = str(paths[0])
             create_report_text = self.create_report_text
-            bpy.app.timers.register(
+            g4_animation_addon.append_event_file_log(
+                f"model batch opening character setup: model={selected_path}"
+            )
+            g4_animation_addon.defer_blender_call(
                 lambda: bpy.ops.import_scene.level5_g4_character_setup(
                     "INVOKE_DEFAULT",
                     model_path=selected_path,
                     create_report_text=create_report_text,
-                ) and None,
-                first_interval=0.01,
+                ),
+                label="Open character setup from model batch",
             )
             return {"FINISHED"}
+
+        g4_animation_addon.append_event_file_log("model batch continuing directly to model imports")
 
         prefs = addon_preferences()
         imported_total = 0
@@ -3523,6 +3565,9 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         part_mesh_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
                 update_import_progress(context, index, total_paths, f"Imported model {index}/{total_paths}: {path.name}")
         except Exception as exc:
+            g4_animation_addon.append_event_file_log(
+                f"model batch failed: {exc}\n{traceback.format_exc()}"
+            )
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
@@ -3547,6 +3592,9 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         if imported_parts:
             message += f"; parts {len(imported_parts)} ({part_mesh_total} meshes)"
         self.report({"INFO"}, message)
+        g4_animation_addon.append_event_file_log(
+            f"model batch complete: models={len(summaries)}; objects={imported_total}"
+        )
         return {"FINISHED"}
 
 
@@ -3716,12 +3764,18 @@ class IMPORT_OT_level5_g4_folder(Operator):
 
     def execute(self, context):
         directory = Path(bpy.path.abspath(self.directory or ""))
+        g4_animation_addon.append_event_file_log(
+            f"model folder batch execute: directory={directory}; recursive={self.recursive}; "
+            f"character_parts={self.import_character_parts}"
+        )
         if not directory.exists() or not directory.is_dir():
+            g4_animation_addon.append_event_file_log("model folder batch cancelled: directory does not exist")
             self.report({"ERROR"}, f"Folder not found: {directory}")
             return {"CANCELLED"}
 
         paths = collect_model_paths_auto(directory, self.recursive)
         if not paths:
+            g4_animation_addon.append_event_file_log("model folder batch cancelled: no models found")
             self.report({"ERROR"}, f"No .g4md/.g4pkm models found in {directory}")
             return {"CANCELLED"}
 
@@ -3777,6 +3831,9 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         imported_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
                 update_import_progress(context, index, total_paths, f"Imported model {index}/{total_paths}: {path.name}")
         except Exception as exc:
+            g4_animation_addon.append_event_file_log(
+                f"model folder batch failed: {exc}\n{traceback.format_exc()}"
+            )
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
@@ -3789,6 +3846,9 @@ class IMPORT_OT_level5_g4_folder(Operator):
         if hidden_total:
             message += f"; hidden {hidden_total} auxiliary map objects"
         self.report({"INFO"}, message)
+        g4_animation_addon.append_event_file_log(
+            f"model folder batch complete: models={len(paths)}; objects={imported_total}"
+        )
         return {"FINISHED"}
 
 

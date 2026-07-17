@@ -182,3 +182,5 @@ cython_debug/
 .DS_Store
 /tests
 /exports
+/docs
+/tools
