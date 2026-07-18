@@ -755,9 +755,10 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
         if vertex_stride == 0:
             vertex_stride = 0x44
         vertex_end = vertex_offset + vertex_count * vertex_stride
-        index_end = index_offset + index_count * 2
+        effective_index_count = index_count if index_count else triangle_count * 3
+        index_end = index_offset + effective_index_count * 2
         vertex_ok = vertex_end <= vertex_buffer_size
-        index_ok = index_end <= index_buffer_size
+        index_ok = index_count > 0 and triangle_count > 0 and index_end <= index_buffer_size
 
         first_position = None
         first_indices: tuple[int, ...] = ()
@@ -769,7 +770,7 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
                     f32(g4mg, vertex_offset + 8),
                 )
             absolute_index_offset = index_base + index_offset
-            count = min(index_count, 12)
+            count = min(effective_index_count, 12)
             if absolute_index_offset + count * 2 <= len(g4mg):
                 first_indices = struct.unpack_from("<" + "H" * count, g4mg, absolute_index_offset)
 
@@ -2655,9 +2656,20 @@ def export_obj(path: Path, out_dir: Path) -> Path:
             index_offset = u32(data, rec + 0x04)
             vertex_count = u32(data, rec + 0x08)
             index_count = u32(data, rec + 0x0C)
+            triangle_count = u32(data, rec + 0x30)
             flags1 = u16(data, rec + 0x3E)
             vertex_stride = flags1 & 0xFF or 0x44
             uv_offset = uv0_offset_for_stride(vertex_stride)
+            effective_index_count = index_count if index_count else triangle_count * 3
+            vertex_end = vertex_offset + vertex_count * vertex_stride
+            index_end = index_offset + effective_index_count * 2
+            if (
+                vertex_count <= 0
+                or index_count < 3
+                or vertex_end > index_base
+                or index_end > len(g4mg) - index_base
+            ):
+                continue
 
             obj.write(f"\no mesh_{mesh_index:03d}\n")
             for vertex_index in range(vertex_count):
@@ -4520,6 +4532,13 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
     normalized_path = path.as_posix().lower()
     prefer_material_refs = "/map/" in normalized_path or "/effect/" in normalized_path
     for record in records:
+        if (
+            not record.get("vertex_range_ok", True)
+            or not record.get("index_range_ok", True)
+            or record.get("vertex_count", 0) <= 0
+            or record.get("index_count", 0) < 3
+        ):
+            continue
         mesh_name = mesh_name_for_export(md_info, record, skeleton_info)
         material_name = material_name_for_mesh(md_info, mesh_name, record["index"], record, path.stem)
         if material_name not in used_materials:
