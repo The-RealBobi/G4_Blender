@@ -281,6 +281,9 @@ When a model has a sibling OBJBIN, the importer reads the original binary
 directly and uses its declared G4TX texture containers before falling back to
 name/material heuristics. It does not require exported `.objbin.json`,
 `.objbin.cfg` or `.objbin.xml` sidecars.
+Map material fallback also recognizes shared world atlas names such as walls,
+pillars, stairs, fences and light-on/addasset groups when the G4MD texture slots
+are absent or point outside the parsed reference table.
 Native half-float DDS cubemaps are detected from their DDS flags, converted to
 equirectangular Radiance HDR and used as a restrained Blender world environment
 when the map has a matching `<world>_cubemap.g4tx` container.

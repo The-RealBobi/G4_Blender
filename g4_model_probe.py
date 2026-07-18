@@ -3084,9 +3084,11 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
     if cb_match:
         keys.append(cb_match.group(1))
 
-    for suffix in ("_bf",):
+    for suffix in ("_bf", "_of"):
         if base.endswith(suffix):
             keys.append(base[: -len(suffix)])
+            if base[: -len(suffix)].endswith("_a"):
+                keys.append(f"{base[: -len(suffix)]}_re")
 
     no_numeric = re.sub(r"_\d+$", "", base)
     if no_numeric != base:
@@ -3109,16 +3111,42 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
             if tail.startswith(f"{prefix}_"):
                 tail = tail[len(prefix) + 1 :]
                 break
+        tail = re.sub(r"^atlas\d+_", "", tail)
+        tail = re.sub(r"^[a-z]?\d+[a-z]?\d*_", "", tail)
         shared = re.match(r"(concrete|tile|grass|water|stairs?)(\d+[a-z]?)", tail)
+        if shared is None:
+            shared = re.search(r"(concrete|tile|grass|water|stairs?)(\d+[a-z]?)", tail)
         if shared:
             prefix, number = shared.groups()
             shared_prefix = "stairs" if prefix.startswith("stair") else prefix
             keys.append(f"{world}g_{shared_prefix}{number}_re")
+        if "whitewall" in tail or "white_wall" in tail or "wall" in tail or "piller" in tail or "pillar" in tail:
+            keys.append(f"{world}g_wall01_re")
+            keys.append(f"{world}g_wall02_re")
+        if "metal" in tail and not shared:
+            keys.append(f"{world}g_concrete01_re")
+        if "sand" in tail:
+            keys.append(f"{model_lower}_sand")
+            keys.append(f"{world}g_tile01_re")
+        if "tile" in tail and not shared:
+            keys.append(f"{world}g_tile01_re")
+            keys.append(f"{world}g_tile02_re")
         if "grass" in tail:
+            keys.append(f"{model_lower}_grass01_a")
             keys.append(f"{world}g_grass01_re")
+            keys.append(f"{world}g_grass02_re")
         if "water" in tail:
             keys.append(f"{world}g_water_re")
             keys.append(f"{world}g_water_base_re")
+        if "lighton" in tail:
+            keys.append(tail.replace("_lighton", "").replace("lighton", "").rstrip("_"))
+            keys.append(f"{model_lower}a01at")
+        if "stairs_parts" in tail:
+            keys.append(f"{world}g_stairs01")
+        if "addasset" in tail or "asset_group" in tail or "door_group" in tail or tail == "base":
+            keys.append(f"{model_lower}a01at")
+            keys.append(f"{model_lower}_cb_01")
+            keys.append(f"_{world}_01_cb")
 
     if material_name.startswith("material_"):
         mesh = mesh_name.rstrip("_")
@@ -3161,6 +3189,10 @@ def texture_matches_material_semantics(texture: Path, material_name: str, model_
         "clock",
         "window",
         "fence",
+        "wall",
+        "whitewall",
+        "piller",
+        "pillar",
         "stairs",
         "stair",
         "roof",
