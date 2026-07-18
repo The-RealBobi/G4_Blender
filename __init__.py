@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 1),
+    "version": (0, 16, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -563,7 +563,43 @@ def matrix_from_flat(values: list[float]) -> Matrix:
     return Matrix((values[0:4], values[4:8], values[8:12], values[12:16]))
 
 
-def import_native_g4_mesh(native_path: Path) -> set[str]:
+def safe_custom_vertex_normals(flat_normals: list[float], vertex_count: int) -> list[Vector] | None:
+    if vertex_count <= 0 or len(flat_normals) < vertex_count * 3:
+        return None
+    normals = []
+    for index in range(vertex_count):
+        offset = index * 3
+        values = flat_normals[offset : offset + 3]
+        if len(values) != 3 or not all(math.isfinite(float(value)) for value in values):
+            return None
+        normal = Vector(values)
+        if normal.length <= 1e-8:
+            return None
+        normals.append(normal.normalized())
+    return normals
+
+
+def apply_custom_vertex_normals(mesh, flat_normals: list[float], vertex_count: int) -> bool:
+    normals = safe_custom_vertex_normals(flat_normals, vertex_count)
+    if normals is None or not mesh.polygons or not mesh.loops:
+        return False
+    if any(polygon.loop_total < 3 or polygon.area <= 1e-12 for polygon in mesh.polygons):
+        return False
+    for loop in mesh.loops:
+        if loop.vertex_index < 0 or loop.vertex_index >= len(normals):
+            return False
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
+    if hasattr(mesh, "normals_split_custom_set"):
+        mesh.normals_split_custom_set([normals[loop.vertex_index] for loop in mesh.loops])
+        return True
+    if hasattr(mesh, "normals_split_custom_set_from_vertices"):
+        mesh.normals_split_custom_set_from_vertices(normals)
+        return True
+    return False
+
+
+def import_native_g4_mesh(native_path: Path, custom_normals: bool = True) -> set[str]:
     payload = json.loads(native_path.read_text(encoding="utf-8"))
     if payload.get("format") != "level5-g4-native-mesh" or payload.get("version") != 1:
         raise RuntimeError(f"Unsupported native G4 mesh payload: {native_path}")
@@ -648,15 +684,8 @@ def import_native_g4_mesh(native_path: Path) -> set[str]:
                 offset = loop.vertex_index * 4
                 colors.data[loop.index].color = flat_colors[offset : offset + 4]
 
-        flat_normals = mesh_payload.get("normals") or []
-        if len(flat_normals) >= len(positions) * 3 and hasattr(mesh, "normals_split_custom_set_from_vertices"):
-            normals = [
-                Vector(flat_normals[index : index + 3]).normalized()
-                for index in range(0, len(flat_normals) - 2, 3)
-            ]
-            for polygon in mesh.polygons:
-                polygon.use_smooth = True
-            mesh.normals_split_custom_set_from_vertices(normals)
+        if custom_normals:
+            apply_custom_vertex_normals(mesh, mesh_payload.get("normals") or [], len(positions))
 
         obj = bpy.data.objects.new(name, mesh)
         bpy.context.collection.objects.link(obj)
@@ -2650,7 +2679,7 @@ def import_g4_model(
     native_value = summary.get("native_mesh")
     native_path = Path(native_value).resolve() if native_value else None
     if native_path is not None and native_path.is_file():
-        imported_names = import_native_g4_mesh(native_path)
+        imported_names = import_native_g4_mesh(native_path, custom_normals=apply_styling)
         import_method = "native"
     else:
         dae_path = Path(summary.get("dae", "")).resolve()
@@ -3568,6 +3597,9 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         f"Importing model {index}/{total_paths}: {path.name}",
                         redraw=redraw,
                     )
+                    g4_animation_addon.append_event_file_log(
+                        f"model batch importing {index}/{total_paths}: {path}"
+                    )
                     summary, imported_names = import_g4_model(path, prefs, self.create_report_text)
                     summaries.append(summary)
                     imported_total += len(imported_names)
@@ -3892,6 +3924,9 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         redraw=should_redraw_import_progress(index - 1, total_paths),
                     )
                     character_model = is_character_model(path)
+                    g4_animation_addon.append_event_file_log(
+                        f"model folder batch importing {index}/{total_paths}: {path}; character={character_model}"
+                    )
                     _, imported_names = import_g4_model(
                         path,
                         prefs,
