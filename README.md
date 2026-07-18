@@ -257,11 +257,12 @@ fallback for an old cache that does not contain the native payload.
 
 ## Map Reconstruction
 
-Folder import reads the world-level `<world>.g4pk` beside the model folders.
+Folder import reads the world-level `<world>.g4pk` or `<world>.g4pkm` beside the model folders.
 Its embedded G4SK is the static scene hierarchy: `model_r_*` branches contain
 directly rendered assets, while `instance` branches contain repeated objects
-named like `ao042_00_003`. The importer matches those nodes to their G4PKM
-assets, composes parent transforms, converts the G4 Y-up matrices to Blender
+named like `ao042_00_003` or `tr051_009`. The importer matches those nodes to
+their G4PKM assets, including referenced fillers from sibling `common/map`
+folders, composes parent transforms, converts the G4 Y-up matrices to Blender
 Z-up space and creates linked object-data instances where an asset is reused.
 Map objects containing `sdw`, `shadow`, `culling`, `lv1` or `lv2` in their
 names are hidden in both the viewport and render as soon as they are imported.

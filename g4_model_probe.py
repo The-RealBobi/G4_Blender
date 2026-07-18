@@ -1204,17 +1204,28 @@ def map_asset_name(node_name: str, model_stems: set[str]) -> str | None:
     lowered = node_name.lower()
     if lowered in model_stems:
         return lowered
-    match = re.fullmatch(r"(.+)_\d{2}_\d{3}", lowered)
-    if match and match.group(1) in model_stems:
-        return match.group(1)
+    for pattern in (r"(.+)_\d{2}_\d{3}", r"(.+)_\d{3}"):
+        match = re.fullmatch(pattern, lowered)
+        if match and match.group(1) in model_stems:
+            return match.group(1)
     return None
 
 
 def map_scene_placements(directory: Path, model_stems: Iterable[str]) -> dict[str, list[dict]]:
     """Read static asset placements from the world's G4SK scene hierarchy."""
     stems = {stem.lower() for stem in model_stems}
-    scene_path = directory / f"{directory.name}.g4pk"
-    if not scene_path.is_file() or not stems:
+    scene_path = next(
+        (
+            candidate
+            for candidate in (
+                directory / f"{directory.name}.g4pk",
+                directory / f"{directory.name}.g4pkm",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if scene_path is None or not stems:
         return {}
 
     data = scene_path.read_bytes()

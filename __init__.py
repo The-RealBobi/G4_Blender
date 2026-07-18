@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 0),
+    "version": (0, 16, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import bpy
@@ -34,16 +35,38 @@ CHARACTER_BODY_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
 CHARACTER_BODY_MESH_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
 
 
-def update_import_progress(context, completed: int, total: int, status: str) -> None:
+def update_import_progress(context, completed: int, total: int, status: str, redraw: bool = True) -> None:
     context.window_manager.progress_update(min(max(0, completed), max(1, total)))
     context.workspace.status_text_set(status)
     for window in context.window_manager.windows:
         for area in window.screen.areas:
             area.tag_redraw()
+    if not redraw:
+        return
     try:
         bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
     except RuntimeError:
         pass
+
+
+def should_redraw_import_progress(completed: int, total: int) -> bool:
+    if total <= 25:
+        return True
+    return completed <= 1 or completed >= total or completed % 10 == 0
+
+
+@contextmanager
+def suspended_global_undo(context):
+    edit_preferences = getattr(getattr(context, "preferences", None), "edit", None)
+    if edit_preferences is None or not hasattr(edit_preferences, "use_global_undo"):
+        yield
+        return
+    previous = edit_preferences.use_global_undo
+    edit_preferences.use_global_undo = False
+    try:
+        yield
+    finally:
+        edit_preferences.use_global_undo = previous
 
 try:
     from . import g4_port_addon
@@ -3534,36 +3557,51 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         window_manager.progress_begin(0, max(1, total_paths))
         update_import_progress(context, 0, total_paths, "Preparing G4 model import…")
         try:
-            for index, path in enumerate(paths, start=1):
-                update_import_progress(context, index - 1, total_paths, f"Importing model {index}/{total_paths}: {path.name}")
-                summary, imported_names = import_g4_model(path, prefs, self.create_report_text)
-                summaries.append(summary)
-                imported_total += len(imported_names)
-                armatures = imported_armatures(imported_names)
-                if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
-                    attached, part_paths = import_character_parts_for_armature(
-                        path,
-                        armatures[0],
-                        prefs,
-                        self.auto_character_parts,
-                        self.body_model,
-                        self.shoes_model,
-                        self.accessory_model,
-                        self.gloves_model,
-                        self.armband_model,
-                        self.nameplate_model,
-                        self.create_report_text,
-                        self.character_part_stem,
-                        self.preserve_character_part_armatures,
+            undo_scope = suspended_global_undo(context) if total_paths > 1 else nullcontext()
+            with undo_scope:
+                for index, path in enumerate(paths, start=1):
+                    redraw = should_redraw_import_progress(index - 1, total_paths)
+                    update_import_progress(
+                        context,
+                        index - 1,
+                        total_paths,
+                        f"Importing model {index}/{total_paths}: {path.name}",
+                        redraw=redraw,
                     )
-                    part_mesh_total += attached
-                    imported_parts.extend(part_paths)
-                    if self.attach_ball:
-                        ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(path, prefs)
-                        if ball_path is None:
-                            raise RuntimeError("Default ball model b000001 was not found")
-                        part_mesh_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
-                update_import_progress(context, index, total_paths, f"Imported model {index}/{total_paths}: {path.name}")
+                    summary, imported_names = import_g4_model(path, prefs, self.create_report_text)
+                    summaries.append(summary)
+                    imported_total += len(imported_names)
+                    armatures = imported_armatures(imported_names)
+                    if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
+                        attached, part_paths = import_character_parts_for_armature(
+                            path,
+                            armatures[0],
+                            prefs,
+                            self.auto_character_parts,
+                            self.body_model,
+                            self.shoes_model,
+                            self.accessory_model,
+                            self.gloves_model,
+                            self.armband_model,
+                            self.nameplate_model,
+                            self.create_report_text,
+                            self.character_part_stem,
+                            self.preserve_character_part_armatures,
+                        )
+                        part_mesh_total += attached
+                        imported_parts.extend(part_paths)
+                        if self.attach_ball:
+                            ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(path, prefs)
+                            if ball_path is None:
+                                raise RuntimeError("Default ball model b000001 was not found")
+                            part_mesh_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
+                    update_import_progress(
+                        context,
+                        index,
+                        total_paths,
+                        f"Imported model {index}/{total_paths}: {path.name}",
+                        redraw=should_redraw_import_progress(index, total_paths),
+                    )
         except Exception as exc:
             g4_animation_addon.append_event_file_log(
                 f"model batch failed: {exc}\n{traceback.format_exc()}"
@@ -3619,6 +3657,61 @@ def collect_model_paths_auto(directory: Path, recursive: bool) -> list[Path]:
     if paths or recursive:
         return paths
     return collect_model_paths(directory, True)
+
+
+def preferred_model_path(previous: Path | None, candidate: Path) -> Path:
+    if previous is None:
+        return candidate
+    previous_suffix = previous.suffix.lower()
+    candidate_suffix = candidate.suffix.lower()
+    if previous_suffix == ".g4md" and candidate_suffix == ".g4pkm":
+        return candidate
+    if previous_suffix == candidate_suffix and len(candidate.parts) < len(previous.parts):
+        return candidate
+    return previous
+
+
+def map_root_from_directory(directory: Path) -> Path | None:
+    for candidate in (directory, *directory.parents):
+        if candidate.name.lower() == "map":
+            return candidate
+    return None
+
+
+def collect_map_model_path_index(map_root: Path) -> dict[str, Path]:
+    by_stem: dict[str, Path] = {}
+    for path in map_root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in MODEL_EXTENSIONS:
+            continue
+        stem = path.stem.lower()
+        by_stem[stem] = preferred_model_path(by_stem.get(stem), path)
+    return by_stem
+
+
+def append_referenced_map_paths(directory: Path, paths: list[Path]) -> tuple[list[Path], dict[str, list[dict]], list[Path]]:
+    map_root = map_root_from_directory(directory)
+    if map_root is None:
+        stems = {path.stem.lower() for path in paths}
+        return paths, map_scene_placements(directory, stems), []
+
+    path_index = collect_map_model_path_index(map_root)
+    all_stems = set(path_index)
+    placements_by_asset = map_scene_placements(directory, all_stems)
+    selected_stems = {path.stem.lower() for path in paths}
+    selected_paths = {path.resolve() for path in paths}
+    referenced_paths = []
+    for stem in sorted(placements_by_asset):
+        if stem in selected_stems:
+            continue
+        path = path_index.get(stem)
+        if path is None or path.resolve() in selected_paths:
+            continue
+        referenced_paths.append(path)
+        selected_stems.add(stem)
+        selected_paths.add(path.resolve())
+    if not referenced_paths:
+        return paths, placements_by_asset, []
+    return paths + referenced_paths, placements_by_asset, referenced_paths
 
 
 def is_character_model(path: Path) -> bool:
@@ -3703,7 +3796,7 @@ def apply_map_placements(
 class IMPORT_OT_level5_g4_folder(Operator):
     bl_idname = "import_scene.level5_g4_folder"
     bl_label = "Import Level-5 G4 Model Folder"
-    bl_options = {"REGISTER", "UNDO"}
+    bl_options = {"REGISTER"}
 
     directory: StringProperty(
         name="Folder",
@@ -3781,8 +3874,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
 
         prefs = addon_preferences()
         imported_total = 0
-        stems = {path.stem.lower() for path in paths}
-        placements_by_asset = map_scene_placements(directory, stems)
+        paths, placements_by_asset, referenced_paths = append_referenced_map_paths(directory, paths)
         placed_total = 0
         hidden_total = 0
         window_manager = context.window_manager
@@ -3790,46 +3882,59 @@ class IMPORT_OT_level5_g4_folder(Operator):
         window_manager.progress_begin(0, max(1, total_paths))
         update_import_progress(context, 0, total_paths, "Preparing G4 folder import…")
         try:
-            for index, path in enumerate(paths, start=1):
-                update_import_progress(context, index - 1, total_paths, f"Importing model {index}/{total_paths}: {path.name}")
-                character_model = is_character_model(path)
-                _, imported_names = import_g4_model(
-                    path,
-                    prefs,
-                    self.create_report_text,
-                    apply_styling=character_model,
-                )
-                imported_total += len(imported_names)
-                if not character_model:
-                    hidden_total += auto_hide_map_parts(imported_names)
-                placed_total += apply_map_placements(
-                    path,
-                    imported_names,
-                    placements_by_asset.get(path.stem.lower(), []),
-                )
-                armatures = imported_armatures(imported_names)
-                if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
-                    attached, _ = import_character_parts_for_armature(
-                        path,
-                        armatures[0],
-                        prefs,
-                        False,
-                        self.body_model,
-                        self.shoes_model,
-                        self.accessory_model,
-                        self.gloves_model,
-                        self.armband_model,
-                        self.nameplate_model,
-                        self.create_report_text,
-                        preserve_part_armatures=self.preserve_character_part_armatures,
+            with suspended_global_undo(context):
+                for index, path in enumerate(paths, start=1):
+                    update_import_progress(
+                        context,
+                        index - 1,
+                        total_paths,
+                        f"Importing model {index}/{total_paths}: {path.name}",
+                        redraw=should_redraw_import_progress(index - 1, total_paths),
                     )
-                    imported_total += attached
-                    if self.attach_ball:
-                        ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(path, prefs)
-                        if ball_path is None:
-                            raise RuntimeError("Default ball model b000001 was not found")
-                        imported_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
-                update_import_progress(context, index, total_paths, f"Imported model {index}/{total_paths}: {path.name}")
+                    character_model = is_character_model(path)
+                    _, imported_names = import_g4_model(
+                        path,
+                        prefs,
+                        self.create_report_text,
+                        apply_styling=character_model,
+                    )
+                    imported_total += len(imported_names)
+                    if not character_model:
+                        hidden_total += auto_hide_map_parts(imported_names)
+                    placed_total += apply_map_placements(
+                        path,
+                        imported_names,
+                        placements_by_asset.get(path.stem.lower(), []),
+                    )
+                    armatures = imported_armatures(imported_names)
+                    if self.import_character_parts and armatures and re.fullmatch(r"c\d{6,8}", path.stem, re.IGNORECASE):
+                        attached, _ = import_character_parts_for_armature(
+                            path,
+                            armatures[0],
+                            prefs,
+                            False,
+                            self.body_model,
+                            self.shoes_model,
+                            self.accessory_model,
+                            self.gloves_model,
+                            self.armband_model,
+                            self.nameplate_model,
+                            self.create_report_text,
+                            preserve_part_armatures=self.preserve_character_part_armatures,
+                        )
+                        imported_total += attached
+                        if self.attach_ball:
+                            ball_path = Path(bpy.path.abspath(self.ball_model)) if self.ball_model else find_default_ball_model(path, prefs)
+                            if ball_path is None:
+                                raise RuntimeError("Default ball model b000001 was not found")
+                            imported_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
+                    update_import_progress(
+                        context,
+                        index,
+                        total_paths,
+                        f"Imported model {index}/{total_paths}: {path.name}",
+                        redraw=should_redraw_import_progress(index, total_paths),
+                    )
         except Exception as exc:
             g4_animation_addon.append_event_file_log(
                 f"model folder batch failed: {exc}\n{traceback.format_exc()}"
@@ -3841,13 +3946,15 @@ class IMPORT_OT_level5_g4_folder(Operator):
             context.workspace.status_text_set(None)
 
         message = f"Imported {len(paths)} G4 models from folder: {imported_total} objects"
+        if referenced_paths:
+            message += f"; included {len(referenced_paths)} referenced map assets"
         if placements_by_asset:
             message += f"; reconstructed {placed_total} map placements"
         if hidden_total:
             message += f"; hidden {hidden_total} auxiliary map objects"
         self.report({"INFO"}, message)
         g4_animation_addon.append_event_file_log(
-            f"model folder batch complete: models={len(paths)}; objects={imported_total}"
+            f"model folder batch complete: models={len(paths)}; referenced={len(referenced_paths)}; objects={imported_total}"
         )
         return {"FINISHED"}
 
