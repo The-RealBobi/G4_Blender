@@ -3115,22 +3115,75 @@ def texture_variant_score(path: Path, model_stem: str) -> tuple[int, int, str]:
     return usage_score, variant_score, locality, str(path)
 
 
-def texture_hashes_by_name(texture_paths: list[Path]) -> dict[str, Path]:
-    by_hash: dict[str, Path] = {}
+def texture_candidates_by_hash(texture_paths: list[Path]) -> dict[str, list[Path]]:
+    by_hash: dict[str, list[Path]] = {}
     for texture in texture_paths:
         try:
             value = crc32b(texture.stem.encode("ascii"))
         except UnicodeEncodeError:
             continue
-        by_hash.setdefault(f"{value:08x}", texture)
+        bucket = by_hash.setdefault(f"{value:08x}", [])
+        if texture not in bucket:
+            bucket.append(texture)
     return by_hash
 
 
+def choose_texture_hash_candidate(
+    candidates: list[Path], model_stem: str = "", material_name: str = ""
+) -> Path | None:
+    if not candidates:
+        return None
+    if material_name:
+        semantic = [
+            texture
+            for texture in candidates
+            if texture_matches_material_semantics(texture, material_name, model_stem)
+        ]
+        if semantic:
+            candidates = semantic
+    return sorted(candidates, key=lambda item: texture_variant_score(item, model_stem))[0]
+
+
+def texture_hashes_by_name(texture_paths: list[Path]) -> dict[str, Path]:
+    return {
+        key: chosen
+        for key, candidates in texture_candidates_by_hash(texture_paths).items()
+        if (chosen := choose_texture_hash_candidate(candidates)) is not None
+    }
+
+
+def texture_hash_for_slot(md_info: dict, texture_index: int) -> str | None:
+    for row in md_info.get("texture_hashes", []):
+        if row.get("index") == texture_index:
+            return row.get("hash")
+    return None
+
+
+def resolve_texture_slot_by_g4md_hash(
+    md_info: dict,
+    texture_paths: list[Path],
+    texture_index: int,
+    model_stem: str = "",
+    material_name: str = "",
+) -> Path | None:
+    texture_hash = texture_hash_for_slot(md_info, texture_index)
+    if texture_hash is None:
+        return None
+    return choose_texture_hash_candidate(
+        texture_candidates_by_hash(texture_paths).get(texture_hash, []),
+        model_stem,
+        material_name,
+    )
+
+
 def texture_slots_by_g4md_hash(md_info: dict, texture_paths: list[Path]) -> dict[int, Path]:
-    by_hash = texture_hashes_by_name(texture_paths)
     slots: dict[int, Path] = {}
     for row in md_info.get("texture_hashes", []):
-        texture = by_hash.get(row.get("hash"))
+        texture = resolve_texture_slot_by_g4md_hash(
+            md_info,
+            texture_paths,
+            row.get("index", -1),
+        )
         if texture is not None:
             slots[row["index"]] = texture
     return slots
@@ -3154,7 +3207,13 @@ def choose_texture_from_material_record(
     slots = texture_slots_by_g4md_hash(md_info, texture_paths)
     candidates: list[Path] = []
     for ref in material.get("texture_refs", []):
-        texture = slots.get(ref.get("texture_index"))
+        texture = resolve_texture_slot_by_g4md_hash(
+            md_info,
+            texture_paths,
+            ref.get("texture_index", -1),
+            model_stem,
+            material_name,
+        )
         if texture is None:
             continue
         usage = texture_usage_from_name(texture.stem)
@@ -3172,9 +3231,18 @@ def enriched_material_records(md_info: dict, texture_paths: list[Path]) -> list[
     names = md_info.get("material_names", [])
     enriched = []
     for material in md_info.get("material_records", []):
+        material_name = names[material["index"]] if material["index"] < len(names) else ""
         refs = []
         for ref in material.get("texture_refs", []):
-            texture = by_slot.get(ref.get("texture_index"))
+            texture = resolve_texture_slot_by_g4md_hash(
+                md_info,
+                texture_paths,
+                ref.get("texture_index", -1),
+                "",
+                material_name,
+            )
+            if texture is None:
+                texture = by_slot.get(ref.get("texture_index"))
             refs.append(
                 {
                     **ref,
@@ -3190,7 +3258,7 @@ def enriched_material_records(md_info: dict, texture_paths: list[Path]) -> list[
         enriched.append(
             {
                 **material,
-                "name": names[material["index"]] if material["index"] < len(names) else None,
+                "name": material_name or None,
                 "texture_refs": refs,
                 "texture_hashes_resolved": hash_rows,
             }
