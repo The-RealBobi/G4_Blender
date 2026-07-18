@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 5),
+    "version": (0, 16, 6),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1203,6 +1203,8 @@ def map_surface_kind(material_name: str, diffuse_path: Path | None = None) -> st
     text = material_name.lower()
     if diffuse_path is not None:
         text += f"_{diffuse_path.stem.lower()}"
+    if "grass" in text and any(token in text for token in ("ground", "soil", "road", "sand")):
+        return "terrain_mix"
     if "grass" in text:
         return "grass"
     if "water" in text:
@@ -1231,6 +1233,10 @@ def configure_victory_road_map_surface(material, principled, diffuse_path: Path,
             alpha.default_value = 0.62
             set_transparent_material(material)
         material["g4_victory_road_water"] = True
+    elif kind == "terrain_mix":
+        if roughness is not None:
+            roughness.default_value = 0.78
+        material["g4_victory_road_terrain_mix"] = True
     if debug is not None:
         debug.append(f"[map-surface] {material.name}: configured {kind} surface")
 

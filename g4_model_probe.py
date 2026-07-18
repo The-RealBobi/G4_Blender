@@ -2167,6 +2167,12 @@ def find_texture_containers_for_model(path: Path) -> list[Path]:
             local_dir = RAW_DATA_ROOT / "dx11" / Path(*parts[1:-1])
             if local_dir.exists():
                 candidates.extend(sorted(local_dir.glob("*.g4tx")))
+            base_stem = base_map_model_stem(path.stem)
+            if base_stem != path.stem.lower():
+                for platform in ("dx11", "nx"):
+                    candidates.append(
+                        RAW_DATA_ROOT / platform / Path(*parts[1:-2]) / base_stem / f"{base_stem}.g4tx"
+                    )
             world = parts[3]
             candidates.append(RAW_DATA_ROOT / "dx11" / "map" / "cubemap" / f"{world}_cubemap.g4tx")
 
@@ -2825,6 +2831,12 @@ def compact_name_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", name.lower())
 
 
+def base_map_model_stem(stem: str) -> str:
+    lowered = stem.lower()
+    match = re.match(r"(w\d+h\d{3})(?:[a-z]+)$", lowered)
+    return match.group(1) if match else lowered
+
+
 def semantic_material_score(mesh_name: str, material_name: str, model_stem: str) -> int:
     if not model_stem or not model_stem.startswith("w"):
         return 0
@@ -3001,7 +3013,11 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
     base = clean_material_base(material_name)
     base = base.rstrip("_")
     keys = [base]
-    world_match = re.match(r"(w\d+)", model_stem.lower())
+    if "_w" in base and "_re" in base:
+        keys.extend(re.split(r"_(?=w\d+g_)", base))
+    model_lower = model_stem.lower()
+    base_model = base_map_model_stem(model_lower)
+    world_match = re.match(r"(w\d+)", model_lower)
 
     cb_match = re.match(r"(.+?_cb)(?:_(?:p|l))?(?:_\d+)?$", base)
     if cb_match:
@@ -3028,8 +3044,10 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
     if world_match:
         world = world_match.group(1)
         tail = base
-        if tail.startswith(f"{model_stem.lower()}_"):
-            tail = tail[len(model_stem) + 1 :]
+        for prefix in (model_lower, base_model):
+            if tail.startswith(f"{prefix}_"):
+                tail = tail[len(prefix) + 1 :]
+                break
         shared = re.match(r"(concrete|tile|grass|water|stairs?)(\d+[a-z]?)", tail)
         if shared:
             prefix, number = shared.groups()
