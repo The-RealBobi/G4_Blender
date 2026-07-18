@@ -277,6 +277,10 @@ The character toon shader and viewport/render outlines are never added to map
 assets.
 
 Single-model imports use the same ID-based material decision as folder imports.
+When a model has a sibling OBJBIN, the importer reads the original binary
+directly and uses its declared G4TX texture containers before falling back to
+name/material heuristics. It does not require exported `.objbin.json`,
+`.objbin.cfg` or `.objbin.xml` sidecars.
 Native half-float DDS cubemaps are detected from their DDS flags, converted to
 equirectangular Radiance HDR and used as a restrained Blender world environment
 when the map has a matching `<world>_cubemap.g4tx` container.

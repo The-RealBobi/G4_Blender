@@ -15,6 +15,10 @@ from xml.sax.saxutils import escape
 
 
 ASCII_RE = re.compile(rb"[A-Za-z0-9_]{3,}(?:_LOD[0-9])?M?")
+OBJBIN_G4TX_RE = re.compile(
+    rb"(?:#/?|[A-Za-z]:[\\/]|/)?[A-Za-z0-9_./\\-]+\.g4tx",
+    re.IGNORECASE,
+)
 RAW_DATA_ROOT = Path(os.environ.get("LEVEL5_G4_RAW_ROOT", ".")).expanduser()
 
 
@@ -2105,8 +2109,80 @@ def find_texture_for_model(path: Path) -> Path | None:
     return None
 
 
+def objbin_companion_for_model(path: Path) -> Path | None:
+    candidates: list[Path] = []
+    if path.suffix.lower() == ".objbin":
+        candidates.append(path)
+    else:
+        candidates.append(path.with_suffix(".objbin"))
+        candidates.append(path.parent / f"{path.stem}.objbin")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def normalize_declared_g4tx_path(raw_path: str) -> list[Path]:
+    normalized = raw_path.replace("\\", "/").strip().strip("\x00")
+    normalized = normalized.lstrip("#").lstrip("/")
+    if not normalized:
+        return []
+
+    relative = Path(normalized)
+    parts = relative.parts
+    candidates: list[Path] = []
+
+    if parts and parts[0].lower() in {"common", "dx11", "nx"}:
+        candidates.append(RAW_DATA_ROOT / relative)
+        if parts[0].lower() == "common" and len(parts) > 1:
+            without_root = Path(*parts[1:])
+            for platform in ("dx11", "nx"):
+                candidates.append(RAW_DATA_ROOT / platform / without_root)
+        return candidates
+
+    if parts and parts[0].lower() == "data" and len(parts) > 2:
+        trimmed = Path(*parts[1:])
+        candidates.append(RAW_DATA_ROOT / trimmed)
+        return candidates
+
+    for platform in ("dx11", "nx"):
+        candidates.append(RAW_DATA_ROOT / platform / relative)
+    candidates.append(RAW_DATA_ROOT / "common" / relative)
+    return candidates
+
+
+def declared_g4tx_paths_from_objbin(path: Path) -> list[Path]:
+    objbin = objbin_companion_for_model(path)
+    if objbin is None:
+        return []
+
+    try:
+        data = objbin.read_bytes()
+    except OSError:
+        return []
+
+    candidates: list[Path] = []
+    for match in OBJBIN_G4TX_RE.finditer(data):
+        raw_path = match.group(0).decode("ascii", errors="ignore")
+        candidates.extend(normalize_declared_g4tx_path(raw_path))
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        unique.append(candidate)
+    return unique
+
+
 def find_effect_texture_containers(path: Path) -> list[Path]:
-    """Resolve effect G4TX containers, with optional OBJBIN enrichment."""
+    """Resolve effect G4TX containers, with native OBJBIN enrichment."""
     try:
         relative = path.relative_to(RAW_DATA_ROOT)
     except ValueError:
@@ -2122,23 +2198,7 @@ def find_effect_texture_containers(path: Path) -> list[Path]:
             RAW_DATA_ROOT / platform / "effect" / "battle" / "common" / "effCmnTex" / "effCmnTex.g4tx"
         )
 
-    cfg_path = path.with_suffix(".objbin.cfg")
-    declared: list[str] = []
-    if cfg_path.is_file():
-        try:
-            source = cfg_path.read_text(encoding="utf-8-sig", errors="replace")
-            declared = re.findall(r'SETUP_PARAM\s+"Texture",\s+"([^"]+\.g4tx)"', source, re.IGNORECASE)
-        except OSError:
-            pass
-    for raw_path in declared:
-        normalized = raw_path.replace("\\", "/").lstrip("#/")
-        relative_texture = Path(normalized)
-        candidates.append(RAW_DATA_ROOT / relative_texture)
-        parts = relative_texture.parts
-        if parts and parts[0].lower() == "common":
-            relative_texture = Path(*parts[1:])
-        for platform in ("dx11", "nx"):
-            candidates.append(RAW_DATA_ROOT / platform / relative_texture)
+    candidates.extend(declared_g4tx_paths_from_objbin(path))
     seen = set()
     return [
         candidate for candidate in candidates
@@ -2148,6 +2208,7 @@ def find_effect_texture_containers(path: Path) -> list[Path]:
 
 def find_texture_containers_for_model(path: Path) -> list[Path]:
     candidates: list[Path] = []
+    candidates.extend(declared_g4tx_paths_from_objbin(path))
     candidates.extend(find_effect_texture_containers(path))
     primary = find_texture_for_model(path)
     if primary is not None:
