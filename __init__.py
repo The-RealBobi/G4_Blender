@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 3),
+    "version": (0, 16, 4),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1132,6 +1132,12 @@ def set_transparent_material(material) -> None:
     material.show_transparent_back = True
 
 
+def set_alpha_clip_material(material, threshold: float = 0.35) -> None:
+    material.blend_method = "CLIP"
+    material.alpha_threshold = threshold
+    material.show_transparent_back = False
+
+
 def base_color_texture_node(material, principled):
     base_input = node_input(principled, "Base Color")
     if base_input is None:
@@ -1191,6 +1197,42 @@ def name_implies_alpha(material_name: str, diffuse_path: Path) -> bool:
         or "_of" in text
         or "alpha" in text
     )
+
+
+def map_surface_kind(material_name: str, diffuse_path: Path | None = None) -> str | None:
+    text = material_name.lower()
+    if diffuse_path is not None:
+        text += f"_{diffuse_path.stem.lower()}"
+    if "grass" in text:
+        return "grass"
+    if "water" in text:
+        return "water"
+    return None
+
+
+def configure_victory_road_map_surface(material, principled, diffuse_path: Path, variants: dict, debug: list[str] | None = None) -> None:
+    kind = map_surface_kind(material.name, diffuse_path)
+    if kind is None:
+        return
+    material["g4_map_shader"] = kind
+    roughness = node_input(principled, "Roughness")
+    alpha = node_input(principled, "Alpha")
+    if kind == "grass":
+        if roughness is not None:
+            roughness.default_value = 0.82
+        if texture_role(diffuse_path) == "transparent_base" and alpha is not None:
+            connect_base_texture_alpha(material, principled)
+            set_alpha_clip_material(material)
+        material["g4_victory_road_grass"] = True
+    elif kind == "water":
+        if roughness is not None:
+            roughness.default_value = 0.18
+        if alpha is not None:
+            alpha.default_value = 0.62
+            set_transparent_material(material)
+        material["g4_victory_road_water"] = True
+    if debug is not None:
+        debug.append(f"[map-surface] {material.name}: configured {kind} surface")
 
 
 def build_texture_index(paths: list[Path]) -> dict[str, dict[str, Path]]:
@@ -1976,6 +2018,8 @@ def apply_material_texture_variants(summary: dict, debug: list[str] | None = Non
                     f"image={image is not None} input={normal_input is not None}"
                 )
 
+        configure_victory_road_map_surface(material, principled, diffuse_path, variants, debug)
+
 
 def apply_auxiliary_textures_to_imported_materials(
     imported_names: set[str],
@@ -2051,6 +2095,7 @@ def apply_auxiliary_textures_to_imported_materials(
             connect_normal_map(material, principled, normal_path, debug)
         elif debug is not None:
             debug.append(f"[post-pass] {material.name}: no normal candidate")
+        configure_victory_road_map_surface(material, principled, base_path, variants, debug)
         if apply_styling:
             apply_level5_toon_shader(material, base_path, variants, debug)
 
@@ -3757,10 +3802,13 @@ def auto_hide_map_parts(imported_names: set[str]) -> int:
     hidden = 0
     for object_name in imported_names:
         obj = bpy.data.objects.get(object_name)
-        if obj is None or not any(
-            token in obj.name.lower()
-            for token in ("sdw", "shadow", "culling", "lv1", "lv2")
-        ):
+        if obj is None:
+            continue
+        lowered = obj.name.lower()
+        auxiliary = any(token in lowered for token in ("sdw", "shadow", "culling"))
+        if not auxiliary and re.search(r"(?:^|_)lv[12](?:_|$)", lowered):
+            auxiliary = any(token in lowered for token in ("lod", "range", "model_sdw", "shadow", "culling", "sdw"))
+        if not auxiliary:
             continue
         obj.hide_viewport = True
         obj.hide_render = True

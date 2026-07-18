@@ -264,8 +264,11 @@ named like `ao042_00_003` or `tr051_009`. The importer matches those nodes to
 their G4PKM assets, including referenced fillers from sibling `common/map`
 folders, composes parent transforms, converts the G4 Y-up matrices to Blender
 Z-up space and creates linked object-data instances where an asset is reused.
-Map objects containing `sdw`, `shadow`, `culling`, `lv1` or `lv2` in their
-names are hidden in both the viewport and render as soon as they are imported.
+Map objects containing `sdw`, `shadow` or `culling` in their names are hidden
+in both the viewport and render as soon as they are imported. `lv1`/`lv2`
+suffixes are only hidden when they are part of an auxiliary shadow/culling
+object, because some Victory Road buildings use those suffixes for visible
+render layers.
 
 Models are classified from their source hierarchy rather than their filename:
 an ancestor directory named `chr` selects character styling, while `map`

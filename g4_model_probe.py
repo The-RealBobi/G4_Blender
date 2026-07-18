@@ -3001,6 +3001,7 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
     base = clean_material_base(material_name)
     base = base.rstrip("_")
     keys = [base]
+    world_match = re.match(r"(w\d+)", model_stem.lower())
 
     cb_match = re.match(r"(.+?_cb)(?:_(?:p|l))?(?:_\d+)?$", base)
     if cb_match:
@@ -3024,6 +3025,22 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
     if base.startswith(f"{model_stem}_stair"):
         keys.append(base.replace(f"{model_stem}_stair", "w10g_stairs") + "_re")
 
+    if world_match:
+        world = world_match.group(1)
+        tail = base
+        if tail.startswith(f"{model_stem.lower()}_"):
+            tail = tail[len(model_stem) + 1 :]
+        shared = re.match(r"(concrete|tile|grass|water|stairs?)(\d+[a-z]?)", tail)
+        if shared:
+            prefix, number = shared.groups()
+            shared_prefix = "stairs" if prefix.startswith("stair") else prefix
+            keys.append(f"{world}g_{shared_prefix}{number}_re")
+        if "grass" in tail:
+            keys.append(f"{world}g_grass01_re")
+        if "water" in tail:
+            keys.append(f"{world}g_water_re")
+            keys.append(f"{world}g_water_base_re")
+
     if material_name.startswith("material_"):
         mesh = mesh_name.rstrip("_")
         window_match = re.match(r"window(\d{2})[A-Za-z]?_", mesh)
@@ -3046,6 +3063,34 @@ def material_texture_keys(material_name: str, model_stem: str, mesh_name: str = 
             seen.add(normalized)
             unique.append(normalized)
     return unique
+
+
+def texture_matches_material_semantics(texture: Path, material_name: str, model_stem: str) -> bool:
+    texture_keys = set(texture_keys_for_name(texture.stem))
+    wanted_keys = set(material_texture_keys(material_name, model_stem))
+    if texture_keys & wanted_keys:
+        return True
+
+    material_compact = compact_name_key(clean_material_base(material_name))
+    texture_compact = compact_name_key(strip_texture_variant(texture.stem))
+    semantic_tokens = (
+        "concrete",
+        "tile",
+        "grass",
+        "water",
+        "metal",
+        "clock",
+        "window",
+        "fence",
+        "stairs",
+        "stair",
+        "roof",
+    )
+    material_tokens = {token for token in semantic_tokens if token in material_compact}
+    texture_tokens = {token for token in semantic_tokens if token in texture_compact}
+    if not material_tokens:
+        return True
+    return bool(material_tokens & texture_tokens)
 
 
 def texture_variant_score(path: Path, model_stem: str) -> tuple[int, int, str]:
@@ -3113,7 +3158,7 @@ def choose_texture_from_material_record(
         if texture is None:
             continue
         usage = texture_usage_from_name(texture.stem)
-        if usage in {"base", "transparent_base"}:
+        if usage in {"base", "transparent_base"} and texture_matches_material_semantics(texture, material_name, model_stem):
             candidates.append(texture)
     if candidates:
         return sorted(candidates, key=lambda item: texture_variant_score(item, model_stem))[0]
@@ -4542,12 +4587,9 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         mesh_name = mesh_name_for_export(md_info, record, skeleton_info)
         material_name = material_name_for_mesh(md_info, mesh_name, record["index"], record, path.stem)
         if material_name not in used_materials:
-            texture = (
-                choose_texture_from_material_record(md_info, material_name, texture_paths, path.stem)
-                if prefer_material_refs else None
-            )
-            if texture is None:
-                texture = choose_texture(material_name, texture_paths, path.stem, mesh_name)
+            texture = choose_texture(material_name, texture_paths, path.stem, mesh_name)
+            if texture is None and prefer_material_refs:
+                texture = choose_texture_from_material_record(md_info, material_name, texture_paths, path.stem)
             used_materials[material_name] = texture
 
         vertex_offset = record["vertex_offset"]
