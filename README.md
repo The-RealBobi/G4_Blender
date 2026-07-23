@@ -383,17 +383,26 @@ fallback rather than pretending those binaries can be translated losslessly.
 
 ## Port Texture Replacement
 
-After choosing the original G4MD/G4PKM, the export settings list every entry
-inside its G4TX. Each row has an optional file path selector; an empty path
-preserves that entry byte-for-byte. Special line, occlusion and specular maps
-keep their blank/default generation behavior unless an explicit replacement is
-selected.
+The texture workflow is intentionally split into three steps:
 
-Automatic atlas generation groups all source materials assigned to one target
-record and writes per-object UV transforms. Repeating source UVs are wrapped
-inside their original image before it is moved into an atlas cell, preventing
-neck, ear or trim islands with coordinates outside 0..1 from leaking into a
-neighbouring cell.
+1. Assign each Blender mesh to an original G4MD record.
+2. Open **Prepare and review atlas** and press **Prepare Atlas**. The table
+   shows the destination G4TX texture, its source state and whether the atlas
+   is ready, stale or will remain native. The default source is the first
+   diffuse image from a material actually used by the mesh; **Atlas Source**
+   beside the mesh assignment overrides that choice when needed.
+3. Export. An atlas may also be refreshed automatically with **Regenerate
+   Atlas On Export**.
+
+Empty or stale atlas entries never become blank replacements: the exporter
+logs an actionable warning and preserves the corresponding native G4TX payload.
+Special `line`, `oc`, `sp` and `spm` maps are preserved by default and are
+replaced only when **Replace Special Maps** is enabled.
+
+Atlas preparation writes per-object UV transforms. UV domains outside 0..1 are
+projected into their own atlas cell using the Blender image extension mode
+(`REPEAT`, `EXTEND` or `CLIP`), preventing repeated, neck, ear or trim islands
+from leaking into a neighbouring cell.
 
 ## Requirements
 

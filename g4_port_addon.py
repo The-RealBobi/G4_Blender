@@ -1,4 +1,5 @@
 import json
+import hashlib
 import math
 import os
 import shutil
@@ -167,6 +168,22 @@ def material_image_path(material) -> str:
         if node.type == "TEX_IMAGE" and node.image is not None and node.image.filepath:
             return bpy.path.abspath(node.image.filepath)
     return ""
+
+
+def first_used_material_image(obj: bpy.types.Object) -> str:
+    """Return the first usable diffuse image from a material actually used by the mesh."""
+    if obj is None or obj.type != "MESH":
+        return ""
+    used_indices = []
+    for polygon in obj.data.polygons:
+        if polygon.material_index not in used_indices:
+            used_indices.append(polygon.material_index)
+    for index in used_indices:
+        if 0 <= index < len(obj.data.materials):
+            path = material_image_path(obj.data.materials[index])
+            if path:
+                return path
+    return material_image_path(obj.active_material)
 
 
 def active_material_image_path(context) -> str:
@@ -462,6 +479,12 @@ class G4PortPreferences(AddonPreferences):
 
 class G4PortObjectSettings(PropertyGroup):
     target_record: EnumProperty(name="Target Mesh", items=target_mesh_items)
+    source_texture: StringProperty(
+        name="Atlas Source",
+        subtype="FILE_PATH",
+        default="",
+        description="Optional image override. Empty uses the first diffuse image from a material used by this mesh",
+    )
     uv_scale_u: FloatProperty(name="U Scale", default=1.0, min=0.0001, soft_max=1.0)
     uv_scale_v: FloatProperty(name="V Scale", default=1.0, min=0.0001, soft_max=1.0)
     uv_offset_u: FloatProperty(name="U Offset", default=0.0, soft_min=0.0, soft_max=1.0)
@@ -481,6 +504,8 @@ class G4PortTextureReplacement(PropertyGroup):
         default="",
         description="Leave empty to preserve this G4TX texture",
     )
+    atlas_signature: StringProperty(default="", options={"HIDDEN"})
+    atlas_summary: StringProperty(default="", options={"HIDDEN"})
 
 
 class G4PortRecord(PropertyGroup):
@@ -585,9 +610,9 @@ class G4PortSceneSettings(PropertyGroup):
     texture_source_dir: StringProperty(name="Texture Source Folder", subtype="DIR_PATH", default="")
     texture_entries: CollectionProperty(type=G4PortTextureReplacement)
     generate_png_set_on_export: BoolProperty(
-        name="Generate PNG Set On Export",
+        name="Regenerate Atlas On Export",
         default=False,
-        description="Regenerate custom texture spritesheets automatically before exporting a custom G4TX",
+        description="Regenerate only missing or outdated prepared atlases before exporting a custom G4TX",
     )
     use_source_uv_transforms: BoolProperty(
         name="Use Object UV Tiles",
@@ -601,7 +626,7 @@ class G4PortSceneSettings(PropertyGroup):
     )
     replace_special_textures: BoolProperty(
         name="Replace Special Maps",
-        default=True,
+        default=False,
         description="Allow custom replacements for line/oc/sp/spm maps instead of keeping bundled G4TX payloads",
     )
     selected_only: BoolProperty(name="Selected Meshes Only", default=False)
@@ -645,8 +670,11 @@ class G4PortSceneSettings(PropertyGroup):
 
     def texture_map(self) -> dict:
         result = {}
+        atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
         for item in self.texture_entries:
             if not item.texture_name or not item.replacement_path:
+                continue
+            if item.atlas_signature and atlas_states.get(item.texture_name) != "ready":
                 continue
             if self.replace_special_textures or not is_special_texture(item.texture_name):
                 result[item.texture_name] = bpy.path.basename(item.replacement_path)
@@ -656,9 +684,6 @@ class G4PortSceneSettings(PropertyGroup):
                 key = key.strip()
                 if self.replace_special_textures or not is_special_texture(key):
                     result[key] = value.strip()
-        for record in self.records:
-            if record.texture_key and record.texture_file:
-                result[record.texture_key] = bpy.path.basename(record.texture_file)
         return result
 
     def to_config(self) -> dict:
@@ -1242,6 +1267,51 @@ def object_uv_bounds(obj: bpy.types.Object) -> tuple[float, float, float, float]
     return min_u, max_u, min_v, max_v
 
 
+def uv_requires_projection(obj: bpy.types.Object) -> bool:
+    bounds = object_uv_bounds(obj)
+    return bool(bounds and (bounds[0] < 0.0 or bounds[1] > 1.0 or bounds[2] < 0.0 or bounds[3] > 1.0))
+
+
+def object_image_extension(obj: bpy.types.Object) -> str:
+    for polygon in obj.data.polygons:
+        if not 0 <= polygon.material_index < len(obj.data.materials):
+            continue
+        material = obj.data.materials[polygon.material_index]
+        if material is None or material.node_tree is None:
+            continue
+        for node in material.node_tree.nodes:
+            if node.type == "TEX_IMAGE" and node.image is not None and node.image.filepath:
+                return node.extension
+    return "REPEAT"
+
+
+def projected_source_image(
+    source: tuple[int, int, array], bounds: tuple[float, float, float, float], extension: str
+) -> tuple[int, int, array]:
+    """Bake the source image over a mesh's UV domain so repeated UVs survive atlas fitting."""
+    width, height, pixels = source
+    min_u, max_u, min_v, max_v = bounds
+    out = array("f", [0.0]) * (width * height * 4)
+    for y in range(height):
+        v = min_v + (max_v - min_v) * ((y + 0.5) / height)
+        for x in range(width):
+            u = min_u + (max_u - min_u) * ((x + 0.5) / width)
+            if extension == "CLIP" and not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+                continue
+            if extension == "REPEAT":
+                u -= math.floor(u)
+                v -= math.floor(v)
+            else:
+                u = max(0.0, min(1.0, u))
+                v = max(0.0, min(1.0, v))
+            src_x = min(width - 1, int(u * (width - 1)))
+            src_y = min(height - 1, int(v * (height - 1)))
+            src = (src_y * width + src_x) * 4
+            dst = (y * width + x) * 4
+            out[dst : dst + 4] = pixels[src : src + 4]
+    return width, height, out
+
+
 def set_object_uv_fit(obj: bpy.types.Object, origin_u: float, origin_v: float, width: float, height: float) -> None:
     bounds = object_uv_bounds(obj)
     uv = obj.level5_g4_port
@@ -1312,8 +1382,69 @@ def records_grouped_by_texture(props: G4PortSceneSettings) -> dict[str, list[G4P
     return records_by_texture
 
 
+def source_path_for_object(obj: bpy.types.Object) -> str:
+    override = bpy.path.abspath(obj.level5_g4_port.source_texture)
+    return override if override and Path(override).is_file() else first_used_material_image(obj)
+
+
+def texture_entry(props: G4PortSceneSettings, texture_name: str) -> G4PortTextureReplacement | None:
+    return next((entry for entry in props.texture_entries if entry.texture_name == texture_name), None)
+
+
+def atlas_signature(texture_name: str, records: list[G4PortRecord]) -> str:
+    items = []
+    for record, obj in texture_items_for_records(records):
+        bounds = object_uv_bounds(obj)
+        source = source_path_for_object(obj)
+        source_path = Path(source) if source else Path()
+        items.append({
+            "record": record.output_name,
+            "object": obj.name,
+            "source": str(source_path),
+            "source_mtime": source_path.stat().st_mtime_ns if source_path.is_file() else 0,
+            "uv_bounds": [round(value, 6) for value in bounds] if bounds else [],
+        })
+    payload = json.dumps({"texture": texture_name, "items": items}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
+    rows = []
+    grouped = records_grouped_by_texture(props)
+    names = list(grouped)
+    names.extend(entry.texture_name for entry in props.texture_entries if entry.texture_name not in grouped)
+    for texture_name in names:
+        if is_special_texture(texture_name):
+            continue
+        records = grouped.get(texture_name, [])
+        entry = texture_entry(props, texture_name)
+        signature = atlas_signature(texture_name, records)
+        objects = [obj for _, obj in texture_items_for_records(records)]
+        missing = [obj.name for obj in objects if not source_path_for_object(obj)]
+        repeated = [
+            obj.name for obj in objects
+            if (bounds := object_uv_bounds(obj)) and (bounds[0] < 0.0 or bounds[1] > 1.0 or bounds[2] < 0.0 or bounds[3] > 1.0)
+        ]
+        prepared = entry and entry.replacement_path and Path(bpy.path.abspath(entry.replacement_path)).is_file()
+        fresh = prepared and entry.atlas_signature == signature
+        if missing:
+            state, message = "warning", f"Missing source: {', '.join(missing)}"
+        elif not objects:
+            state, message = "native", "No assigned meshes; native G4TX entry will be preserved"
+        elif fresh:
+            state, message = "ready", entry.atlas_summary or "Prepared atlas"
+        elif prepared and not entry.atlas_signature:
+            state, message = "manual", "Manual replacement"
+        elif prepared:
+            state, message = "stale", "Atlas needs regeneration"
+        else:
+            state, message = "native", "Native G4TX entry will be preserved"
+        rows.append({"name": texture_name, "records": records, "signature": signature, "state": state, "message": message, "repeated": repeated})
+    return rows
+
+
 def object_texture_path(record: G4PortRecord, obj: bpy.types.Object) -> str:
-    return material_image_path(obj.active_material) or bpy.path.abspath(record.texture_file or "")
+    return source_path_for_object(obj)
 
 
 def sibling_texture_path(path: str, suffix: str) -> str:
@@ -1346,7 +1477,7 @@ def object_special_texture_path(
         if absolute.is_file():
             return str(absolute)
     suffix = special_texture_suffix(texture_name)
-    for base in (material_image_path(obj.active_material), bpy.path.abspath(record.texture_file or "")):
+    for base in (source_path_for_object(obj), bpy.path.abspath(record.texture_file or "")):
         if not base:
             continue
         source = Path(bpy.path.abspath(base))
@@ -1370,7 +1501,7 @@ def build_texture_spritesheet(
     source_path_for_item=None,
     empty_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
     draw_missing_guides: bool = True,
-    assign_record_texture_file: bool = True,
+    assign_record_texture_file: bool = False,
     log_path: Path | None = None,
     update_uv_transforms: bool = True,
 ) -> bool:
@@ -1393,6 +1524,9 @@ def build_texture_spritesheet(
         cache_key = str(Path(bpy.path.abspath(source_path)).resolve()) if source_path else ""
         if cache_key and cache_key in source_cache:
             source = source_cache[cache_key]
+            if source is not None and uv_requires_projection(obj):
+                source = projected_source_image(source, object_uv_bounds(obj), object_image_extension(obj))
+                cache_key = f"{cache_key}|projection:{obj.name}"
             elapsed = time.perf_counter() - started
             port_log(log_path, f"{entry['name']}: [{index}/{len(items)}] reused cached image ({elapsed:.2f}s)")
             sources.append((record, obj, source, cache_key))
@@ -1400,6 +1534,9 @@ def build_texture_spritesheet(
         source = load_image_pixels(source_path)
         if cache_key and source is not None:
             source_cache[cache_key] = source
+        if source is not None and uv_requires_projection(obj):
+            source = projected_source_image(source, object_uv_bounds(obj), object_image_extension(obj))
+            cache_key = f"{cache_key}|projection:{obj.name}"
         elapsed = time.perf_counter() - started
         if source is None:
             port_log(log_path, f"{entry['name']}: [{index}/{len(items)}] no source image ({elapsed:.2f}s)")
@@ -1452,7 +1589,7 @@ def build_texture_spritesheet(
             rect_v = cell_height / height
             for record, obj in zip(records_in_group, objects):
                 if update_uv_transforms:
-                    set_object_uv_tile(obj, origin_u, origin_v, rect_u, rect_v)
+                    set_object_uv_fit(obj, origin_u, origin_v, rect_u, rect_v)
                 if draw_missing_guides:
                     port_log(log_path, f"{entry['name']}: drawing UV guide for {obj.name} ({len(obj.data.polygons)} polygon(s))")
                     started = time.perf_counter()
@@ -1470,14 +1607,11 @@ def build_texture_spritesheet(
         )
         if update_uv_transforms:
             for obj in objects:
-                set_object_uv_tile(obj, draw_x / width, draw_y / height, draw_width / width, draw_height / height)
+                set_object_uv_fit(obj, draw_x / width, draw_y / height, draw_width / width, draw_height / height)
     port_log(log_path, f"{entry['name']}: saving {path}")
     started = time.perf_counter()
     save_png(path, width, height, pixels)
     port_log(log_path, f"{entry['name']}: saved ({time.perf_counter() - started:.2f}s)")
-    if assign_record_texture_file:
-        for record in records:
-            record.texture_file = str(path)
     props.use_source_uv_transforms = True
     return True
 
@@ -1518,6 +1652,9 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
         path = output_dir / f"{name}.png"
         port_log(log_path, f"[{index}/{len(entries)}] Processing {name} ({entry['width']}x{entry['height']})")
         if is_special_texture(name):
+            if not props.replace_special_textures:
+                port_log(log_path, f"{name}: preserving native special map")
+                continue
             default_color = special_texture_default_color(name)
             records = records_by_texture.get(base_texture_name(name), [])
             port_log(log_path, f"{name}: special map, base records={len(records)}, default={default_color}")
@@ -1546,12 +1683,24 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
         else:
             records = records_by_texture.get(name, [])
             port_log(log_path, f"{name}: base map, records={len(records)}")
+            missing_sources = [
+                obj.name for record, obj in texture_items_for_records(records) if not object_texture_path(record, obj)
+            ]
+            if missing_sources:
+                port_log(log_path, f"{name}: missing source image for {', '.join(missing_sources)}; preserving native G4TX entry")
+                continue
             if build_texture_spritesheet(path, entry, records, props, log_path=log_path):
                 replacements.append(f"{name}={path.name}")
+                atlas_entry = texture_entry(props, name)
+                if atlas_entry is not None:
+                    atlas_entry.atlas_signature = atlas_signature(name, records)
+                    atlas_size = load_image_pixels(str(path))
+                    dimensions = f"{atlas_size[0]}x{atlas_size[1]}" if atlas_size is not None else "unknown size"
+                    atlas_entry.atlas_summary = (
+                        f"{len(texture_items_for_records(records))} object(s), {dimensions}, {path.name}"
+                    )
             else:
-                port_log(log_path, f"{name}: writing blank base texture {entry['width']}x{entry['height']}")
-                pixels = image_pixels(entry["width"], entry["height"], (1.0, 1.0, 1.0, 1.0))
-                save_png(path, entry["width"], entry["height"], pixels)
+                port_log(log_path, f"{name}: no assigned source; preserving native G4TX entry")
     props.texture_source_dir = str(output_dir)
     props.texture_replacements = join_csv(replacements)
     generated = dict(item.split("=", 1) for item in replacements)
@@ -1596,9 +1745,17 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         reset_uv_tiles(props)
 
     if props.texture_mode == "custom":
-        if props.generate_png_set_on_export:
+        atlas_rows = atlas_status_rows(props)
+        refresh_needed = [row for row in atlas_rows if row["state"] in {"native", "stale"}]
+        warnings = [row for row in atlas_rows if row["state"] == "warning"]
+        for row in warnings:
+            port_log(None, f"Texture {row['name']}: {row['message']}; preserving native G4TX entry")
+        if props.generate_png_set_on_export and refresh_needed:
             model_name = Path(props.model_rel).name or "model"
             generate_texture_png_set(context, package_root / "texture_sources" / model_name)
+        elif refresh_needed:
+            names = ", ".join(row["name"] for row in refresh_needed)
+            port_log(None, f"Prepared atlas missing or stale for {names}; preserving native G4TX entries")
 
     prepare_custom_textures(props, dae_path)
 
@@ -1760,18 +1917,18 @@ class LEVEL5_G4PORT_OT_use_active_texture(Operator):
             self.report({"ERROR"}, "The active mesh material has no image texture")
             return {"CANCELLED"}
         record = props.records[props.active_record]
-        record.texture_file = image_path
-        if not record.texture_key:
-            record.texture_key = record.output_name
+        active = context.active_object
+        if active is not None and active.type == "MESH":
+            active.level5_g4_port.source_texture = image_path
         props.use_preset_file = False
-        self.report({"INFO"}, f"Texture replacement set: {record.texture_key} -> {Path(image_path).name}")
+        self.report({"INFO"}, f"Atlas source set for {active.name if active else record.output_name}: {Path(image_path).name}")
         return {"FINISHED"}
 
 
 class LEVEL5_G4PORT_OT_generate_texture_pngs(Operator):
-    bl_idname = "level5_g4_port.generate_texture_pngs"
-    bl_label = "Generate Texture PNG Set"
-    bl_description = "Create PNG files for every original G4TX texture; base textures get UV guides and special maps are blank"
+    bl_idname = "level5_g4_port.prepare_atlas"
+    bl_label = "Prepare Atlas"
+    bl_description = "Build only the assigned base-texture atlases and preserve every other native G4TX entry"
 
     def execute(self, context):
         prefs = addon_preferences()
@@ -1788,7 +1945,7 @@ class LEVEL5_G4PORT_OT_generate_texture_pngs(Operator):
         except Exception as exc:
             self.report({"ERROR"}, f"{exc} (log: {log_path})")
             return {"CANCELLED"}
-        self.report({"INFO"}, f"Generated {count} texture PNG(s) in {output_dir}; log: {log_path}")
+        self.report({"INFO"}, f"Prepared {count} atlas texture(s) in {output_dir}; log: {log_path}")
         return {"FINISHED"}
 
 
@@ -1973,6 +2130,7 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
             row = box.row(align=True)
             row.label(text=obj.name, icon="MESH_DATA")
             row.prop(obj.level5_g4_port, "target_record", text="")
+            row.prop(obj.level5_g4_port, "source_texture", text="")
         row = box.row(align=True)
         row.operator(LEVEL5_G4PORT_OT_assign_selected.bl_idname, icon="RESTRICT_SELECT_OFF")
         row.operator(LEVEL5_G4PORT_OT_guess_assignments.bl_idname, icon="VIEWZOOM")
@@ -2055,8 +2213,7 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
             box.prop(record, "secondary_weight_scale")
             box.prop(record, "weight_anchor_joint")
             box.prop(record, "texture_key")
-            box.prop(record, "texture_file")
-            box.operator(LEVEL5_G4PORT_OT_use_active_texture.bl_idname, icon="TEXTURE")
+            box.operator(LEVEL5_G4PORT_OT_use_active_texture.bl_idname, text="Use Active Image as Atlas Source", icon="TEXTURE")
             box.prop(record, "fallback_degenerate")
             box.prop(record, "force_layout_material")
             if record.force_layout_material:
@@ -2073,7 +2230,15 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
     )
     if props.show_textures:
         box = layout.box()
+        box.label(text="3. Prepare and review atlas", icon="TEXTURE")
         box.prop(props, "texture_platform")
+        for status in atlas_status_rows(props):
+            row = box.row(align=True)
+            icon = {"ready": "CHECKMARK", "manual": "CHECKMARK", "stale": "FILE_REFRESH", "warning": "ERROR"}.get(status["state"], "INFO")
+            row.label(text=status["name"], icon=icon)
+            row.label(text=status["message"])
+            if status["repeated"]:
+                box.label(text=f"UVs adjusted for: {', '.join(status['repeated'])}", icon="UV")
         box.prop(props, "texture_source_dir")
         if props.texture_entries:
             for entry in props.texture_entries:
@@ -2119,6 +2284,10 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
     box = layout.box()
     box.prop(props, "texture_mode")
     if props.texture_mode == "custom":
+        statuses = atlas_status_rows(props)
+        unresolved = [row for row in statuses if row["state"] in {"native", "stale", "warning"}]
+        if unresolved:
+            box.label(text=f"{len(unresolved)} texture(s) will keep their native G4TX payload", icon="INFO")
         draw_texture_replacements(layout, props)
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")

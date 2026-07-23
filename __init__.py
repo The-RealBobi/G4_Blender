@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 8),
+    "version": (0, 16, 9),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2800,6 +2800,11 @@ def model_data_roots(path: Path, prefs: G4ImporterPreferences) -> list[Path]:
     configured = bpy.path.abspath(getattr(prefs, "raw_data_root", "") or "")
     if configured:
         roots.append(Path(configured))
+    parts = path.parts
+    for index in range(len(parts) - 1):
+        if parts[index] == "common" and parts[index + 1] in {"chr", "chr_face"}:
+            roots.append(Path(*parts[:index]))
+            break
     for parent in path.parents:
         if parent.name == "data" and parent.parent.name in {"raw", "readable"}:
             roots.append(parent)
@@ -2819,17 +2824,63 @@ def load_model_lookup(prefs: G4ImporterPreferences) -> dict:
         return {}
 
 
+def model_lookup_candidates(path: Path, prefs: G4ImporterPreferences) -> list[str]:
+    candidates: list[str] = []
+
+    def add(relative: Path) -> None:
+        normalized = relative.as_posix().replace("\\", "/")
+        if not normalized:
+            return
+        variants = [Path(normalized)]
+        parts = variants[0].parts
+        if parts and parts[0] == "chr_face":
+            variants.append(Path("_face", *parts[1:]))
+        elif len(parts) >= 2 and parts[0] == "chr" and parts[1] == "_face":
+            variants.append(Path(*parts[1:]))
+        for variant in variants:
+            candidates.append(variant.with_suffix(".g4md").as_posix())
+            candidates.append(variant.with_suffix(".objbin").as_posix())
+
+    for data_root in model_data_roots(path, prefs):
+        try:
+            relative = path.resolve().relative_to(data_root).as_posix()
+        except ValueError:
+            continue
+        parts = Path(relative).parts
+        if parts and parts[0] in {"common", "dx11", "nx"}:
+            add(Path(*parts[1:]))
+        if len(parts) >= 2 and parts[0] in {"common", "dx11", "nx"} and parts[1] == "chr":
+            add(Path(*parts[2:]))
+        if len(parts) >= 2 and parts[0] in {"common", "dx11", "nx"} and parts[1] == "chr_face":
+            add(Path("chr_face", *parts[2:]))
+            add(Path("_face", *parts[2:]))
+    parts = path.parts
+    for index in range(len(parts) - 1):
+        if parts[index] in {"common", "dx11", "nx"}:
+            add(Path(*parts[index + 1:]))
+        if parts[index:index + 2] == ("common", "chr"):
+            add(Path(*parts[index + 2:]))
+        if parts[index:index + 2] == ("common", "chr_face"):
+            add(Path("chr_face", *parts[index + 2:]))
+            add(Path("_face", *parts[index + 2:]))
+    add(Path(path.name))
+
+    unique: list[str] = []
+    seen = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
+
+
 def lookup_model_row(path: Path, prefs: G4ImporterPreferences, models: dict | None = None) -> dict | None:
     models = load_model_lookup(prefs) if models is None else models
-    relative = None
-    parts = path.parts
-    for index in range(len(parts) - 2):
-        if parts[index:index + 2] == ("common", "chr"):
-            relative = Path(*parts[index + 2:]).as_posix()
-            break
-    if relative is None:
-        return None
-    return models.get(relative) or models.get(Path(relative).with_suffix(".objbin").as_posix())
+    for candidate in model_lookup_candidates(path, prefs):
+        row = models.get(candidate)
+        if row:
+            return row
+    return None
 
 
 def body_stem_from_row(row: dict | None) -> str | None:

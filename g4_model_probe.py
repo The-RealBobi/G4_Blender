@@ -1342,6 +1342,14 @@ def load_target_skeleton_override() -> dict | None:
 
 def model_relpath_candidates(path: Path) -> set[str]:
     candidates = set()
+    def add(relative: Path) -> None:
+        rel_g4md = relative.with_suffix(".g4md").as_posix()
+        rel_objbin = relative.with_suffix(".objbin").as_posix()
+        candidates.update({rel_g4md, rel_objbin})
+        parts = relative.parts
+        if parts and parts[0] == "chr_face":
+            add(Path("_face", *parts[1:]))
+
     try:
         rel = path.relative_to(RAW_DATA_ROOT)
     except ValueError:
@@ -1350,14 +1358,19 @@ def model_relpath_candidates(path: Path) -> set[str]:
         parts = list(rel.parts)
         if len(parts) >= 2 and parts[0] in {"common", "dx11", "nx"} and parts[1] == "chr":
             rel = Path(*parts[2:])
+        elif len(parts) >= 2 and parts[0] in {"common", "dx11", "nx"} and parts[1] == "chr_face":
+            rel = Path("chr_face", *parts[2:])
         elif parts and parts[0] in {"common", "dx11", "nx"}:
             rel = Path(*parts[1:])
-        rel_g4md = rel.with_suffix(".g4md").as_posix()
-        rel_objbin = rel.with_suffix(".objbin").as_posix()
-        candidates.update({rel_g4md, rel_objbin})
+        add(rel)
     candidates.add(path.with_suffix(".g4md").name)
     candidates.add(path.with_suffix(".objbin").name)
     return candidates
+
+
+def is_face_model_path(path: Path) -> bool:
+    normalized = path.as_posix().replace("\\", "/").lower()
+    return "/_face/" in normalized or "/chr_face/" in normalized
 
 
 def load_chara_model_maps() -> tuple[dict[str, dict], dict[int, dict]]:
@@ -2019,10 +2032,7 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
         if primary_data is not None and g4sk_covers_g4md_palette(primary_data, path):
             return primary_data, f"{primary_source} via sibling primary mesh"
 
-    try:
-        is_face_asset = "_face" in path.relative_to(RAW_DATA_ROOT).parts
-    except ValueError:
-        is_face_asset = False
+    is_face_asset = is_face_model_path(path)
     # Some face variants differ only in their final model digit and share the
     # preceding variant's rig.  Keep the lookup local to that character group
     # and still require the complete CRC32 palette to match.
@@ -3777,8 +3787,7 @@ def skeleton_bone_orientation(skeleton_info: dict | None) -> dict | None:
 def face_rigid_joint_override(path: Path, skeleton_info: dict | None, joint_palette: list[int]) -> list[int] | None:
     if skeleton_info is None or len(joint_palette) != 1:
         return None
-    normalized = path.as_posix().replace("\\", "/")
-    if "/_face/" not in normalized:
+    if not is_face_model_path(path):
         return None
     try:
         head_index = skeleton_info.get("names", []).index("c_head_1_0")
@@ -3888,7 +3897,7 @@ def shared_face_uses_compact_joint_palette(path: Path, joint_palette: list[int])
     normalized = path.as_posix().replace("\\", "/").lower()
     return bool(
         joint_palette
-        and "/_face/" in normalized
+        and is_face_model_path(path)
         and path.stem.lower().startswith("c")
         and all(0 <= index <= len(ASSIGNED_SKELETON_JOINT_NAMES) for index in joint_palette)
     )
@@ -4061,8 +4070,10 @@ def palette_spatial_error(
     positions: list[tuple[float, float, float]],
     influences: list[list[tuple[int, float]]],
     joint_palette: list[int],
-    target_skeleton: dict,
+    target_skeleton: dict | None,
 ) -> float:
+    if target_skeleton is None:
+        return math.inf
     bind_matrices = target_skeleton.get("bind_matrices", [])
     if not positions or not influences or not bind_matrices:
         return math.inf
