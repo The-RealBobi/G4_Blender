@@ -2066,7 +2066,6 @@ class EXPORT_OT_level5_g4_port(Operator, ExportHelper):
             self.waiting_for_output_path = True
             context.window_manager.fileselect_add(self)
             return {"RUNNING_MODAL"}
-
         try:
             sync_assignment_table(context)
             report, report_path = run_port(context, self.filepath)
@@ -2087,7 +2086,7 @@ class EXPORT_OT_level5_g4_port(Operator, ExportHelper):
     def draw(self, context):
         props = settings(context)
         layout = self.layout
-        draw_original_and_mapping(layout, context, include_actions=False)
+        draw_original_and_mapping(layout, context, include_actions=True)
         layout.separator()
         draw_export_settings(layout, props, self)
 
@@ -2255,6 +2254,10 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
         row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
         row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
 
+    if include_actions:
+        row = layout.row(align=True)
+        row.operator(LEVEL5_G4PORT_OT_analyze.bl_idname, icon="VIEWZOOM")
+
 
 def draw_texture_replacements(layout, props: G4PortSceneSettings) -> None:
     box = layout.box()
@@ -2303,7 +2306,7 @@ class LEVEL5_G4PORT_PT_panel(Panel):
 
     def draw(self, context):
         layout = self.layout
-        draw_original_and_mapping(layout, context, include_actions=True)
+        draw_original_and_mapping(layout, context, include_actions=False)
         props = settings(context)
         draw_export_settings(layout, props)
 

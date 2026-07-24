@@ -394,6 +394,11 @@ The texture workflow is intentionally split into three steps:
 3. Export. An atlas may also be refreshed automatically with **Regenerate
    Atlas On Export**.
 
+The same workflow is available from **File > Export > Level-5 G4 Port**. It
+opens the full intermediate G4 dialog first, with the same controls as the
+Level-5 sidebar (including atlas preparation and review), then opens Blender's
+standard destination chooser after confirmation.
+
 Empty or stale atlas entries never become blank replacements: the exporter
 logs an actionable warning and preserves the corresponding native G4TX payload.
 Special `line`, `oc`, `sp` and `spm` maps are preserved by default and are
