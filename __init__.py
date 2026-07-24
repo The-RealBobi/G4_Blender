@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 21),
+    "version": (0, 16, 22),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -68,21 +68,21 @@ def suspended_global_undo(context):
     finally:
         edit_preferences.use_global_undo = previous
 
-try:
+if __package__:
     from . import g4_port_addon
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
-except ImportError:
+else:
     import g4_port_addon
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
 
-try:
+if __package__:
     from . import g4_animation_addon
-except ImportError:
+else:
     import g4_animation_addon
 
-try:
+if __package__:
     from .g4_model_probe import map_scene_placements
-except ImportError:
+else:
     from g4_model_probe import map_scene_placements
 
 g4_port_addon.ADDON_ID = ADDON_ID
