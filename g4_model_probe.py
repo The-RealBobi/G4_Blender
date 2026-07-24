@@ -208,20 +208,26 @@ def infer_raw_data_root(path: Path) -> Path | None:
 
 def configure_raw_data_root_from_path(path: Path) -> None:
     global RAW_DATA_ROOT, CHARA_MODEL_XML, CHARA_MODEL_MAPS, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CANDIDATES
-    if os.environ.get("LEVEL5_G4_RAW_ROOT"):
-        return
     inferred = infer_raw_data_root(path)
-    if inferred is not None:
-        RAW_DATA_ROOT = inferred
-        CHARA_MODEL_XML = default_chara_model_xml()
-        CHARA_MODEL_MAPS = None
-        CHARA_PARTS_JSON = None
-        CHARA_PARTS_DATA = None
-        UNIFORM_FAMILY_LOOKUP = None
-        UNIFORM_TEXTURE_LOOKUP = None
-        UNIFORM_FAMILY_SKELETON_CACHE.clear()
-        UNIFORM_CRC_SKELETON_CACHE.clear()
-        UNIFORM_CRC_SKELETON_CANDIDATES = None
+    if inferred is None:
+        return
+
+    try:
+        if RAW_DATA_ROOT.resolve() == inferred.resolve():
+            return
+    except OSError:
+        pass
+
+    RAW_DATA_ROOT = inferred
+    CHARA_MODEL_XML = default_chara_model_xml()
+    CHARA_MODEL_MAPS = None
+    CHARA_PARTS_JSON = None
+    CHARA_PARTS_DATA = None
+    UNIFORM_FAMILY_LOOKUP = None
+    UNIFORM_TEXTURE_LOOKUP = None
+    UNIFORM_FAMILY_SKELETON_CACHE.clear()
+    UNIFORM_CRC_SKELETON_CACHE.clear()
+    UNIFORM_CRC_SKELETON_CANDIDATES = None
 
 
 @dataclass
