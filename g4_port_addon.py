@@ -1442,6 +1442,42 @@ def reset_uv_tiles(props: G4PortSceneSettings) -> None:
         uv.uv_offset_v = 0.0
 
 
+def restore_native_uvs(props: G4PortSceneSettings, original_model: Path) -> tuple[int, list[str]]:
+    """Restore imported mesh UVs directly from the selected native G4MD/G4MG pair."""
+    if original_model.suffix.lower() != ".g4md" or not original_model.is_file():
+        raise RuntimeError("Choose the original .g4md before restoring native UVs.")
+    g4mg_path = original_model.with_suffix(".g4mg")
+    if not g4mg_path.is_file():
+        raise RuntimeError(f"Original G4MG not found: {g4mg_path}")
+    try:
+        from .g4_model_probe import parse_g4md, read_uv0
+    except ImportError:
+        from g4_model_probe import parse_g4md, read_uv0
+
+    g4mg = g4mg_path.read_bytes()
+    model = parse_g4md(original_model.read_bytes(), g4mg)
+    restored = 0
+    skipped = []
+    for record in props.records:
+        if record.original_index < 0 or record.original_index >= len(model["records"]):
+            continue
+        native_record = model["records"][record.original_index]
+        native_uvs = [read_uv0(g4mg, model, native_record, index) for index in range(native_record["vertex_count"])]
+        for obj in objects_for_record(record):
+            if len(obj.data.vertices) != len(native_uvs):
+                skipped.append(f"{obj.name} ({len(obj.data.vertices)} != {len(native_uvs)} vertices)")
+                continue
+            uv_layer = obj.data.uv_layers.active or obj.data.uv_layers.new(name="UVMap")
+            for loop in obj.data.loops:
+                uv_layer.data[loop.index].uv = native_uvs[loop.vertex_index]
+            obj.data.update()
+            restored += 1
+    reset_uv_tiles(props)
+    props.use_source_uv_transforms = False
+    props.auto_pack_source_uvs = False
+    return restored, skipped
+
+
 def records_grouped_by_texture(props: G4PortSceneSettings) -> dict[str, list[G4PortRecord]]:
     records_by_texture: dict[str, list[G4PortRecord]] = {}
     for record in props.records:
@@ -2284,6 +2320,26 @@ class LEVEL5_G4PORT_OT_reset_object_uv_tiles(Operator):
         return {"FINISHED"}
 
 
+class LEVEL5_G4PORT_OT_restore_native_uvs(Operator):
+    bl_idname = "level5_g4_port.restore_native_uvs"
+    bl_label = "Restore Native UVs"
+    bl_description = "Restore assigned meshes' UVs from the selected original G4MD/G4MG and clear atlas tiles"
+
+    def execute(self, context):
+        props = settings(context)
+        original_model = resolve_file(props.original_model)
+        try:
+            restored, skipped = restore_native_uvs(props, original_model)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        message = f"Restored native UVs on {restored} mesh(es)"
+        if skipped:
+            message += f"; skipped: {', '.join(skipped)}"
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
 class LEVEL5_G4PORT_OT_detect_vertex_groups(Operator):
     bl_idname = "level5_g4_port.detect_vertex_groups"
     bl_label = "Detect Vertex Groups"
@@ -2587,6 +2643,7 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
         row = box.row(align=True)
         row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
         row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
+        box.operator(LEVEL5_G4PORT_OT_restore_native_uvs.bl_idname, icon="UV")
 
     if include_actions:
         row = layout.row(align=True)
@@ -2679,6 +2736,7 @@ classes.extend([
     LEVEL5_G4PORT_OT_build_expression_atlas,
     LEVEL5_G4PORT_OT_use_existing_expression_atlas,
     LEVEL5_G4PORT_OT_reset_object_uv_tiles,
+    LEVEL5_G4PORT_OT_restore_native_uvs,
     LEVEL5_G4PORT_OT_detect_vertex_groups,
     LEVEL5_G4PORT_OT_auto_map_joints,
     LEVEL5_G4PORT_OT_add_joint_alias,
