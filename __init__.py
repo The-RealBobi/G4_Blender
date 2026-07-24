@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 12),
+    "version": (0, 16, 13),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2184,6 +2184,30 @@ def character_parameter_node_group():
     return group
 
 
+def modifier_input_value(modifier, socket_identifier: str, default):
+    inputs = getattr(getattr(modifier, "properties", None), "inputs", None)
+    socket = getattr(inputs, socket_identifier, None) if inputs is not None else None
+    if socket is not None and hasattr(socket, "value"):
+        return socket.value
+    try:
+        return modifier.get(socket_identifier, default)
+    except TypeError:
+        return default
+
+
+def set_modifier_input_value(modifier, socket_identifier: str, value) -> bool:
+    inputs = getattr(getattr(modifier, "properties", None), "inputs", None)
+    socket = getattr(inputs, socket_identifier, None) if inputs is not None else None
+    if socket is not None and hasattr(socket, "value"):
+        socket.value = value
+        return True
+    try:
+        modifier[socket_identifier] = value
+        return True
+    except TypeError:
+        return False
+
+
 def character_shader_attribute(material, label: str, attribute_name: str, color: bool = False):
     nodes = material.node_tree.nodes
     node_name = f"G4 Control {label}"
@@ -2252,18 +2276,18 @@ def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
         modifier.node_group = group
         for label, _, default, _, _ in CHARACTER_PARAMETER_SOCKETS:
             socket = input_sockets.get(label)
-            if socket is not None and socket.identifier not in modifier:
-                modifier[socket.identifier] = default
+            if socket is not None:
+                set_modifier_input_value(modifier, socket.identifier, default)
         for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
             socket = input_sockets.get(label)
-            if socket is not None and socket.identifier not in modifier:
-                modifier[socket.identifier] = default
-        if modifier.get("g4_mask_recolor_schema") != 1:
+            if socket is not None:
+                set_modifier_input_value(modifier, socket.identifier, default)
+        if obj.get("g4_mask_recolor_schema") != 1:
             for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
                 socket = input_sockets.get(label)
                 if socket is not None:
-                    modifier[socket.identifier] = default
-            modifier["g4_mask_recolor_schema"] = 1
+                    set_modifier_input_value(modifier, socket.identifier, default)
+            obj["g4_mask_recolor_schema"] = 1
         for slot in obj.material_slots:
             if slot.material is not None:
                 connect_character_parameter_material(slot.material)
@@ -4217,7 +4241,11 @@ class OBJECT_OT_level5_mask_recolor(bpy.types.Operator):
         for label, attribute_name, _ in CHARACTER_MASK_COLOR_SOCKETS:
             socket = self.socket(modifier, label)
             if socket is not None:
-                setattr(self, self.color_property(attribute_name), modifier.get(socket.identifier, (1.0, 1.0, 1.0, 1.0)))
+                setattr(
+                    self,
+                    self.color_property(attribute_name),
+                    modifier_input_value(modifier, socket.identifier, (1.0, 1.0, 1.0, 1.0)),
+                )
         return context.window_manager.invoke_props_dialog(self, width=360)
 
     def draw(self, context):
@@ -4235,7 +4263,7 @@ class OBJECT_OT_level5_mask_recolor(bpy.types.Operator):
         for label, attribute_name, _ in CHARACTER_MASK_COLOR_SOCKETS:
             socket = self.socket(modifier, label)
             if socket is not None:
-                modifier[socket.identifier] = getattr(self, self.color_property(attribute_name))
+                set_modifier_input_value(modifier, socket.identifier, getattr(self, self.color_property(attribute_name)))
         return {"FINISHED"}
 
 
