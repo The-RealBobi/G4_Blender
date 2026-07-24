@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 13),
+    "version": (0, 16, 18),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -70,8 +70,10 @@ def suspended_global_undo(context):
 
 try:
     from . import g4_port_addon
+    from .g4_roundtrip import native_mesh_signature
 except ImportError:
     import g4_port_addon
+    from g4_roundtrip import native_mesh_signature
 
 try:
     from . import g4_animation_addon
@@ -646,12 +648,12 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True) -> set
     materials: dict[str, bpy.types.Material] = {}
     for material_name in payload.get("materials", {}):
         existing = bpy.data.materials.get(material_name)
-        if existing is not None and existing.get("g4_source_model") != source_model:
-            existing = None
-        elif existing is not None and existing.users == 0:
+        if existing is not None and existing.users == 0:
             bpy.data.materials.remove(existing)
-            existing = None
-        material = existing or bpy.data.materials.new(material_name)
+        # A material is mutable (its nodes are rebuilt while textures are
+        # resolved), so every native import needs an isolated instance even
+        # when it comes from the same G4MD.
+        material = bpy.data.materials.new(material_name)
         material["g4_source_model"] = source_model
         materials[material_name] = material
 
@@ -752,6 +754,12 @@ def collapse_duplicate_materials(imported_names: set[str]) -> None:
             material = slot.material
             if material is None:
                 continue
+            # Native imports deliberately receive their own material instance.
+            # Reusing a same-named material from an earlier import makes the
+            # second character inherit a node tree whose texture paths may
+            # already have been packed or cleaned up.
+            if material.get("g4_source_model"):
+                continue
             base_name = blender_base_name(material.name)
             if base_name == material.name:
                 continue
@@ -761,6 +769,16 @@ def collapse_duplicate_materials(imported_names: set[str]) -> None:
             slot.material = target
             if material.users == 0:
                 bpy.data.materials.remove(material)
+
+
+def mark_native_roundtrip_objects(imported_names: set[str], source_path: Path) -> None:
+    source = str(source_path.resolve())
+    for object_name in imported_names:
+        obj = bpy.data.objects.get(object_name)
+        if obj is None or obj.type != "MESH":
+            continue
+        obj["g4_native_model_source"] = source
+        obj["g4_native_roundtrip_signature"] = native_mesh_signature(obj)
 
 
 def global_orientation_matrices(names: list[str], parents: list[int], rotations: list[list[float]]) -> list[Matrix]:
@@ -1023,11 +1041,12 @@ def material_variant_keys(material_name: str, diffuse_path: Path | None = None) 
 
 
 def load_image(path: Path):
+    resolved = path.resolve()
+    for image in bpy.data.images:
+        if image.filepath and Path(bpy.path.abspath(image.filepath)).resolve() == resolved:
+            return image
     if not path.exists():
         return None
-    for image in bpy.data.images:
-        if image.filepath and Path(bpy.path.abspath(image.filepath)).resolve() == path.resolve():
-            return image
     try:
         return bpy.data.images.load(str(path), check_existing=True)
     except RuntimeError:
@@ -1071,9 +1090,10 @@ def material_uses_image(material, path: Path) -> bool:
     return False
 
 
-def find_material(name: str, diffuse_path: Path | None = None):
+def find_material(name: str, diffuse_path: Path | None = None, candidates=None):
+    materials = list(candidates) if candidates is not None else list(bpy.data.materials)
     named = [
-        material for material in bpy.data.materials
+        material for material in materials
         if material.name == name or material.name.startswith(f"{name}.")
     ]
     if diffuse_path is not None:
@@ -1083,7 +1103,7 @@ def find_material(name: str, diffuse_path: Path | None = None):
     if named:
         return named[-1]
     if diffuse_path is not None:
-        for material in bpy.data.materials:
+        for material in materials:
             if material_uses_image(material, diffuse_path):
                 return material
     return None
@@ -1911,7 +1931,11 @@ def apply_level5_toon_shader(
     return True
 
 
-def apply_material_texture_variants(summary: dict, debug: list[str] | None = None) -> None:
+def apply_material_texture_variants(
+    summary: dict,
+    debug: list[str] | None = None,
+    imported_names: set[str] | None = None,
+) -> None:
     textures = [Path(path) for path in summary.get("textures", [])]
     if not textures:
         if debug is not None:
@@ -1922,13 +1946,23 @@ def apply_material_texture_variants(summary: dict, debug: list[str] | None = Non
     if debug is not None:
         debug.append(f"[summary-pass] textures={len(textures)} keys={len(by_key)} materials={len(summary.get('materials', {}))}")
 
+    imported_materials = None
+    if imported_names is not None:
+        imported_materials = {
+            slot.material
+            for object_name in imported_names
+            if (obj := bpy.data.objects.get(object_name)) is not None
+            for slot in obj.material_slots
+            if slot.material is not None
+        }
+
     for material_name, diffuse_path_text in summary.get("materials", {}).items():
         if not diffuse_path_text:
             if debug is not None:
                 debug.append(f"[summary-pass] {material_name}: no diffuse path in summary")
             continue
         diffuse_path = Path(diffuse_path_text)
-        material = find_material(material_name, diffuse_path)
+        material = find_material(material_name, diffuse_path, imported_materials)
         fallback_variants = {}
         for key in material_variant_keys(material_name, diffuse_path):
             fallback_variants.update(by_key.get(key, {}))
@@ -2776,7 +2810,7 @@ def import_g4_model(
     debug.append(f"[armature] bone_orientation={orientation}")
     compact_skeleton_summary(summary)
     collapse_duplicate_materials(imported_names)
-    apply_material_texture_variants(summary, debug)
+    apply_material_texture_variants(summary, debug, imported_names)
     outline_mode = getattr(prefs, "outline_mode", "HULL") if apply_styling else "OFF"
     apply_auxiliary_textures_to_imported_materials(
         imported_names,
@@ -2815,6 +2849,7 @@ def import_g4_model(
                 skeleton_source = str(summary.get("skeleton_source") or "")
                 if skeleton_source:
                     obj["g4_character_skeleton_source"] = skeleton_source
+    mark_native_roundtrip_objects(imported_names, path)
     cleanup_generated_files(summary, getattr(prefs, "cleanup_import_cache", True))
     return summary, imported_names
 
@@ -3286,16 +3321,16 @@ def import_character_parts_for_armature(
     character_part_stem: str = "",
     preserve_part_armatures: bool = False,
 ) -> tuple[int, list[Path]]:
-    body = Path(bpy.path.abspath(body_path)) if body_path else find_character_part(
-        model_path, "u", prefs, character_part_stem
+    body = Path(bpy.path.abspath(body_path)) if body_path else (
+        find_character_part(model_path, "u", prefs, character_part_stem) if automatic else None
     )
     if body is not None:
         body = declared_body_variant_for_character(body, model_path, prefs)
-    shoes = Path(bpy.path.abspath(shoes_path)) if shoes_path else find_character_part(
-        model_path, "s", prefs, character_part_stem
+    shoes = Path(bpy.path.abspath(shoes_path)) if shoes_path else (
+        find_character_part(model_path, "s", prefs, character_part_stem) if automatic else None
     )
     accessory = Path(bpy.path.abspath(accessory_path)) if accessory_path else None
-    if accessory is None and body is not None:
+    if accessory is None and automatic and body is not None:
         accessory = find_accessory_part_for_body(body, prefs)
     paths = [
         body,
