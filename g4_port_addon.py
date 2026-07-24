@@ -746,17 +746,26 @@ class G4PortSceneSettings(PropertyGroup):
 
     def to_config(self) -> dict:
         active_texture_keys = set(self.texture_map())
+        records = []
+        for record in self.records:
+            atlas_transform = (
+                self.use_source_uv_transforms
+                and record.texture_key in active_texture_keys
+                and not is_face_atlas_record(record)
+            )
+            item = record.to_config(atlas_transform)
+            if not atlas_transform:
+                # Native G4TX entries retain their authored UV windows.  Atlas
+                # controls are meaningful only for an explicitly replaced map.
+                item.pop("uv_flip", None)
+                item.pop("uv_scale", None)
+                item.pop("uv_offset", None)
+                item.pop("source_uv_transforms", None)
+            records.append(item)
         return {
             "model_rel": self.model_rel,
             "native_material_names": split_csv(self.native_material_names),
-            "records": [
-                record.to_config(
-                    self.use_source_uv_transforms
-                    and record.texture_key in active_texture_keys
-                    and not is_face_atlas_record(record)
-                )
-                for record in self.records
-            ],
+            "records": records,
             "texture_replacements": self.texture_map(),
             "texture_platform": self.texture_platform,
             "material_overrides": [],
@@ -1465,13 +1474,36 @@ def restore_native_uvs(props: G4PortSceneSettings, original_model: Path) -> tupl
             continue
         native_record = model["records"][record.original_index]
         native_uvs = [read_uv0(g4mg, model, native_record, index) for index in range(native_record["vertex_count"])]
+        native_positions = [
+            struct.unpack_from("<3f", g4mg, native_record["vertex_offset"] + index * native_record["vertex_stride"])
+            for index in range(native_record["vertex_count"])
+        ]
         for obj in objects_for_record(record):
-            if len(obj.data.vertices) != len(native_uvs):
-                skipped.append(f"{obj.name} ({len(obj.data.vertices)} != {len(native_uvs)} vertices)")
+            if len(obj.data.vertices) == len(native_uvs):
+                uv_by_vertex = native_uvs
+            else:
+                extent = max(
+                    max(position[axis] for position in native_positions) - min(position[axis] for position in native_positions)
+                    for axis in range(3)
+                )
+                tolerance_squared = max(extent * 1e-4, 1e-5) ** 2
+                uv_by_vertex = []
+                for vertex in obj.data.vertices:
+                    nearest = min(
+                        range(len(native_positions)),
+                        key=lambda index: sum((vertex.co[axis] - native_positions[index][axis]) ** 2 for axis in range(3)),
+                    )
+                    distance_squared = sum((vertex.co[axis] - native_positions[nearest][axis]) ** 2 for axis in range(3))
+                    if distance_squared > tolerance_squared:
+                        uv_by_vertex = []
+                        break
+                    uv_by_vertex.append(native_uvs[nearest])
+            if not uv_by_vertex:
+                skipped.append(f"{obj.name} (no safe native position match)")
                 continue
             uv_layer = obj.data.uv_layers.active or obj.data.uv_layers.new(name="UVMap")
             for loop in obj.data.loops:
-                uv_layer.data[loop.index].uv = native_uvs[loop.vertex_index]
+                uv_layer.data[loop.index].uv = uv_by_vertex[loop.vertex_index]
             obj.data.update()
             restored += 1
     reset_uv_tiles(props)
