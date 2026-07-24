@@ -2,6 +2,7 @@ import json
 import hashlib
 import math
 import os
+import re
 import shutil
 import shlex
 import struct
@@ -24,11 +25,19 @@ from bpy.props import (
 from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup, UIList
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
+try:
+    from .g4_roundtrip import native_mesh_signature
+except ImportError:
+    from g4_roundtrip import native_mesh_signature
+
 
 ADDON_ID = __name__.split(".", 1)[0] if "." in __name__ else __name__
 IS_STANDALONE_ADDON = False
 MODEL_EXTENSIONS = {".g4md", ".g4pkm"}
 MAX_GENERATED_TEXTURE_SIZE = 2048
+FACE_ATLAS_COLUMNS = 4
+FACE_ATLAS_ROWS = 2
+FACE_ATLAS_SLOTS = FACE_ATLAS_COLUMNS * FACE_ATLAS_ROWS
 
 
 def default_python() -> str:
@@ -343,6 +352,27 @@ def texture_key_for_record(record_name: str, texture_names: list[str]) -> str:
     return stem_matches[0] if stem_matches else ""
 
 
+def shared_face_texture_key(texture_names: list[str]) -> str:
+    """Return the native base map shared by the eye and mouth expression meshes."""
+    return next((name for name in texture_names if re.search(r"_10$", name) and not is_special_texture(name)), "")
+
+
+def is_face_atlas_record(record) -> bool:
+    name = record.output_name.lower()
+    material = record.material_name.lower().removesuffix("m")
+    return name in {"eye_10", "mouth_10"} or material in {"eye_10", "mouth_10"}
+
+
+def assign_shared_face_texture_key(records, texture_names: list[str]) -> str:
+    key = shared_face_texture_key(texture_names)
+    if not key:
+        return ""
+    for record in records:
+        if is_face_atlas_record(record):
+            record.texture_key = key
+    return key
+
+
 def target_mesh_items(self, context):
     props = settings(context)
     items = [("__none__", "Unassigned", "Do not export this object into a native mesh")]
@@ -506,6 +536,16 @@ class G4PortTextureReplacement(PropertyGroup):
     )
     atlas_signature: StringProperty(default="", options={"HIDDEN"})
     atlas_summary: StringProperty(default="", options={"HIDDEN"})
+    expression_atlas: BoolProperty(default=False, options={"HIDDEN"})
+    expression_atlas_mode: EnumProperty(
+        items=[("pool", "Pool", "Built from the eight expression-pool cells"), ("existing", "Existing", "Use an already prepared 4x2 facial atlas")],
+        default="pool",
+        options={"HIDDEN"},
+    )
+
+
+class G4PortExpressionImage(PropertyGroup):
+    image_path: StringProperty(name="Expression", subtype="FILE_PATH", default="")
 
 
 class G4PortRecord(PropertyGroup):
@@ -609,6 +649,7 @@ class G4PortSceneSettings(PropertyGroup):
     texture_platform: EnumProperty(name="Platform", items=TEXTURE_PLATFORM_ITEMS, default="auto")
     texture_source_dir: StringProperty(name="Texture Source Folder", subtype="DIR_PATH", default="")
     texture_entries: CollectionProperty(type=G4PortTextureReplacement)
+    expression_pool: CollectionProperty(type=G4PortExpressionImage)
     generate_png_set_on_export: BoolProperty(
         name="Regenerate Atlas On Export",
         default=False,
@@ -628,6 +669,11 @@ class G4PortSceneSettings(PropertyGroup):
         name="Replace Special Maps",
         default=False,
         description="Allow custom replacements for line/oc/sp/spm maps instead of keeping bundled G4TX payloads",
+    )
+    preserve_native_roundtrip: BoolProperty(
+        name="Preserve Untouched Native Import",
+        default=True,
+        description="Copy the original G4MD/G4MG/G4TX byte-for-byte when all assigned imported meshes are unchanged",
     )
     selected_only: BoolProperty(name="Selected Meshes Only", default=False)
     apply_modifiers: BoolProperty(
@@ -671,8 +717,15 @@ class G4PortSceneSettings(PropertyGroup):
     def texture_map(self) -> dict:
         result = {}
         atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
+        face_texture = shared_face_texture_key([entry.texture_name for entry in self.texture_entries])
         for item in self.texture_entries:
             if not item.texture_name or not item.replacement_path:
+                continue
+            # The eye and mouth records sample authored windows of one native
+            # facial atlas.  A generic image replacement would flatten those
+            # windows into a different layout, so only the explicit 4x2 pool
+            # is allowed to replace this entry.
+            if item.texture_name == face_texture and not item.expression_atlas:
                 continue
             if item.atlas_signature and atlas_states.get(item.texture_name) != "ready":
                 continue
@@ -682,6 +735,8 @@ class G4PortSceneSettings(PropertyGroup):
             if "=" in item:
                 key, value = item.split("=", 1)
                 key = key.strip()
+                if key == face_texture:
+                    continue
                 if self.replace_special_textures or not is_special_texture(key):
                     result[key] = value.strip()
         return result
@@ -858,6 +913,7 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
         for record in target.records:
             if not record.texture_key:
                 record.texture_key = texture_key_for_record(record.output_name, texture_names)
+        assign_shared_face_texture_key(target.records, texture_names)
         return
     target.records.clear()
     for source in md.get("records", []):
@@ -876,6 +932,7 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
         record.material_index = material_index
         record.rigid_joint = record_default_joint(md, source)
         record.auto_palette = True
+    assign_shared_face_texture_key(target.records, texture_names)
     target.active_record = 0
     target.template_signature = signature
     target.use_preset_file = False
@@ -1408,6 +1465,35 @@ def atlas_signature(texture_name: str, records: list[G4PortRecord]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def expression_pool_paths(props: G4PortSceneSettings) -> list[Path]:
+    return [Path(bpy.path.abspath(item.image_path)) for item in props.expression_pool if item.image_path]
+
+
+def expression_pool_signature(props: G4PortSceneSettings, texture_name: str) -> str:
+    items = []
+    for path in expression_pool_paths(props):
+        items.append({
+            "path": str(path),
+            "mtime": path.stat().st_mtime_ns if path.is_file() else 0,
+        })
+    payload = json.dumps({"texture": texture_name, "layout": [FACE_ATLAS_COLUMNS, FACE_ATLAS_ROWS], "items": items}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def face_atlas_entry_ready(props: G4PortSceneSettings, entry: G4PortTextureReplacement) -> bool:
+    if not entry.expression_atlas or not entry.replacement_path:
+        return False
+    if not Path(bpy.path.abspath(entry.replacement_path)).is_file():
+        return False
+    return entry.expression_atlas_mode == "existing" or entry.atlas_signature == expression_pool_signature(props, entry.texture_name)
+
+
+def is_shared_face_atlas(texture_name: str, records) -> bool:
+    return any(is_face_atlas_record(record) for record in records) and texture_name == shared_face_texture_key(
+        [texture_name]
+    )
+
+
 def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
     rows = []
     grouped = records_grouped_by_texture(props)
@@ -1418,6 +1504,7 @@ def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
             continue
         records = grouped.get(texture_name, [])
         entry = texture_entry(props, texture_name)
+        shared_face = is_shared_face_atlas(texture_name, records)
         signature = atlas_signature(texture_name, records)
         objects = [obj for _, obj in texture_items_for_records(records)]
         missing = [obj.name for obj in objects if not source_path_for_object(obj)]
@@ -1427,7 +1514,24 @@ def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
         ]
         prepared = entry and entry.replacement_path and Path(bpy.path.abspath(entry.replacement_path)).is_file()
         fresh = prepared and entry.atlas_signature == signature
-        if missing:
+        if entry is not None and entry.expression_atlas:
+            pool_paths = expression_pool_paths(props)
+            signature = expression_pool_signature(props, texture_name)
+            prepared = entry.replacement_path and Path(bpy.path.abspath(entry.replacement_path)).is_file()
+            if entry.expression_atlas_mode == "existing":
+                state, message = (
+                    ("ready", entry.atlas_summary or "Existing 4x2 expression atlas")
+                    if prepared else ("warning", "Existing 4x2 expression atlas is missing")
+                )
+            elif len(pool_paths) != FACE_ATLAS_SLOTS or not all(path.is_file() for path in pool_paths):
+                state, message = "warning", "Expression pool needs 8 valid images (4x2)"
+            elif prepared and entry.atlas_signature == signature:
+                state, message = "ready", entry.atlas_summary or "Prepared 4x2 expression atlas"
+            else:
+                state, message = "stale", "Expression atlas needs rebuilding"
+        elif shared_face:
+            state, message = "native", "Shared eye/mouth 4x2 atlas preserved"
+        elif missing:
             state, message = "warning", f"Missing source: {', '.join(missing)}"
         elif not objects:
             state, message = "native", "No assigned meshes; native G4TX entry will be preserved"
@@ -1439,7 +1543,7 @@ def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
             state, message = "stale", "Atlas needs regeneration"
         else:
             state, message = "native", "Native G4TX entry will be preserved"
-        rows.append({"name": texture_name, "records": records, "signature": signature, "state": state, "message": message, "repeated": repeated})
+        rows.append({"name": texture_name, "records": records, "signature": signature, "state": state, "message": message, "repeated": repeated, "shared_face": shared_face})
     return rows
 
 
@@ -1544,6 +1648,14 @@ def build_texture_spritesheet(
             port_log(log_path, f"{entry['name']}: [{index}/{len(items)}] loaded {source[0]}x{source[1]} ({elapsed:.2f}s)")
         sources.append((record, obj, source, cache_key))
 
+    unreadable = [obj.name for _, obj, source, _ in sources if source is None]
+    if unreadable:
+        port_log(
+            log_path,
+            f"{entry['name']}: skipped spritesheet; unreadable source image for {', '.join(unreadable)}",
+        )
+        return False
+
     groups = []
     grouped_sources = {}
     for record, obj, source, cache_key in sources:
@@ -1616,6 +1728,21 @@ def build_texture_spritesheet(
     return True
 
 
+def discard_generated_atlas(entry: G4PortTextureReplacement | None, generated_path: Path) -> None:
+    """Forget only a failed atlas created by this exporter; manual paths stay intact."""
+    if entry is None:
+        return
+    source = Path(bpy.path.abspath(entry.replacement_path)) if entry.replacement_path else None
+    is_generated_path = source is not None and source == generated_path
+    if not is_generated_path and not entry.atlas_signature:
+        return
+    if is_generated_path and source.is_file():
+        source.unlink()
+    entry.replacement_path = ""
+    entry.atlas_signature = ""
+    entry.atlas_summary = ""
+
+
 def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = None) -> int:
     props = settings(context)
     port_log(log_path, "Generate PNG set started")
@@ -1633,7 +1760,11 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
     entries = parse_g4tx_entries(g4tx_path)
     port_log(log_path, f"Original G4TX entries: {len(entries)}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    replacements = []
+    replacements = [
+        f"{entry.texture_name}={Path(entry.replacement_path).name}"
+        for entry in props.texture_entries
+        if face_atlas_entry_ready(props, entry)
+    ]
     records_by_texture = records_grouped_by_texture(props)
     explicit_map = props.texture_map()
     texture_source_dir = resolve_file(props.texture_source_dir)
@@ -1683,11 +1814,19 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
         else:
             records = records_by_texture.get(name, [])
             port_log(log_path, f"{name}: base map, records={len(records)}")
+            if is_shared_face_atlas(name, records):
+                entry = texture_entry(props, name)
+                if entry is not None and entry.expression_atlas:
+                    port_log(log_path, f"{name}: retaining prepared 4x2 expression atlas")
+                else:
+                    port_log(log_path, f"{name}: retaining native shared eye/mouth atlas")
+                continue
             missing_sources = [
                 obj.name for record, obj in texture_items_for_records(records) if not object_texture_path(record, obj)
             ]
             if missing_sources:
                 port_log(log_path, f"{name}: missing source image for {', '.join(missing_sources)}; preserving native G4TX entry")
+                discard_generated_atlas(texture_entry(props, name), path)
                 continue
             if build_texture_spritesheet(path, entry, records, props, log_path=log_path):
                 replacements.append(f"{name}={path.name}")
@@ -1700,7 +1839,8 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
                         f"{len(texture_items_for_records(records))} object(s), {dimensions}, {path.name}"
                     )
             else:
-                port_log(log_path, f"{name}: no assigned source; preserving native G4TX entry")
+                port_log(log_path, f"{name}: unreadable source; preserving native G4TX entry")
+                discard_generated_atlas(texture_entry(props, name), path)
     props.texture_source_dir = str(output_dir)
     props.texture_replacements = join_csv(replacements)
     generated = dict(item.split("=", 1) for item in replacements)
@@ -1709,6 +1849,104 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
             entry.replacement_path = str(output_dir / generated[entry.texture_name])
     port_log(log_path, f"Generate PNG set finished; replacements={len(replacements)}")
     return len(replacements)
+
+
+def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path) -> Path:
+    texture_name = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+    entry = texture_entry(props, texture_name)
+    if entry is None:
+        raise RuntimeError("The original model has no shared eye/mouth texture entry")
+    sources = expression_pool_paths(props)
+    if len(sources) != FACE_ATLAS_SLOTS or not all(path.is_file() for path in sources):
+        raise RuntimeError("Expression pool requires exactly 8 valid images for its 4x2 layout")
+    original_model = resolve_file(props.original_model)
+    raw_root = infer_data_root(original_model) if original_model.is_file() else None
+    g4tx_path = original_g4tx_path(raw_root, props.model_rel) if raw_root is not None else None
+    source_entry = next((item for item in parse_g4tx_entries(g4tx_path) if item["name"] == texture_name), None) if g4tx_path else None
+    if source_entry is None:
+        raise RuntimeError(f"Native G4TX entry not found: {texture_name}")
+    width, height = source_entry["width"], source_entry["height"]
+    cell_width = width // FACE_ATLAS_COLUMNS
+    cell_height = height // FACE_ATLAS_ROWS
+    pixels = image_pixels(width, height, (0.0, 0.0, 0.0, 0.0))
+    for index, source_path in enumerate(sources):
+        source = load_image_pixels(str(source_path))
+        if source is None:
+            raise RuntimeError(f"Could not read expression image: {source_path}")
+        column = index % FACE_ATLAS_COLUMNS
+        row = index // FACE_ATLAS_COLUMNS
+        blit_image_fit(pixels, width, height, source, column * cell_width, row * cell_height, cell_width, cell_height)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{texture_name}.png"
+    save_png(output_path, width, height, pixels)
+    entry.replacement_path = str(output_path)
+    entry.atlas_signature = expression_pool_signature(props, texture_name)
+    entry.atlas_summary = f"{FACE_ATLAS_COLUMNS}x{FACE_ATLAS_ROWS} expression atlas, {width}x{height}, {output_path.name}"
+    entry.expression_atlas = True
+    entry.expression_atlas_mode = "pool"
+    props.texture_source_dir = str(output_dir)
+    return output_path
+
+
+def has_unchanged_native_roundtrip(props: G4PortSceneSettings, original_model: Path) -> bool:
+    """True only when the current assignment is an untouched native import."""
+    if not props.preserve_native_roundtrip or original_model.suffix.lower() != ".g4md":
+        return False
+    if props.texture_mode == "keep" or (props.texture_mode == "custom" and props.texture_map()):
+        return False
+    source = str(original_model.resolve())
+    records = list(props.records)
+    if not records:
+        return False
+    for record in records:
+        objects = objects_for_record(record)
+        if not objects:
+            return False
+        for obj in objects:
+            if obj.get("g4_native_model_source") != source:
+                return False
+            if obj.get("g4_native_roundtrip_signature") != native_mesh_signature(obj):
+                return False
+            target = getattr(obj.level5_g4_port, "target_record", "__none__")
+            if target not in {"__none__", record.output_name}:
+                return False
+    return True
+
+
+def copy_unchanged_native_roundtrip(
+    props: G4PortSceneSettings,
+    original_model: Path,
+    raw_root: Path,
+    package_root: Path,
+    source_g4tx: Path,
+) -> dict:
+    """Preserve native bytes for an identity import/export instead of rebuilding records."""
+    output_root = package_root / "data"
+    common_rel = Path(props.model_rel).with_suffix(".g4md")
+    common_out = output_root / "common" / common_rel
+    g4mg_source = original_model.with_suffix(".g4mg")
+    if not g4mg_source.is_file():
+        raise RuntimeError(f"Original G4MG not found next to {original_model.name}")
+    common_out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(original_model, common_out)
+    shutil.copy2(g4mg_source, common_out.with_suffix(".g4mg"))
+
+    texture_out_dir = output_root / source_g4tx.parent.resolve().relative_to(raw_root.resolve())
+    texture_out_dir.mkdir(parents=True, exist_ok=True)
+    for source in source_g4tx.parent.glob("*.g4tx"):
+        shutil.copy2(source, texture_out_dir / source.name)
+    entries = parse_g4tx_entries(source_g4tx)
+    return {
+        "meshes": len(props.records),
+        "textures": len(entries),
+        "roundtrip_preserved": True,
+        "g4md": str(common_out),
+        "g4mg": str(common_out.with_suffix(".g4mg")),
+        "g4tx": str(texture_out_dir / source_g4tx.name),
+        "texture_platform": source_g4tx.parent.parent.name,
+        "package_root": str(package_root),
+        "data_root": str(output_root),
+    }
 
 
 def run_port(context, filepath: str = "") -> tuple[dict, Path]:
@@ -1728,13 +1966,22 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     if source_g4tx is None:
         raise RuntimeError(f"Original G4TX not found in DX11 or NX for {props.model_rel}")
 
+    package_root = Path(bpy.path.abspath(filepath)) if filepath else resolve_file(getattr(prefs, "output_root", ""))
+    if has_unchanged_native_roundtrip(props, original_model):
+        report = copy_unchanged_native_roundtrip(props, original_model, raw_root, package_root, source_g4tx)
+        cache = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir())
+        cache.mkdir(parents=True, exist_ok=True)
+        report_path = cache / "export_report.json"
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        port_log(None, "Untouched native import detected; copied original G4MD/G4MG/G4TX bytes")
+        return report, report_path
+
     cache = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir())
     cache.mkdir(parents=True, exist_ok=True)
 
     dae_path = cache / "scene_export.dae"
     weights_path = cache / "scene_weights.json"
     report_path = cache / ("analyze_report.json" if props.analyze_only else "export_report.json")
-    package_root = Path(bpy.path.abspath(filepath)) if filepath else resolve_file(getattr(prefs, "output_root", ""))
     output_root = package_root / "data"
 
     export_collada(dae_path, props.selected_only, props.align_forward_to_y, props.apply_modifiers)
@@ -1746,7 +1993,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
 
     if props.texture_mode == "custom":
         atlas_rows = atlas_status_rows(props)
-        refresh_needed = [row for row in atlas_rows if row["state"] in {"native", "stale"}]
+        refresh_needed = [
+            row for row in atlas_rows
+            if row["state"] in {"native", "stale"} and not row.get("shared_face", False)
+        ]
         warnings = [row for row in atlas_rows if row["state"] == "warning"]
         for row in warnings:
             port_log(None, f"Texture {row['name']}: {row['message']}; preserving native G4TX entry")
@@ -1946,6 +2196,59 @@ class LEVEL5_G4PORT_OT_generate_texture_pngs(Operator):
             self.report({"ERROR"}, f"{exc} (log: {log_path})")
             return {"CANCELLED"}
         self.report({"INFO"}, f"Prepared {count} atlas texture(s) in {output_dir}; log: {log_path}")
+        return {"FINISHED"}
+
+
+class LEVEL5_G4PORT_OT_initialize_expression_pool(Operator):
+    bl_idname = "level5_g4_port.initialize_expression_pool"
+    bl_label = "Initialize 4x2 Expression Pool"
+
+    def execute(self, context):
+        pool = settings(context).expression_pool
+        pool.clear()
+        for _ in range(FACE_ATLAS_SLOTS):
+            pool.add()
+        self.report({"INFO"}, "Expression pool initialized with 8 slots (4x2)")
+        return {"FINISHED"}
+
+
+class LEVEL5_G4PORT_OT_build_expression_atlas(Operator):
+    bl_idname = "level5_g4_port.build_expression_atlas"
+    bl_label = "Build 4x2 Expression Atlas"
+    bl_description = "Build the shared eye/mouth texture from 8 expression images"
+
+    def execute(self, context):
+        prefs = addon_preferences()
+        props = settings(context)
+        package_root = resolve_file(getattr(prefs, "output_root", ""), default_output_root())
+        model_name = Path(props.model_rel).name or "model"
+        try:
+            output_path = build_expression_pool_atlas(props, package_root / "texture_sources" / model_name)
+        except Exception as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Built 4x2 expression atlas: {output_path.name}")
+        return {"FINISHED"}
+
+
+class LEVEL5_G4PORT_OT_use_existing_expression_atlas(Operator):
+    bl_idname = "level5_g4_port.use_existing_expression_atlas"
+    bl_label = "Use Existing 4x2 Atlas"
+    bl_description = "Use the selected prepared facial atlas without rebuilding it"
+
+    def execute(self, context):
+        props = settings(context)
+        texture_name = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+        entry = texture_entry(props, texture_name)
+        source = Path(bpy.path.abspath(entry.replacement_path)) if entry is not None and entry.replacement_path else None
+        if entry is None or source is None or load_image_pixels(str(source)) is None:
+            self.report({"ERROR"}, "Choose a valid prepared 4x2 facial atlas first")
+            return {"CANCELLED"}
+        entry.expression_atlas = True
+        entry.expression_atlas_mode = "existing"
+        entry.atlas_signature = ""
+        entry.atlas_summary = f"Existing 4x2 expression atlas, {source.name}"
+        self.report({"INFO"}, f"Using existing 4x2 expression atlas: {source.name}")
         return {"FINISHED"}
 
 
@@ -2246,6 +2549,20 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
                 row.prop(entry, "replacement_path", text="")
         else:
             box.label(text="Load an original model to list its G4TX textures", icon="INFO")
+        face_key = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+        if face_key:
+            expression_box = box.box()
+            expression_box.label(text=f"Expression pool for {face_key} (4x2)", icon="SEQ_CHROMA_SCOPE")
+            expression_box.label(text="eye_10 and mouth_10 keep the native atlas unless a 4x2 source is explicitly accepted", icon="INFO")
+            face_entry = texture_entry(props, face_key)
+            if face_entry is not None:
+                expression_box.prop(face_entry, "replacement_path", text="Existing 4x2 Atlas")
+            row = expression_box.row(align=True)
+            row.operator(LEVEL5_G4PORT_OT_use_existing_expression_atlas.bl_idname, icon="CHECKMARK")
+            row.operator(LEVEL5_G4PORT_OT_initialize_expression_pool.bl_idname, icon="ADD")
+            row.operator(LEVEL5_G4PORT_OT_build_expression_atlas.bl_idname, icon="IMAGE_DATA")
+            for index, item in enumerate(props.expression_pool):
+                expression_box.prop(item, "image_path", text=f"Cell {index % FACE_ATLAS_COLUMNS + 1}, {index // FACE_ATLAS_COLUMNS + 1}")
         box.prop(props, "generate_png_set_on_export")
         box.prop(props, "use_source_uv_transforms")
         box.prop(props, "auto_pack_source_uvs")
@@ -2295,6 +2612,7 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
     box.prop(props, "align_forward_to_y")
+    box.prop(props, "preserve_native_roundtrip")
 
 
 class LEVEL5_G4PORT_PT_panel(Panel):
@@ -2328,6 +2646,7 @@ classes.extend([
     G4PortObjectSettings,
     G4PortJointAlias,
     G4PortTextureReplacement,
+    G4PortExpressionImage,
     G4PortRecord,
     G4PortSceneSettings,
     LEVEL5_G4PORT_UL_records,
@@ -2339,6 +2658,9 @@ classes.extend([
     LEVEL5_G4PORT_OT_guess_assignments,
     LEVEL5_G4PORT_OT_use_active_texture,
     LEVEL5_G4PORT_OT_generate_texture_pngs,
+    LEVEL5_G4PORT_OT_initialize_expression_pool,
+    LEVEL5_G4PORT_OT_build_expression_atlas,
+    LEVEL5_G4PORT_OT_use_existing_expression_atlas,
     LEVEL5_G4PORT_OT_reset_object_uv_tiles,
     LEVEL5_G4PORT_OT_detect_vertex_groups,
     LEVEL5_G4PORT_OT_auto_map_joints,
