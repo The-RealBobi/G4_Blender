@@ -26,9 +26,9 @@ from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup, UIList
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 try:
-    from .g4_roundtrip import native_mesh_signature
+    from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
 except ImportError:
-    from g4_roundtrip import native_mesh_signature
+    from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
 
 
 ADDON_ID = __name__.split(".", 1)[0] if "." in __name__ else __name__
@@ -1443,7 +1443,7 @@ def reset_uv_tiles(props: G4PortSceneSettings) -> None:
 
 
 def restore_native_uvs(props: G4PortSceneSettings, original_model: Path) -> tuple[int, list[str]]:
-    """Restore imported mesh UVs directly from the selected native G4MD/G4MG pair."""
+    """Restore only the authored eye/mouth UV windows from the native G4MD/G4MG pair."""
     if original_model.suffix.lower() != ".g4md" or not original_model.is_file():
         raise RuntimeError("Choose the original .g4md before restoring native UVs.")
     g4mg_path = original_model.with_suffix(".g4mg")
@@ -1459,6 +1459,8 @@ def restore_native_uvs(props: G4PortSceneSettings, original_model: Path) -> tupl
     restored = 0
     skipped = []
     for record in props.records:
+        if not is_face_atlas_record(record):
+            continue
         if record.original_index < 0 or record.original_index >= len(model["records"]):
             continue
         native_record = model["records"][record.original_index]
@@ -1941,6 +1943,40 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path) ->
     return output_path
 
 
+def legacy_native_mesh_matches_source(obj, original_model: Path, native_index: int) -> bool:
+    """Verify the geometry and UVs of a pre-v2 import before upgrading its snapshot."""
+    if original_model.suffix.lower() != ".g4md" or native_index < 0:
+        return False
+    g4mg_path = original_model.with_suffix(".g4mg")
+    if not g4mg_path.is_file():
+        return False
+    try:
+        from .g4_model_probe import parse_g4md, read_uv0
+    except ImportError:
+        from g4_model_probe import parse_g4md, read_uv0
+    g4mg = g4mg_path.read_bytes()
+    model = parse_g4md(original_model.read_bytes(), g4mg)
+    if native_index >= len(model["records"]):
+        return False
+    record = model["records"][native_index]
+    if len(obj.data.vertices) != record["vertex_count"]:
+        return False
+    for index, vertex in enumerate(obj.data.vertices):
+        offset = record["vertex_offset"] + index * record["vertex_stride"]
+        native_position = struct.unpack_from("<3f", g4mg, offset)
+        if any(abs(value - expected) > 1e-5 for value, expected in zip(vertex.co, native_position)):
+            return False
+    uv_layer = obj.data.uv_layers.active
+    if uv_layer is None:
+        return False
+    for loop in obj.data.loops:
+        native_uv = read_uv0(g4mg, model, record, loop.vertex_index)
+        current_uv = uv_layer.data[loop.index].uv
+        if abs(current_uv.x - native_uv[0]) > 1e-5 or abs(current_uv.y - native_uv[1]) > 1e-5:
+            return False
+    return all(abs(value - expected) <= 1e-5 for row, expected_row in zip(obj.matrix_world, ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))) for value, expected in zip(row, expected_row))
+
+
 def has_unchanged_native_roundtrip(props: G4PortSceneSettings, original_model: Path) -> bool:
     """True only when the current assignment is an untouched native import."""
     if not props.preserve_native_roundtrip or original_model.suffix.lower() != ".g4md":
@@ -1958,8 +1994,15 @@ def has_unchanged_native_roundtrip(props: G4PortSceneSettings, original_model: P
         for obj in objects:
             if obj.get("g4_native_model_source") != source:
                 return False
-            if obj.get("g4_native_roundtrip_signature") != native_mesh_signature(obj):
-                return False
+            signature_matches = (
+                obj.get("g4_native_roundtrip_signature_version") == NATIVE_ROUNDTRIP_SIGNATURE_VERSION
+                and obj.get("g4_native_roundtrip_signature") == native_mesh_signature(obj)
+            )
+            if not signature_matches:
+                if not legacy_native_mesh_matches_source(obj, original_model, record.original_index):
+                    return False
+                obj["g4_native_roundtrip_signature"] = native_mesh_signature(obj)
+                obj["g4_native_roundtrip_signature_version"] = NATIVE_ROUNDTRIP_SIGNATURE_VERSION
             target = getattr(obj.level5_g4_port, "target_record", "__none__")
             if target not in {"__none__", record.output_name}:
                 return False
@@ -2322,8 +2365,8 @@ class LEVEL5_G4PORT_OT_reset_object_uv_tiles(Operator):
 
 class LEVEL5_G4PORT_OT_restore_native_uvs(Operator):
     bl_idname = "level5_g4_port.restore_native_uvs"
-    bl_label = "Restore Native UVs"
-    bl_description = "Restore assigned meshes' UVs from the selected original G4MD/G4MG and clear atlas tiles"
+    bl_label = "Restore Native Face UVs"
+    bl_description = "Restore only eye_10 and mouth_10 UVs from the selected original G4MD/G4MG and clear atlas tiles"
 
     def execute(self, context):
         props = settings(context)
@@ -2333,7 +2376,7 @@ class LEVEL5_G4PORT_OT_restore_native_uvs(Operator):
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        message = f"Restored native UVs on {restored} mesh(es)"
+        message = f"Restored native eye/mouth UVs on {restored} mesh(es)"
         if skipped:
             message += f"; skipped: {', '.join(skipped)}"
         self.report({"INFO"}, message)
@@ -2643,7 +2686,7 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
         row = box.row(align=True)
         row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
         row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
-        box.operator(LEVEL5_G4PORT_OT_restore_native_uvs.bl_idname, icon="UV")
+        box.operator(LEVEL5_G4PORT_OT_restore_native_uvs.bl_idname, text="Restore Native Face UVs (Optional)", icon="UV")
 
     if include_actions:
         row = layout.row(align=True)

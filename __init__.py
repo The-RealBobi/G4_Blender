@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 20),
+    "version": (0, 16, 21),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -70,10 +70,10 @@ def suspended_global_undo(context):
 
 try:
     from . import g4_port_addon
-    from .g4_roundtrip import native_mesh_signature
+    from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
 except ImportError:
     import g4_port_addon
-    from g4_roundtrip import native_mesh_signature
+    from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
 
 try:
     from . import g4_animation_addon
@@ -779,6 +779,7 @@ def mark_native_roundtrip_objects(imported_names: set[str], source_path: Path) -
             continue
         obj["g4_native_model_source"] = source
         obj["g4_native_roundtrip_signature"] = native_mesh_signature(obj)
+        obj["g4_native_roundtrip_signature_version"] = NATIVE_ROUNDTRIP_SIGNATURE_VERSION
 
 
 def global_orientation_matrices(names: list[str], parents: list[int], rotations: list[list[float]]) -> list[Matrix]:
