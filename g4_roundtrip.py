@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 
 
+NATIVE_ROUNDTRIP_SIGNATURE_VERSION = 2
+
+
 def native_mesh_signature(obj) -> str:
     digest = hashlib.sha256()
     digest.update(obj.name.encode("utf-8"))
@@ -13,7 +16,6 @@ def native_mesh_signature(obj) -> str:
     mesh = obj.data
     for vertex in mesh.vertices:
         digest.update(f"{tuple(round(value, 8) for value in vertex.co)}|".encode("ascii"))
-        digest.update(f"{tuple(round(value, 8) for value in vertex.normal)};".encode("ascii"))
     for polygon in mesh.polygons:
         digest.update(f"{polygon.material_index}:{tuple(polygon.vertices)};".encode("ascii"))
     uv_layer = mesh.uv_layers.active

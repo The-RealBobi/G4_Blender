@@ -143,7 +143,7 @@ Texture replacement is deliberate and non-destructive:
 
 The default atlas source is the first diffuse image used by the mesh. **Atlas Source** lets you override it. Empty, stale or unreadable entries never write blank textures or UV-guide PNGs: the exporter removes only its failed generated atlas, logs a warning and keeps the native G4TX payload. Object UV tiles are exported only for a base texture that is actually replaced; native textures keep their original UVs. `line`, `oc`, `sp` and `spm` maps are preserved unless **Replace Special Maps** is enabled.
 
-If a Blender scene was prepared with an earlier add-on version and its UVs were already altered, use **Restore Native UVs** in **Prepare and review atlas**. It restores each assigned mesh's UV layer from the selected original G4MD/G4MG, clears atlas tiles and skips meshes whose vertex count no longer matches the original.
+If a Blender scene needs its facial windows reset, use **Restore Native Face UVs (Optional)** in **Prepare and review atlas**. It is never automatic: only `eye_10` and `mouth_10` are restored from the selected original G4MD/G4MG, then atlas tiles are cleared. Other meshes are left untouched.
 
 `eye_10` and `mouth_10` share the native facial texture (`*_10`) and therefore never create a new base atlas. Generic replacement paths for that entry are ignored deliberately: they would invalidate its authored UV windows. A prepared atlas from another model can be accepted explicitly through **Existing 4x2 Atlas** and **Use Existing 4x2 Atlas**. Alternatively, initialize **Expression pool**, provide eight images in row-major order, then choose **Build 4x2 Expression Atlas**. Both routes replace only the shared facial G4TX entry; until then, its native payload is preserved.
 
