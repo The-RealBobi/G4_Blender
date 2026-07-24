@@ -1451,67 +1451,6 @@ def reset_uv_tiles(props: G4PortSceneSettings) -> None:
         uv.uv_offset_v = 0.0
 
 
-def restore_native_uvs(props: G4PortSceneSettings, original_model: Path) -> tuple[int, list[str]]:
-    """Restore only the authored eye/mouth UV windows from the native G4MD/G4MG pair."""
-    if original_model.suffix.lower() != ".g4md" or not original_model.is_file():
-        raise RuntimeError("Choose the original .g4md before restoring native UVs.")
-    g4mg_path = original_model.with_suffix(".g4mg")
-    if not g4mg_path.is_file():
-        raise RuntimeError(f"Original G4MG not found: {g4mg_path}")
-    try:
-        from .g4_model_probe import parse_g4md, read_uv0
-    except ImportError:
-        from g4_model_probe import parse_g4md, read_uv0
-
-    g4mg = g4mg_path.read_bytes()
-    model = parse_g4md(original_model.read_bytes(), g4mg)
-    restored = 0
-    skipped = []
-    for record in props.records:
-        if not is_face_atlas_record(record):
-            continue
-        if record.original_index < 0 or record.original_index >= len(model["records"]):
-            continue
-        native_record = model["records"][record.original_index]
-        native_uvs = [read_uv0(g4mg, model, native_record, index) for index in range(native_record["vertex_count"])]
-        native_positions = [
-            struct.unpack_from("<3f", g4mg, native_record["vertex_offset"] + index * native_record["vertex_stride"])
-            for index in range(native_record["vertex_count"])
-        ]
-        for obj in objects_for_record(record):
-            if len(obj.data.vertices) == len(native_uvs):
-                uv_by_vertex = native_uvs
-            else:
-                extent = max(
-                    max(position[axis] for position in native_positions) - min(position[axis] for position in native_positions)
-                    for axis in range(3)
-                )
-                tolerance_squared = max(extent * 1e-4, 1e-5) ** 2
-                uv_by_vertex = []
-                for vertex in obj.data.vertices:
-                    nearest = min(
-                        range(len(native_positions)),
-                        key=lambda index: sum((vertex.co[axis] - native_positions[index][axis]) ** 2 for axis in range(3)),
-                    )
-                    distance_squared = sum((vertex.co[axis] - native_positions[nearest][axis]) ** 2 for axis in range(3))
-                    if distance_squared > tolerance_squared:
-                        uv_by_vertex = []
-                        break
-                    uv_by_vertex.append(native_uvs[nearest])
-            if not uv_by_vertex:
-                skipped.append(f"{obj.name} (no safe native position match)")
-                continue
-            uv_layer = obj.data.uv_layers.active or obj.data.uv_layers.new(name="UVMap")
-            for loop in obj.data.loops:
-                uv_layer.data[loop.index].uv = uv_by_vertex[loop.vertex_index]
-            obj.data.update()
-            restored += 1
-    reset_uv_tiles(props)
-    props.use_source_uv_transforms = False
-    props.auto_pack_source_uvs = False
-    return restored, skipped
-
-
 def records_grouped_by_texture(props: G4PortSceneSettings) -> dict[str, list[G4PortRecord]]:
     records_by_texture: dict[str, list[G4PortRecord]] = {}
     for record in props.records:
@@ -2395,26 +2334,6 @@ class LEVEL5_G4PORT_OT_reset_object_uv_tiles(Operator):
         return {"FINISHED"}
 
 
-class LEVEL5_G4PORT_OT_restore_native_uvs(Operator):
-    bl_idname = "level5_g4_port.restore_native_uvs"
-    bl_label = "Restore Native Face UVs"
-    bl_description = "Restore only eye_10 and mouth_10 UVs from the selected original G4MD/G4MG and clear atlas tiles"
-
-    def execute(self, context):
-        props = settings(context)
-        original_model = resolve_file(props.original_model)
-        try:
-            restored, skipped = restore_native_uvs(props, original_model)
-        except Exception as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        message = f"Restored native eye/mouth UVs on {restored} mesh(es)"
-        if skipped:
-            message += f"; skipped: {', '.join(skipped)}"
-        self.report({"INFO"}, message)
-        return {"FINISHED"}
-
-
 class LEVEL5_G4PORT_OT_detect_vertex_groups(Operator):
     bl_idname = "level5_g4_port.detect_vertex_groups"
     bl_label = "Detect Vertex Groups"
@@ -2718,7 +2637,6 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
         row = box.row(align=True)
         row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
         row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
-        box.operator(LEVEL5_G4PORT_OT_restore_native_uvs.bl_idname, text="Restore Native Face UVs (Optional)", icon="UV")
 
     if include_actions:
         row = layout.row(align=True)
@@ -2811,7 +2729,6 @@ classes.extend([
     LEVEL5_G4PORT_OT_build_expression_atlas,
     LEVEL5_G4PORT_OT_use_existing_expression_atlas,
     LEVEL5_G4PORT_OT_reset_object_uv_tiles,
-    LEVEL5_G4PORT_OT_restore_native_uvs,
     LEVEL5_G4PORT_OT_detect_vertex_groups,
     LEVEL5_G4PORT_OT_auto_map_joints,
     LEVEL5_G4PORT_OT_add_joint_alias,
