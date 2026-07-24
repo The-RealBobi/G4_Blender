@@ -737,15 +737,26 @@ class G4PortSceneSettings(PropertyGroup):
                 key = key.strip()
                 if key == face_texture:
                     continue
+                entry = texture_entry(self, key)
+                if entry is not None and entry.atlas_signature and atlas_states.get(key) == "warning":
+                    continue
                 if self.replace_special_textures or not is_special_texture(key):
                     result[key] = value.strip()
         return result
 
     def to_config(self) -> dict:
+        active_texture_keys = set(self.texture_map())
         return {
             "model_rel": self.model_rel,
             "native_material_names": split_csv(self.native_material_names),
-            "records": [record.to_config(self.use_source_uv_transforms) for record in self.records],
+            "records": [
+                record.to_config(
+                    self.use_source_uv_transforms
+                    and record.texture_key in active_texture_keys
+                    and not is_face_atlas_record(record)
+                )
+                for record in self.records
+            ],
             "texture_replacements": self.texture_map(),
             "texture_platform": self.texture_platform,
             "material_overrides": [],
@@ -1508,6 +1519,10 @@ def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
         signature = atlas_signature(texture_name, records)
         objects = [obj for _, obj in texture_items_for_records(records)]
         missing = [obj.name for obj in objects if not source_path_for_object(obj)]
+        unreadable = [
+            obj.name for obj in objects
+            if source_path_for_object(obj) and load_image_pixels(source_path_for_object(obj)) is None
+        ] if not shared_face else []
         repeated = [
             obj.name for obj in objects
             if (bounds := object_uv_bounds(obj)) and (bounds[0] < 0.0 or bounds[1] > 1.0 or bounds[2] < 0.0 or bounds[3] > 1.0)
@@ -1533,6 +1548,8 @@ def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
             state, message = "native", "Shared eye/mouth 4x2 atlas preserved"
         elif missing:
             state, message = "warning", f"Missing source: {', '.join(missing)}"
+        elif unreadable:
+            state, message = "warning", f"Unreadable source: {', '.join(unreadable)}; native G4TX entry will be preserved"
         elif not objects:
             state, message = "native", "No assigned meshes; native G4TX entry will be preserved"
         elif fresh:
