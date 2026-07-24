@@ -196,7 +196,12 @@ def cstr(data: bytes, offset: int) -> str:
 def infer_raw_data_root(path: Path) -> Path | None:
     parts = path.resolve().parts
     for index, part in enumerate(parts):
-        if part == "data" and index + 1 < len(parts) and parts[index + 1] in {"common", "dx11", "nx"}:
+        part_name = part.lower()
+        if (
+            (part_name == "data" or part_name.startswith("data."))
+            and index + 1 < len(parts)
+            and parts[index + 1].lower() in {"common", "dx11", "nx"}
+        ):
             return Path(*parts[: index + 1])
     return None
 
@@ -1351,9 +1356,12 @@ def model_relpath_candidates(path: Path) -> set[str]:
             add(Path("_face", *parts[1:]))
 
     try:
-        rel = path.relative_to(RAW_DATA_ROOT)
+        rel = path.resolve().relative_to(RAW_DATA_ROOT)
     except ValueError:
-        rel = None
+        try:
+            rel = path.relative_to(RAW_DATA_ROOT)
+        except ValueError:
+            rel = None
     if rel is not None:
         parts = list(rel.parts)
         if len(parts) >= 2 and parts[0] in {"common", "dx11", "nx"} and parts[1] == "chr":
