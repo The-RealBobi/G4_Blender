@@ -148,6 +148,8 @@ The default atlas source is the first diffuse image used by the mesh. **Atlas So
 
 Atlas diagnostics are written to `atlas_uv_trace.log` in the configured export cache. It lists each source image, UV bounds, atlas cell, scale and offset, then appends the exact converter command and its output. Analysis/export reports also include `uv_transform_trace` for every generated native record.
 
+Atlas offsets are authored in Blender image space and converted automatically when the G4 V flip is enabled, so the visible top row remains the top row in the exported model.
+
 ## Requirements
 
 * Blender 4.0 or newer

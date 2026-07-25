@@ -421,6 +421,18 @@ COMMON_JOINT_ALIASES = {
     "r_hair_b01": "r_hir2_1_1",
     "r_hair_b02": "r_hir2_1_2",
     "r_hair_b03": "r_hir3_1_0",
+    "l_twintail_01": "l_hir1_1_0",
+    "l_twintail_02": "l_hir1_1_1",
+    "l_twintail_03": "l_hir2_1_0",
+    "l_twintail_04": "l_hir2_1_1",
+    "r_twintail_01": "r_hir1_1_0",
+    "r_twintail_02": "r_hir1_1_1",
+    "r_twintail_03": "r_hir2_1_0",
+    "r_twintail_04": "r_hir2_1_1",
+    "r_twintair_01": "r_hir1_1_0",
+    "r_twintair_02": "r_hir1_1_1",
+    "r_twintair_03": "r_hir2_1_0",
+    "r_twintair_04": "r_hir2_1_1",
     "l_ribbon_a01": "l_hir3_1_1",
     "l_ribbon_b01": "l_hir4_1_0",
     "l_ribbon_b02": "l_hir4_1_0",
@@ -597,7 +609,7 @@ class G4PortRecord(PropertyGroup):
     )
     weight_anchor_joint: StringProperty(name="Anchor Joint", default="")
 
-    def to_config(self, include_source_uv_transforms: bool = False) -> dict:
+    def to_config(self, include_source_uv_transforms: bool = False, source_uv_flip_y: bool = False) -> dict:
         item = {
             "output_name": self.output_name,
             "material_name": self.material_name,
@@ -615,9 +627,13 @@ class G4PortRecord(PropertyGroup):
             for obj in objects_for_record(self):
                 uv = obj.level5_g4_port
                 if uv.uv_scale_u != 1.0 or uv.uv_scale_v != 1.0 or uv.uv_offset_u or uv.uv_offset_v:
+                    # g4_port applies source transforms before packing its
+                    # global V flip. Convert the atlas-space offset so the
+                    # resulting G4 UV still samples the requested Blender cell.
+                    offset_v = 1.0 - uv.uv_scale_v - uv.uv_offset_v if source_uv_flip_y else uv.uv_offset_v
                     source_uv_transforms[obj.name] = {
                         "scale": [uv.uv_scale_u, uv.uv_scale_v],
-                        "offset": [uv.uv_offset_u, uv.uv_offset_v],
+                        "offset": [uv.uv_offset_u, offset_v],
                     }
             if source_uv_transforms:
                 item["source_uv_transforms"] = source_uv_transforms
@@ -774,7 +790,7 @@ class G4PortSceneSettings(PropertyGroup):
                 and record.texture_key in active_texture_keys
                 and (not is_face_atlas_record(record) or face_pool_atlas_active(self, record))
             )
-            item = record.to_config(atlas_transform)
+            item = record.to_config(atlas_transform, self.global_uv_flip_y or record.uv_flip_y)
             if not atlas_transform:
                 # Native G4TX entries retain their authored UV windows.  Atlas
                 # controls are meaningful only for an explicitly replaced map.
@@ -1515,7 +1531,7 @@ def object_uv_transform_summary(obj: bpy.types.Object) -> str:
 
 def assign_texture_uv_tiles(records_by_texture: dict[str, list[G4PortRecord]]) -> None:
     for records in records_by_texture.values():
-        items = [(record, obj) for record in records for obj in objects_for_record(record)]
+        items = [(record, obj) for record in records if not is_face_atlas_record(record) for obj in objects_for_record(record)]
         if not items:
             continue
         columns, rows = atlas_grid(len(items))
