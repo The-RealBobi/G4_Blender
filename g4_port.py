@@ -122,6 +122,7 @@ class Mesh:
     material_index: int
     material_name: str
     source_names: tuple[str, ...] = ()
+    uv_transform_trace: tuple[dict[str, object], ...] = ()
 
 
 @dataclass
@@ -1388,12 +1389,31 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
     def merge(rule: RecordRule, material_index: int, material_name: str, parts: list[Mesh]) -> Mesh:
         vertices: list[Vertex] = []
         indices: list[int] = []
+        uv_transform_trace = []
         for part in parts:
             base = len(vertices)
             scale, offset = source_uv_transform(part, rule)
+            uv_transform_trace.append({
+                "source": part.name,
+                "material": part.material_name,
+                "scale": list(scale),
+                "offset": list(offset),
+                "input_uv_bounds": [
+                    [min((vertex.uv[axis] for vertex in part.vertices), default=0.0), max((vertex.uv[axis] for vertex in part.vertices), default=0.0)]
+                    for axis in range(2)
+                ],
+            })
             vertices.extend(transformed_source_vertex(vertex, scale, offset) for vertex in part.vertices)
             indices.extend(base + index for index in part.indices)
-        return Mesh(rule.output_name, vertices, indices, material_index, material_name, tuple(part.name for part in parts))
+        return Mesh(
+            rule.output_name,
+            vertices,
+            indices,
+            material_index,
+            material_name,
+            tuple(part.name for part in parts),
+            tuple(uv_transform_trace),
+        )
 
     zero = Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.5, 0.5))
     wildcard_rules = [rule for rule in config.records if "*" in rule.match_names]
@@ -2007,6 +2027,7 @@ def prepare_port_geometry(
         resolved_records.append({
             "record": mesh.name,
             "source_names": list(mesh.source_names),
+            "uv_transform_trace": list(mesh.uv_transform_trace),
             "vertices": len(mesh.vertices),
             "indices": len(mesh.indices),
             "weighted_vertices": sum(bool(vertex.influences) for vertex in mesh.vertices),

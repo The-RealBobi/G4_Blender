@@ -196,6 +196,18 @@ def first_used_material_image(obj: bpy.types.Object) -> str:
     return material_image_path(obj.active_material)
 
 
+def used_material_summary(obj: bpy.types.Object) -> str:
+    if obj is None or obj.type != "MESH":
+        return "<none>"
+    indices = sorted({polygon.material_index for polygon in obj.data.polygons})
+    parts = []
+    for index in indices:
+        material = obj.data.materials[index] if 0 <= index < len(obj.data.materials) else None
+        image = material_image_path(material)
+        parts.append(f"{index}:{material.name if material else '<none>'}={Path(image).name if image else '<none>'}")
+    return "; ".join(parts) or "<none>"
+
+
 def active_material_image_path(context) -> str:
     obj = context.active_object
     if obj is None or obj.type != "MESH":
@@ -362,6 +374,14 @@ def is_face_atlas_record(record) -> bool:
     name = record.output_name.lower()
     material = record.material_name.lower().removesuffix("m")
     return name in {"eye_10", "mouth_10"} or material in {"eye_10", "mouth_10"}
+
+
+def face_pool_atlas_active(props, record) -> bool:
+    """Only a newly built expression pool remaps the source face into cell 1."""
+    if not is_face_atlas_record(record):
+        return False
+    entry = texture_entry(props, record.texture_key)
+    return bool(entry and entry.expression_atlas and entry.expression_atlas_mode == "pool")
 
 
 def assign_shared_face_texture_key(records, texture_names: list[str]) -> str:
@@ -752,7 +772,7 @@ class G4PortSceneSettings(PropertyGroup):
             atlas_transform = (
                 self.use_source_uv_transforms
                 and record.texture_key in active_texture_keys
-                and not is_face_atlas_record(record)
+                and (not is_face_atlas_record(record) or face_pool_atlas_active(self, record))
             )
             item = record.to_config(atlas_transform)
             if not atlas_transform:
@@ -1483,6 +1503,16 @@ def set_object_uv_tile(obj: bpy.types.Object, origin_u: float, origin_v: float, 
     uv.uv_offset_v = origin_v
 
 
+def object_uv_transform_summary(obj: bpy.types.Object) -> str:
+    uv = obj.level5_g4_port
+    bounds = object_uv_bounds(obj)
+    bounds_text = "none" if bounds is None else "(" + ", ".join(f"{value:.6f}" for value in bounds) + ")"
+    return (
+        f"bounds={bounds_text} scale=({uv.uv_scale_u:.6f},{uv.uv_scale_v:.6f}) "
+        f"offset=({uv.uv_offset_u:.6f},{uv.uv_offset_v:.6f})"
+    )
+
+
 def assign_texture_uv_tiles(records_by_texture: dict[str, list[G4PortRecord]]) -> None:
     for records in records_by_texture.values():
         items = [(record, obj) for record in records for obj in objects_for_record(record)]
@@ -1716,9 +1746,12 @@ def build_texture_spritesheet(
     source_cache = {}
     for index, (record, obj) in enumerate(items, 1):
         source_path = source_path_for_item(record, obj)
+        bounds = object_uv_bounds(obj)
         port_log(
             log_path,
-            f"{entry['name']}: [{index}/{len(items)}] {obj.name} record={record.output_name} source={source_path or '<none>'}",
+            f"{entry['name']}: [{index}/{len(items)}] {obj.name} record={record.output_name} "
+            f"source={source_path or '<none>'} uv_bounds={bounds or '<none>'} extension={object_image_extension(obj)} "
+            f"used_materials=[{used_material_summary(obj)}]",
         )
         started = time.perf_counter()
         cache_key = str(Path(bpy.path.abspath(source_path)).resolve()) if source_path else ""
@@ -1803,6 +1836,7 @@ def build_texture_spritesheet(
             for record, obj in zip(records_in_group, objects):
                 if update_uv_transforms:
                     set_object_uv_fit(obj, origin_u, origin_v, rect_u, rect_v)
+                    port_log(log_path, f"{entry['name']}: {obj.name} guide-cell UV transform {object_uv_transform_summary(obj)}")
                 if draw_missing_guides:
                     port_log(log_path, f"{entry['name']}: drawing UV guide for {obj.name} ({len(obj.data.polygons)} polygon(s))")
                     started = time.perf_counter()
@@ -1821,6 +1855,11 @@ def build_texture_spritesheet(
         if update_uv_transforms:
             for obj in objects:
                 set_object_uv_fit(obj, draw_x / width, draw_y / height, draw_width / width, draw_height / height)
+                port_log(
+                    log_path,
+                    f"{entry['name']}: {obj.name} group={index + 1} cell=({column},{row}) "
+                    f"content_px=({draw_x},{draw_y},{draw_width},{draw_height}) {object_uv_transform_summary(obj)}",
+                )
     port_log(log_path, f"{entry['name']}: saving {path}")
     started = time.perf_counter()
     save_png(path, width, height, pixels)
@@ -1952,7 +1991,7 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
     return len(replacements)
 
 
-def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path) -> Path:
+def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path, log_path: Path | None = None) -> Path:
     texture_name = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
     entry = texture_entry(props, texture_name)
     if entry is None:
@@ -1999,6 +2038,22 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path) ->
     entry.expression_atlas = True
     entry.expression_atlas_mode = "pool"
     props.texture_source_dir = str(output_dir)
+    # Pool cells contain complete face expressions.  The source face and mouth
+    # therefore both sample Cell 1 (top-left) instead of spanning all eight.
+    face_records = [record for record in props.records if is_face_atlas_record(record) and record.texture_key == texture_name]
+    origin_u = 0.0
+    origin_v = (FACE_ATLAS_ROWS - 1) / FACE_ATLAS_ROWS
+    scale_u = 1.0 / FACE_ATLAS_COLUMNS
+    scale_v = 1.0 / FACE_ATLAS_ROWS
+    for record in face_records:
+        for obj in objects_for_record(record):
+            set_object_uv_tile(obj, origin_u, origin_v, scale_u, scale_v)
+            port_log(
+                log_path,
+                f"{texture_name}: expression pool Cell 1 -> {obj.name} ({record.output_name}) "
+                f"scale=({scale_u:.6f},{scale_v:.6f}) offset=({origin_u:.6f},{origin_v:.6f})",
+            )
+    props.use_source_uv_transforms = bool(face_records)
     return output_path
 
 
@@ -2114,6 +2169,20 @@ def copy_unchanged_native_roundtrip(
     }
 
 
+def write_uv_export_trace(props: G4PortSceneSettings, config: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["G4 atlas UV export trace", f"Texture replacements: {config.get('texture_replacements', {})}"]
+    for record in config.get("records", []):
+        transforms = record.get("source_uv_transforms", {})
+        lines.append(
+            f"Record {record.get('output_name')}: source transforms={len(transforms)} "
+            f"record_scale={record.get('uv_scale', [1.0, 1.0])} record_offset={record.get('uv_offset', [0.0, 0.0])}"
+        )
+        for name, transform in transforms.items():
+            lines.append(f"  {name}: scale={transform.get('scale')} offset={transform.get('offset')}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     prefs = addon_preferences()
     props = settings(context)
@@ -2175,7 +2244,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     prepare_custom_textures(props, dae_path)
 
     config = generated_config_path(cache)
-    config.write_text(json.dumps(props.to_config(), indent=2), encoding="utf-8")
+    config_data = props.to_config()
+    config.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+    trace_path = cache / "atlas_uv_trace.log"
+    write_uv_export_trace(props, config_data, trace_path)
 
     needs_pillow = props.texture_mode == "custom" and any(
         Path(path).suffix.lower() not in {".dds", ".nxtch"}
@@ -2203,6 +2275,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         command.extend(["--texture-mode", props.texture_mode, "--out-root", str(output_root)])
 
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    with trace_path.open("a", encoding="utf-8") as stream:
+        stream.write("\nConverter command:\n" + shlex.join(command) + "\n")
+        stream.write("\nConverter stdout:\n" + (completed.stdout or "<empty>") + "\n")
+        stream.write("\nConverter stderr:\n" + (completed.stderr or "<empty>") + "\n")
     if completed.returncode != 0:
         raise RuntimeError(
             "G4 port export failed\n"
@@ -2387,8 +2463,9 @@ class LEVEL5_G4PORT_OT_build_expression_atlas(Operator):
         props = settings(context)
         package_root = resolve_file(getattr(prefs, "output_root", ""), default_output_root())
         model_name = Path(props.model_rel).name or "model"
+        log_path = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir()) / "atlas_uv_trace.log"
         try:
-            output_path = build_expression_pool_atlas(props, package_root / "texture_sources" / model_name)
+            output_path = build_expression_pool_atlas(props, package_root / "texture_sources" / model_name, log_path)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
