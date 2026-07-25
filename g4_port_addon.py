@@ -38,6 +38,7 @@ MAX_GENERATED_TEXTURE_SIZE = 2048
 FACE_ATLAS_COLUMNS = 4
 FACE_ATLAS_ROWS = 2
 FACE_ATLAS_SLOTS = FACE_ATLAS_COLUMNS * FACE_ATLAS_ROWS
+ATLAS_GUTTER_PIXELS = 2
 
 
 def default_python() -> str:
@@ -1284,15 +1285,19 @@ def blit_image_fit(
     cell_y: int,
     cell_width: int,
     cell_height: int,
+    gutter: int = 0,
 ) -> tuple[int, int, int, int]:
     source_width, source_height, source_pixels = source
     if source_width <= 0 or source_height <= 0 or cell_width <= 0 or cell_height <= 0:
         return cell_x, cell_y, cell_width, cell_height
-    scale = min(cell_width / source_width, cell_height / source_height)
+    gutter = max(0, min(gutter, (cell_width - 1) // 2, (cell_height - 1) // 2))
+    inner_width = max(1, cell_width - gutter * 2)
+    inner_height = max(1, cell_height - gutter * 2)
+    scale = min(inner_width / source_width, inner_height / source_height)
     draw_width = max(1, int(round(source_width * scale)))
     draw_height = max(1, int(round(source_height * scale)))
-    draw_x = cell_x + max(0, (cell_width - draw_width) // 2)
-    draw_y = cell_y + max(0, (cell_height - draw_height) // 2)
+    draw_x = cell_x + gutter + max(0, (inner_width - draw_width) // 2)
+    draw_y = cell_y + gutter + max(0, (inner_height - draw_height) // 2)
     for y in range(draw_height):
         src_y = min(source_height - 1, int(y / max(scale, 0.0001)))
         dst_y = draw_y + y
@@ -1306,7 +1311,67 @@ def blit_image_fit(
             src = (src_y * source_width + src_x) * 4
             dst = (dst_y * target_width + dst_x) * 4
             target[dst : dst + 4] = source_pixels[src : src + 4]
+    if gutter:
+        extend_rect_border(target, target_width, target_height, draw_x, draw_y, draw_width, draw_height, gutter)
     return draw_x, draw_y, draw_width, draw_height
+
+
+def extend_rect_border(
+    pixels: array,
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    rect_width: int,
+    rect_height: int,
+    border: int,
+) -> None:
+    """Duplicate edge texels so filtering never samples a neighbouring atlas cell."""
+    for dst_y in range(max(0, y - border), min(height, y + rect_height + border)):
+        source_y = min(y + rect_height - 1, max(y, dst_y))
+        for dst_x in range(max(0, x - border), min(width, x + rect_width + border)):
+            if x <= dst_x < x + rect_width and y <= dst_y < y + rect_height:
+                continue
+            source_x = min(x + rect_width - 1, max(x, dst_x))
+            source = (source_y * width + source_x) * 4
+            target = (dst_y * width + dst_x) * 4
+            pixels[target : target + 4] = pixels[source : source + 4]
+
+
+def bleed_transparent_pixels(source: tuple[int, int, array], radius: int = 2) -> tuple[int, int, array]:
+    """Give transparent texels nearby colour, avoiding black fringes after filtering."""
+    width, height, source_pixels = source
+    pixels = array("f", source_pixels)
+    has_color = [pixels[index * 4 + 3] > 0.0 for index in range(width * height)]
+    if not any(has_color) or all(has_color):
+        return width, height, pixels
+    # Two pixels are enough for linear filtering.  Keep the pass bounded so
+    # large source maps do not turn atlas preparation into a full image bake.
+    for _ in range(max(1, radius)):
+        changed = False
+        for y in range(height):
+            for x in range(width):
+                target = (y * width + x) * 4
+                target_index = y * width + x
+                if has_color[target_index]:
+                    continue
+                neighbours = []
+                if x > 0:
+                    neighbours.append(target - 4)
+                if x + 1 < width:
+                    neighbours.append(target + 4)
+                if y > 0:
+                    neighbours.append(target - width * 4)
+                if y + 1 < height:
+                    neighbours.append(target + width * 4)
+                source_offset = next((offset for offset in neighbours if has_color[offset // 4]), None)
+                if source_offset is not None:
+                    pixels[target : target + 3] = pixels[source_offset : source_offset + 3]
+                    has_color[target_index] = True
+                    changed = True
+        if not changed:
+            break
+    return width, height, pixels
 
 
 def atlas_grid(count: int) -> tuple[int, int]:
@@ -1486,7 +1551,9 @@ def atlas_signature(texture_name: str, records: list[G4PortRecord]) -> str:
 
 
 def expression_pool_paths(props: G4PortSceneSettings) -> list[Path]:
-    return [Path(bpy.path.abspath(item.image_path)) for item in props.expression_pool if item.image_path]
+    # Keep all eight slots, including an empty one.  Filtering empty slots
+    # would shift every later image into an earlier expression cell.
+    return [Path(bpy.path.abspath(item.image_path)) if item.image_path else Path() for item in props.expression_pool]
 
 
 def expression_pool_signature(props: G4PortSceneSettings, texture_name: str) -> str:
@@ -1620,7 +1687,10 @@ def object_special_texture_path(
 
 
 def texture_items_for_records(records: list[G4PortRecord]) -> list[tuple[G4PortRecord, bpy.types.Object]]:
-    return [(record, obj) for record in records for obj in objects_for_record(record)]
+    items = []
+    for record in records:
+        items.extend((record, obj) for obj in sorted(objects_for_record(record), key=lambda item: item.name.casefold()))
+    return items
 
 
 def build_texture_spritesheet(
@@ -1657,16 +1727,21 @@ def build_texture_spritesheet(
             if source is not None and uv_requires_projection(obj):
                 source = projected_source_image(source, object_uv_bounds(obj), object_image_extension(obj))
                 cache_key = f"{cache_key}|projection:{obj.name}"
+            if source is not None:
+                source = bleed_transparent_pixels(source)
             elapsed = time.perf_counter() - started
             port_log(log_path, f"{entry['name']}: [{index}/{len(items)}] reused cached image ({elapsed:.2f}s)")
             sources.append((record, obj, source, cache_key))
             continue
         source = load_image_pixels(source_path)
         if cache_key and source is not None:
-            source_cache[cache_key] = source
+            source_cache[cache_key] = bleed_transparent_pixels(source)
+            source = source_cache[cache_key]
         if source is not None and uv_requires_projection(obj):
             source = projected_source_image(source, object_uv_bounds(obj), object_image_extension(obj))
             cache_key = f"{cache_key}|projection:{obj.name}"
+        if source is not None:
+            source = bleed_transparent_pixels(source)
         elapsed = time.perf_counter() - started
         if source is None:
             port_log(log_path, f"{entry['name']}: [{index}/{len(items)}] no source image ({elapsed:.2f}s)")
@@ -1716,7 +1791,7 @@ def build_texture_spritesheet(
         column = index % columns
         row = index // columns
         cell_x = column * cell_width
-        cell_y = row * cell_height
+        cell_y = (rows - 1 - row) * cell_height
         source = group["source"]
         objects = group["objects"]
         records_in_group = group["records"]
@@ -1737,7 +1812,7 @@ def build_texture_spritesheet(
         port_log(log_path, f"{entry['name']}: blitting group {index + 1}/{len(groups)} ({len(objects)} object(s)) into cell ({column}, {row})")
         started = time.perf_counter()
         draw_x, draw_y, draw_width, draw_height = blit_image_fit(
-            pixels, width, height, source, cell_x, cell_y, cell_width, cell_height
+            pixels, width, height, source, cell_x, cell_y, cell_width, cell_height, ATLAS_GUTTER_PIXELS
         )
         port_log(
             log_path,
@@ -1901,7 +1976,20 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path) ->
             raise RuntimeError(f"Could not read expression image: {source_path}")
         column = index % FACE_ATLAS_COLUMNS
         row = index // FACE_ATLAS_COLUMNS
-        blit_image_fit(pixels, width, height, source, column * cell_width, row * cell_height, cell_width, cell_height)
+        # The UI labels Row 1 as the top row, while Blender image pixels start
+        # at the bottom.  Convert only at this boundary so slot order remains
+        # the visible left-to-right, top-to-bottom order.
+        cell_y = (FACE_ATLAS_ROWS - 1 - row) * cell_height
+        blit_image_fit(
+            pixels,
+            width,
+            height,
+            bleed_transparent_pixels(source),
+            column * cell_width,
+            cell_y,
+            cell_width,
+            cell_height,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{texture_name}.png"
     save_png(output_path, width, height, pixels)
@@ -1952,7 +2040,17 @@ def has_unchanged_native_roundtrip(props: G4PortSceneSettings, original_model: P
     """True only when the current assignment is an untouched native import."""
     if not props.preserve_native_roundtrip or original_model.suffix.lower() != ".g4md":
         return False
-    if props.texture_mode == "keep" or (props.texture_mode == "custom" and props.texture_map()):
+    if props.texture_mode == "keep":
+        return False
+    # An on-export rebuild or an enabled object transform is an explicit
+    # custom-atlas request even before a PNG exists.  Do not short-circuit it
+    # into a byte copy, otherwise the generated atlas has no matching UVs.
+    if props.texture_mode == "custom" and (
+        props.texture_map()
+        or props.generate_png_set_on_export
+        or props.use_source_uv_transforms
+        or props.auto_pack_source_uvs
+    ):
         return False
     source = str(original_model.resolve())
     records = list(props.records)
@@ -2629,7 +2727,7 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
             row.operator(LEVEL5_G4PORT_OT_initialize_expression_pool.bl_idname, icon="ADD")
             row.operator(LEVEL5_G4PORT_OT_build_expression_atlas.bl_idname, icon="IMAGE_DATA")
             for index, item in enumerate(props.expression_pool):
-                expression_box.prop(item, "image_path", text=f"Cell {index % FACE_ATLAS_COLUMNS + 1}, {index // FACE_ATLAS_COLUMNS + 1}")
+                expression_box.prop(item, "image_path", text=f"Cell {index % FACE_ATLAS_COLUMNS + 1}, row {index // FACE_ATLAS_COLUMNS + 1} (top first)")
         box.prop(props, "generate_png_set_on_export")
         box.prop(props, "use_source_uv_transforms")
         box.prop(props, "auto_pack_source_uvs")
