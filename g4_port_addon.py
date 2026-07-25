@@ -609,7 +609,7 @@ class G4PortRecord(PropertyGroup):
     )
     weight_anchor_joint: StringProperty(name="Anchor Joint", default="")
 
-    def to_config(self, include_source_uv_transforms: bool = False, source_uv_flip_y: bool = False) -> dict:
+    def to_config(self, include_source_uv_transforms: bool = False) -> dict:
         item = {
             "output_name": self.output_name,
             "material_name": self.material_name,
@@ -627,13 +627,9 @@ class G4PortRecord(PropertyGroup):
             for obj in objects_for_record(self):
                 uv = obj.level5_g4_port
                 if uv.uv_scale_u != 1.0 or uv.uv_scale_v != 1.0 or uv.uv_offset_u or uv.uv_offset_v:
-                    # g4_port applies source transforms before packing its
-                    # global V flip. Convert the atlas-space offset so the
-                    # resulting G4 UV still samples the requested Blender cell.
-                    offset_v = 1.0 - uv.uv_scale_v - uv.uv_offset_v if source_uv_flip_y else uv.uv_offset_v
                     source_uv_transforms[obj.name] = {
                         "scale": [uv.uv_scale_u, uv.uv_scale_v],
-                        "offset": [uv.uv_offset_u, offset_v],
+                        "offset": [uv.uv_offset_u, uv.uv_offset_v],
                     }
             if source_uv_transforms:
                 item["source_uv_transforms"] = source_uv_transforms
@@ -790,7 +786,7 @@ class G4PortSceneSettings(PropertyGroup):
                 and record.texture_key in active_texture_keys
                 and (not is_face_atlas_record(record) or face_pool_atlas_active(self, record))
             )
-            item = record.to_config(atlas_transform, self.global_uv_flip_y or record.uv_flip_y)
+            item = record.to_config(atlas_transform)
             if not atlas_transform:
                 # Native G4TX entries retain their authored UV windows.  Atlas
                 # controls are meaningful only for an explicitly replaced map.
@@ -1964,9 +1960,8 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
             ):
                 replacements.append(f"{name}={path.name}")
             else:
-                port_log(log_path, f"{name}: writing default special texture {entry['width']}x{entry['height']}")
-                pixels = image_pixels(entry["width"], entry["height"], default_color)
-                save_png(path, entry["width"], entry["height"], pixels)
+                port_log(log_path, f"{name}: no valid special-map source; preserving native G4TX entry")
+                discard_generated_atlas(texture_entry(props, name), path)
         else:
             records = records_by_texture.get(name, [])
             port_log(log_path, f"{name}: base map, records={len(records)}")
@@ -2199,6 +2194,18 @@ def write_uv_export_trace(props: G4PortSceneSettings, config: dict, path: Path) 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def enforce_g4_uv_orientation(props: G4PortSceneSettings) -> bool:
+    """G4 stores V upside-down; custom atlas transforms require the matching pack flip."""
+    if props.texture_mode != "custom":
+        return False
+    if not (props.texture_map() or props.generate_png_set_on_export or props.use_source_uv_transforms or props.auto_pack_source_uvs):
+        return False
+    if props.global_uv_flip_y:
+        return False
+    props.global_uv_flip_y = True
+    return True
+
+
 def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     prefs = addon_preferences()
     props = settings(context)
@@ -2217,6 +2224,8 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         raise RuntimeError(f"Original G4TX not found in DX11 or NX for {props.model_rel}")
 
     package_root = Path(bpy.path.abspath(filepath)) if filepath else resolve_file(getattr(prefs, "output_root", ""))
+    if enforce_g4_uv_orientation(props):
+        port_log(None, "Enabled Global Flip V for custom atlas export (G4 stores V inverted)")
     if has_unchanged_native_roundtrip(props, original_model):
         report = copy_unchanged_native_roundtrip(props, original_model, raw_root, package_root, source_g4tx)
         cache = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir())
