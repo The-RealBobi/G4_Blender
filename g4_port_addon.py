@@ -1810,7 +1810,13 @@ def build_texture_spritesheet(
             continue
         group = grouped_sources.get(cache_key)
         if group is None:
-            group = {"records": [], "objects": [], "source": source, "key": cache_key}
+            group = {
+                "records": [],
+                "objects": [],
+                "source": source,
+                "key": cache_key,
+                "projected": "|projection:" in cache_key,
+            }
             grouped_sources[cache_key] = group
             groups.append(group)
         group["records"].append(record)
@@ -1866,11 +1872,20 @@ def build_texture_spritesheet(
         )
         if update_uv_transforms:
             for obj in objects:
-                set_object_uv_fit(obj, draw_x / width, draw_y / height, draw_width / width, draw_height / height)
+                if group["projected"]:
+                    set_object_uv_fit(obj, draw_x / width, draw_y / height, draw_width / width, draw_height / height)
+                    transform_mode = "projection-fit"
+                else:
+                    # One unprojected source image occupies this complete cell.
+                    # Every mesh sampling it must retain the same source UVs,
+                    # not stretch its own UV bounds to the cell.
+                    set_object_uv_tile(obj, draw_x / width, draw_y / height, draw_width / width, draw_height / height)
+                    transform_mode = "shared-image-tile"
                 port_log(
                     log_path,
                     f"{entry['name']}: {obj.name} group={index + 1} cell=({column},{row}) "
-                    f"content_px=({draw_x},{draw_y},{draw_width},{draw_height}) {object_uv_transform_summary(obj)}",
+                    f"content_px=({draw_x},{draw_y},{draw_width},{draw_height}) mode={transform_mode} "
+                    f"{object_uv_transform_summary(obj)}",
                 )
     port_log(log_path, f"{entry['name']}: saving {path}")
     started = time.perf_counter()
