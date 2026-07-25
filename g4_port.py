@@ -1296,17 +1296,23 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
     }
 
 
-def mesh_matches_rule(mesh: Mesh, rule: RecordRule) -> bool:
+def mesh_match_rank(mesh: Mesh, rule: RecordRule) -> int:
+    """Rank an assignment without letting Blender duplicate suffixes steal a mesh."""
     if "*" in rule.match_names:
-        return True
-    mesh_names = {mesh.name, clean_symbol(mesh.name), canonical_mesh_name(mesh.name)}
-    rule_names = {name for match_name in rule.match_names for name in (
-        match_name,
-        clean_symbol(match_name),
-        canonical_mesh_name(match_name),
-    )}
+        return 1
+    mesh_names = {mesh.name, clean_symbol(mesh.name)}
+    rule_names = {name for match_name in rule.match_names for name in (match_name, clean_symbol(match_name))}
     material = mesh.material_name.lower()
-    return bool(mesh_names & rule_names) or material in {name.lower() for name in rule.match_names}
+    if mesh_names & rule_names or material in {name.lower() for name in rule.match_names}:
+        return 2
+    mesh_canonical = canonical_mesh_name(mesh.name)
+    if any(mesh_canonical == canonical_mesh_name(match_name) for match_name in rule.match_names):
+        return 1
+    return 0
+
+
+def mesh_matches_rule(mesh: Mesh, rule: RecordRule) -> bool:
+    return mesh_match_rank(mesh, rule) > 0
 
 
 def source_uv_transform(mesh: Mesh, rule: RecordRule) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -1393,6 +1399,10 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
     wildcard_rules = [rule for rule in config.records if "*" in rule.match_names]
     explicit_rules = [rule for rule in config.records if "*" not in rule.match_names]
 
+    def is_best_explicit_match(mesh: Mesh, rule: RecordRule) -> bool:
+        rank = mesh_match_rank(mesh, rule)
+        return rank > 0 and rank == max(mesh_match_rank(mesh, explicit) for explicit in explicit_rules)
+
     for record_index, rule in enumerate(config.records):
         if output[record_index] is not None:
             continue
@@ -1404,7 +1414,9 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             ]
         else:
             selected = [
-                (index, mesh) for index, mesh in enumerate(meshes) if index not in assigned and mesh_matches_rule(mesh, rule)
+                (index, mesh)
+                for index, mesh in enumerate(meshes)
+                if index not in assigned and is_best_explicit_match(mesh, rule)
             ]
         parts = [mesh for _, mesh in selected]
         part_indices = {index for index, _ in selected}
