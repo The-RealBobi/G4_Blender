@@ -1520,6 +1520,66 @@ def find_uniform_texture_containers_from_chara(
     return list(dict.fromkeys(candidate for candidate in candidates if candidate.is_file()))
 
 
+def select_uniform_family_texture_containers(
+    material_names: Iterable[str],
+    containers: Iterable[Path],
+    texture_names,
+) -> list[Path]:
+    """Choose shared uniform G4TX files by the material texture-set names they contain."""
+    material_keys = {
+        clean_material_base(material_name).lower().strip("_")
+        for material_name in material_names
+        if material_name
+    }
+    if not material_keys:
+        return []
+
+    scored: list[tuple[bool, int, str, Path]] = []
+    for container in containers:
+        try:
+            names = texture_names(container)
+        except (OSError, ValueError, struct.error):
+            continue
+        base_keys = {
+            texture_key(name)
+            for name in names
+            if texture_usage_from_name(name) in {"base", "transparent_base"}
+        }
+        matches = material_keys & base_keys
+        if not matches:
+            continue
+        scored.append((material_keys <= base_keys, len(matches), container.name.lower(), container))
+
+    if not scored:
+        return []
+    scored.sort(key=lambda item: (not item[0], -item[1], item[2]))
+    best = scored[0]
+    return [best[3]]
+
+
+def find_uniform_family_texture_containers(path: Path, material_names: Iterable[str]) -> list[Path]:
+    """Fallback for uniform models when chara_parts JSON is unavailable."""
+    try:
+        rel = path.relative_to(RAW_DATA_ROOT)
+    except ValueError:
+        return []
+    parts = list(rel.parts)
+    if len(parts) < 5 or parts[0] != "common" or parts[1] != "chr" or parts[2] != "_uniform":
+        return []
+
+    family = parts[3]
+    containers: list[Path] = []
+    for platform in ("dx11", "nx"):
+        root = RAW_DATA_ROOT / platform / "chr" / "_uniform" / family
+        if root.is_dir():
+            containers.extend(sorted(root.glob("*.g4tx")))
+
+    def names_in_container(container: Path) -> list[str]:
+        return [texture["name"] for texture in parse_g4tx(container.read_bytes()).get("textures", [])]
+
+    return select_uniform_family_texture_containers(material_names, containers, names_in_container)
+
+
 def load_uniform_family_lookup() -> dict[str, dict]:
     global UNIFORM_FAMILY_LOOKUP
     if UNIFORM_FAMILY_LOOKUP is not None:
@@ -2833,6 +2893,12 @@ def resolve_model_input(value: Path) -> Path:
             if matches:
                 return preferred_model_path(matches, value.name)
             raise ValueError(f"{value} has no G4 model file")
+        if value.suffix.lower() == ".g4mg":
+            companions = [value.with_suffix(ext) for ext in (".g4md", ".g4pkm")]
+            for candidate in companions:
+                if candidate.is_file():
+                    return candidate
+            raise ValueError(f"{value} is mesh data; matching .g4md/.g4pkm was not found")
         return value
 
     text = value.as_posix()
@@ -2853,6 +2919,8 @@ def resolve_model_input(value: Path) -> Path:
 def model_path_variants(path: Path) -> list[Path]:
     if path.suffix.lower() in MODEL_EXTENSIONS:
         variants = [path]
+    elif path.suffix.lower() == ".g4mg":
+        variants = [path.with_suffix(ext) for ext in (".g4md", ".g4pkm")]
     else:
         variants = [path.with_suffix(ext) for ext in (".g4pkm", ".g4md", ".objbin")]
         variants.extend(path / f"{path.name}{ext}" for ext in (".g4pkm", ".g4md", ".objbin"))
@@ -4758,6 +4826,11 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         texture_containers.extend(
             candidate
             for candidate in find_uniform_texture_containers_from_chara(path, md_info.get("material_names", []))
+            if candidate not in texture_containers
+        )
+        texture_containers.extend(
+            candidate
+            for candidate in find_uniform_family_texture_containers(path, md_info.get("material_names", []))
             if candidate not in texture_containers
         )
         texture_containers.extend(

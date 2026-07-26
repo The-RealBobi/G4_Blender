@@ -96,7 +96,7 @@ The **Character Outline** preference has three modes:
 
 **Outline Thickness** controls the main silhouette in pixels; its default of `1.65` matches the game reference. Eye and mouth helper planes are excluded from contours. Authored line textures and low `COLOR.B` weights select the restrained secondary silhouette where appropriate.
 
-Character meshes also receive a **Level-5 Character Parameters** Geometry Nodes modifier. It exposes saturation, brightness, light and shadow floors, normal strength, specular strength and wetness without requiring shader-graph edits.
+Character meshes also receive a **Level-5 Character Parameters** Geometry Nodes modifier. It is added for character imports from `chr` even when a shared uniform part has no texture of its own, so externally controlled character shading remains available on modular bodies. Shared `_uniform` models also fall back to their family G4TX directory when no converted `chara_parts` lookup is present, letting standalone imports such as `u000101` resolve `u000101_20`/`u000101_30` texture sets and receive the Character shader. The modifier exposes saturation, brightness, light and shadow floors, normal strength, specular strength and wetness without requiring shader-graph edits. When the selected mesh uses the Character shader, the modifier context also shows labelled texture slots for the material's base, mask, normal, occlusion, line, specular and alpha image nodes. **Load Character G4TX** in the same modifier panel extracts a selected `.g4tx` into the import cache and loads its images into Blender; matching texture roles are assigned automatically when possible, otherwise the loaded images remain available for manual selection in the texture fields.
 
 ## Map reconstruction
 

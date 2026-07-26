@@ -30,6 +30,11 @@ try:
 except ImportError:
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
 
+try:
+    from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+except ImportError:
+    from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+
 
 ADDON_ID = __name__.split(".", 1)[0] if "." in __name__ else __name__
 IS_STANDALONE_ADDON = False
@@ -403,63 +408,31 @@ def target_mesh_items(self, context):
     return items
 
 
-COMMON_JOINT_ALIASES = {
-    "head": "c_head_1_0",
-    "neck": "c_n_1_0",
-    "hair": "c_hir1_1_0",
-    "l_hair": "l_hir1_1_0",
-    "r_hair": "r_hir1_1_0",
-    "l_hair_a01": "l_hir1_1_0",
-    "l_hair_a02": "l_hir1_1_1",
-    "l_hair_a03": "l_hir2_1_0",
-    "l_hair_b01": "l_hir2_1_1",
-    "l_hair_b02": "l_hir2_1_2",
-    "l_hair_b03": "l_hir3_1_0",
-    "r_hair_a01": "r_hir1_1_0",
-    "r_hair_a02": "r_hir1_1_1",
-    "r_hair_a03": "r_hir2_1_0",
-    "r_hair_b01": "r_hir2_1_1",
-    "r_hair_b02": "r_hir2_1_2",
-    "r_hair_b03": "r_hir3_1_0",
-    "l_twintail_01": "l_hir1_1_0",
-    "l_twintail_02": "l_hir1_1_1",
-    "l_twintail_03": "l_hir2_1_0",
-    "l_twintail_04": "l_hir2_1_1",
-    "r_twintail_01": "r_hir1_1_0",
-    "r_twintail_02": "r_hir1_1_1",
-    "r_twintail_03": "r_hir2_1_0",
-    "r_twintail_04": "r_hir2_1_1",
-    "r_twintair_01": "r_hir1_1_0",
-    "r_twintair_02": "r_hir1_1_1",
-    "r_twintair_03": "r_hir2_1_0",
-    "r_twintair_04": "r_hir2_1_1",
-    "l_ribbon_a01": "l_hir3_1_1",
-    "l_ribbon_b01": "l_hir4_1_0",
-    "l_ribbon_b02": "l_hir4_1_0",
-    "r_ribbon_a01": "r_hir3_1_1",
-    "r_ribbon_b01": "r_hir4_1_0",
-    "r_ribbon_b02": "r_hir4_1_0",
-}
-
-
-def normalize_joint_key(name: str) -> str:
-    return blender_base_name(name).strip().lower().replace("-", "_").replace(" ", "_")
-
-
-def guess_joint_alias(group_name: str) -> str:
+def guess_joint_alias(group_name: str, allowed_joints: set[str] | None = None) -> str:
     key = normalize_joint_key(group_name)
-    if key in COMMON_JOINT_ALIASES:
-        return COMMON_JOINT_ALIASES[key]
+    try:
+        catalog = load_joint_alias_catalog()
+    except ValueError as exc:
+        print(f"[G4 Port] Joint alias catalog unavailable: {exc}", flush=True)
+        catalog = None
+    if catalog is not None:
+        target = resolve_catalog_alias(group_name, catalog, allowed_joints)
+        if target:
+            return target
     if key.startswith("l_") and "hair" in key:
-        return "l_hir1_1_0"
-    if key.startswith("r_") and "hair" in key:
-        return "r_hir1_1_0"
-    if "hair" in key:
-        return "c_hir1_1_0"
-    if "head" in key:
-        return "c_head_1_0"
-    if "neck" in key:
-        return "c_n_1_0"
+        target = "l_hir1_1_0"
+    elif key.startswith("r_") and "hair" in key:
+        target = "r_hir1_1_0"
+    elif "hair" in key:
+        target = "c_hir1_1_0"
+    elif "head" in key:
+        target = "c_head_1_0"
+    elif "neck" in key:
+        target = "c_n_1_0"
+    else:
+        return ""
+    if allowed_joints is None or target in allowed_joints:
+        return target
     return ""
 
 
@@ -667,6 +640,7 @@ class G4PortSceneSettings(PropertyGroup):
         default="",
         description="Original G4MD/G4PKM used as a record/material template",
     )
+    target_joint_names: StringProperty(default="", options={"HIDDEN"})
     use_preset_file: BoolProperty(
         name="Use Preset File Directly",
         default=True,
@@ -952,6 +926,7 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
     texture_names = parse_g4tx_names(g4tx_path) if g4tx_path is not None else []
     signature = original_template_signature(md)
     target.original_model = str(path)
+    target.target_joint_names = json.dumps((summary.get("g4sk") or {}).get("names") or [])
     target.model_rel = model_rel
     target.native_material_names = join_csv(md.get("material_names", []))
     target.texture_replacements = ""
@@ -1067,13 +1042,14 @@ def objects_for_record(record: G4PortRecord) -> list[bpy.types.Object]:
 
 def detect_joint_aliases(props: G4PortSceneSettings, selected_only: bool = False) -> int:
     existing = {alias.source_group: alias for alias in props.joint_aliases}
+    allowed_joints = configured_target_joints(props)
     added = 0
     for group_name in vertex_group_names(selected_only):
         if group_name in existing:
             continue
         alias = props.joint_aliases.add()
         alias.source_group = group_name
-        alias.target_joint = guess_joint_alias(group_name)
+        alias.target_joint = guess_joint_alias(group_name, allowed_joints)
         existing[group_name] = alias
         added += 1
     props.active_joint_alias = min(props.active_joint_alias, max(0, len(props.joint_aliases) - 1))
@@ -1082,14 +1058,25 @@ def detect_joint_aliases(props: G4PortSceneSettings, selected_only: bool = False
 
 def auto_map_joint_aliases(props: G4PortSceneSettings) -> int:
     changed = 0
+    allowed_joints = configured_target_joints(props)
     for alias in props.joint_aliases:
         if alias.target_joint:
             continue
-        guess = guess_joint_alias(alias.source_group)
+        guess = guess_joint_alias(alias.source_group, allowed_joints)
         if guess:
             alias.target_joint = guess
             changed += 1
     return changed
+
+
+def configured_target_joints(props: G4PortSceneSettings) -> set[str] | None:
+    try:
+        names = json.loads(props.target_joint_names or "")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        return None
+    return set(names)
 
 
 def generated_config_path(cache: Path) -> Path:
@@ -2565,7 +2552,7 @@ class LEVEL5_G4PORT_OT_detect_vertex_groups(Operator):
 class LEVEL5_G4PORT_OT_auto_map_joints(Operator):
     bl_idname = "level5_g4_port.auto_map_joints"
     bl_label = "Auto-map Common Joints"
-    bl_description = "Fill empty aliases using common head, neck, hair and ribbon naming patterns"
+    bl_description = "Fill empty aliases using the bundled G4 joint catalog"
 
     def execute(self, context):
         count = auto_map_joint_aliases(settings(context))

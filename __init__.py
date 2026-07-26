@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (0, 16, 31),
+    "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -81,9 +81,9 @@ else:
     import g4_animation_addon
 
 if __package__:
-    from .g4_model_probe import map_scene_placements
+    from .g4_model_probe import extract_g4tx, map_scene_placements
 else:
-    from g4_model_probe import map_scene_placements
+    from g4_model_probe import extract_g4tx, map_scene_placements
 
 g4_port_addon.ADDON_ID = ADDON_ID
 g4_animation_addon.ADDON_ID = ADDON_ID
@@ -1898,6 +1898,8 @@ def apply_level5_toon_shader(
         if image is not None:
             image.colorspace_settings.name = "Non-Color"
             alpha_texture = nodes.new("ShaderNodeTexImage")
+            alpha_texture.name = "G4 Alpha Mask"
+            alpha_texture.label = alpha_path.name
             alpha_texture.image = image
             alpha_texture.location = (420, 600)
             alpha_separate = nodes.new("ShaderNodeSeparateColor")
@@ -2157,6 +2159,17 @@ CHARACTER_MASK_COLOR_SOCKETS = (
     ("Mask Blue Color", "g4_mask_blue_color", (1.0, 1.0, 1.0, 1.0)),
 )
 
+CHARACTER_TEXTURE_NODE_SLOTS = (
+    ("Base", "G4 Base", "base"),
+    ("Recolor Mask", "G4 Recolor Mask", "mask"),
+    ("Normal", "G4 Normal", "normal"),
+    ("Occlusion", "G4 Occlusion", "occlusion"),
+    ("Line Parameter", "G4 Line Parameter", "line"),
+    ("Specular Mask", "G4 Specular Mask", "specular_mask"),
+    ("Specular Shape", "G4 Specular Shape", "specular"),
+    ("Alpha Mask", "G4 Alpha Mask", "alpha_red"),
+)
+
 
 def character_parameter_node_group():
     name = "Level-5 Character Parameters"
@@ -2289,7 +2302,24 @@ def connect_character_parameter_material(material) -> None:
             links.new(character_shader_attribute(material, label, attribute_name, color=True), tint.inputs[2])
 
 
-def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
+def material_uses_character_shader(material) -> bool:
+    return material is not None and bool(material.get("g4_level5_toon"))
+
+
+def object_needs_character_parameter_modifier(obj, force_character: bool = False) -> bool:
+    if obj is None or obj.type != "MESH":
+        return False
+    if force_character:
+        return True
+    if obj.get("g4_character_model_source") or obj.get("g4_character_part_source"):
+        return True
+    source = str(obj.get("g4_native_model_source", "")).lower().replace("\\", "/")
+    if "/chr/" in source or source.startswith("chr/"):
+        return True
+    return any(material_uses_character_shader(slot.material) for slot in obj.material_slots)
+
+
+def configure_character_parameter_modifiers(imported_names: set[str], force_character: bool = False) -> int:
     group = character_parameter_node_group()
     created = 0
     input_sockets = {
@@ -2299,10 +2329,7 @@ def configure_character_parameter_modifiers(imported_names: set[str]) -> int:
     }
     for object_name in imported_names:
         obj = bpy.data.objects.get(object_name)
-        if obj is None or obj.type != "MESH" or not any(
-            slot.material is not None and slot.material.get("g4_level5_toon")
-            for slot in obj.material_slots
-        ):
+        if not object_needs_character_parameter_modifier(obj, force_character=force_character):
             continue
         modifier = obj.modifiers.get("Level-5 Character Parameters")
         if modifier is None:
@@ -2820,7 +2847,7 @@ def import_g4_model(
         apply_styling=apply_styling,
     )
     if apply_styling:
-        modifier_count = configure_character_parameter_modifiers(imported_names)
+        modifier_count = configure_character_parameter_modifiers(imported_names, force_character=is_character_model(path))
         debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
     if apply_styling:
         configure_character_color_management(debug)
@@ -4318,6 +4345,155 @@ class OBJECT_PT_level5_mask_recolor(bpy.types.Panel):
         self.layout.operator(OBJECT_OT_level5_mask_recolor.bl_idname, icon="COLOR")
 
 
+def character_shader_materials_for_object(obj):
+    if obj is None or obj.type != "MESH":
+        return []
+    materials = []
+    seen = set()
+    for slot in obj.material_slots:
+        material = slot.material
+        if not material_uses_character_shader(material) or material.name in seen:
+            continue
+        seen.add(material.name)
+        materials.append(material)
+    return materials
+
+
+def set_character_texture_node_image(material, node_name: str, role: str, path: Path) -> bool:
+    if material.node_tree is None:
+        return False
+    node = material.node_tree.nodes.get(node_name)
+    if node is None or node.type != "TEX_IMAGE":
+        return False
+    image = load_image(path)
+    if image is None:
+        return False
+    if role != "base":
+        image.colorspace_settings.name = "Non-Color"
+    node.image = image
+    node.label = path.name
+    if role == "base":
+        material["g4_base_texture"] = str(path)
+    elif role == "mask":
+        material["g4_recolor_mask"] = str(path)
+    elif role == "normal":
+        material["g4_normal_texture"] = str(path)
+    elif role == "line":
+        material["g4_line_texture"] = str(path)
+        material["g4_line_informative"] = max(image.size) > 8
+    return True
+
+
+def assign_character_material_textures(material, texture_paths: list[Path]) -> int:
+    if not material_uses_character_shader(material) or material.node_tree is None:
+        return 0
+    base_text = str(material.get("g4_base_texture", "") or "")
+    base_path = Path(base_text) if base_text else None
+    variants = material_variants_from_index(material.name, base_path, build_texture_index(texture_paths))
+    assigned = 0
+    for _label, node_name, role in CHARACTER_TEXTURE_NODE_SLOTS:
+        path = variants.get(role)
+        if path is None and role == "alpha_red":
+            path = variants.get("transparent_base")
+        if path is None:
+            continue
+        if set_character_texture_node_image(material, node_name, role, Path(path)):
+            assigned += 1
+    return assigned
+
+
+def extract_character_textures_from_g4tx(g4tx_path: Path, output_root: Path | None = None) -> list[Path]:
+    path = Path(g4tx_path)
+    if output_root is None:
+        prefs = addon_preferences()
+        output_root = Path(bpy.path.abspath(getattr(prefs, "export_dir", "") or default_export_dir()))
+    written = extract_g4tx(path, output_root / "modifier_g4tx" / path.stem)
+    for texture_path in written:
+        image = load_image(texture_path)
+        if image is not None and texture_role(texture_path) != "base":
+            image.colorspace_settings.name = "Non-Color"
+    return written
+
+
+def assign_character_textures_from_g4tx(obj, g4tx_path: Path, output_root: Path | None = None) -> int:
+    if obj is None or obj.type != "MESH":
+        return 0
+    written = extract_character_textures_from_g4tx(g4tx_path, output_root)
+    assigned = 0
+    for material in character_shader_materials_for_object(obj):
+        assigned += assign_character_material_textures(material, written)
+    return assigned
+
+
+class OBJECT_OT_level5_load_character_g4tx(bpy.types.Operator, ImportHelper):
+    bl_idname = "object.level5_load_character_g4tx"
+    bl_label = "Load Character G4TX"
+    bl_description = "Extract a G4TX into Blender images; matching Character shader slots are assigned when possible"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".g4tx"
+    filter_glob: StringProperty(default="*.g4tx", options={"HIDDEN"})
+
+    def execute(self, context):
+        modifier = level5_character_parameter_modifier(context.object)
+        if modifier is None:
+            self.report({"ERROR"}, "Select a mesh with Level-5 Character Parameters")
+            return {"CANCELLED"}
+        path = Path(bpy.path.abspath(self.filepath))
+        if not path.is_file() or path.suffix.lower() != ".g4tx":
+            self.report({"ERROR"}, f"G4TX not found: {path}")
+            return {"CANCELLED"}
+        try:
+            written = extract_character_textures_from_g4tx(path)
+            assigned = 0
+            for material in character_shader_materials_for_object(context.object):
+                assigned += assign_character_material_textures(material, written)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to load G4TX: {exc}")
+            return {"CANCELLED"}
+        if assigned <= 0:
+            self.report({"INFO"}, f"Loaded {len(written)} textures from {path.name}; assign them manually")
+            return {"FINISHED"}
+        self.report({"INFO"}, f"Assigned {assigned} Character texture slots from {path.name}")
+        return {"FINISHED"}
+
+
+class OBJECT_PT_level5_character_textures(bpy.types.Panel):
+    bl_label = "Level-5 Character Textures"
+    bl_idname = "OBJECT_PT_level5_character_textures"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "modifier"
+
+    @classmethod
+    def poll(cls, context):
+        return level5_character_parameter_modifier(context.object) is not None
+
+    def draw(self, context):
+        layout = self.layout
+        materials = character_shader_materials_for_object(context.object)
+        layout.operator(OBJECT_OT_level5_load_character_g4tx.bl_idname, icon="FILE_FOLDER")
+        if not materials:
+            layout.label(text="No Character shader material on this mesh", icon="INFO")
+            return
+
+        for material in materials:
+            box = layout.box()
+            box.label(text=material.name, icon="MATERIAL")
+            nodes = material.node_tree.nodes if material.node_tree is not None else ()
+            shown = 0
+            for label, node_name, _role in CHARACTER_TEXTURE_NODE_SLOTS:
+                node = nodes.get(node_name) if nodes else None
+                if node is None or node.type != "TEX_IMAGE":
+                    continue
+                row = box.row(align=True)
+                row.label(text=label)
+                row.template_ID(node, "image", open="image.open")
+                shown += 1
+            if shown == 0:
+                box.label(text="No editable texture nodes found", icon="INFO")
+
+
 class MATERIAL_PT_level5_character(bpy.types.Panel):
     bl_label = "Level-5 Character"
     bl_idname = "MATERIAL_PT_level5_character"
@@ -4393,6 +4569,8 @@ classes = [
     IMPORT_OT_level5_g4_character_parts,
     OBJECT_OT_level5_mask_recolor,
     OBJECT_PT_level5_mask_recolor,
+    OBJECT_OT_level5_load_character_g4tx,
+    OBJECT_PT_level5_character_textures,
     MATERIAL_PT_level5_character,
 ]
 
