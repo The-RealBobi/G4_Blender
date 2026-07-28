@@ -259,10 +259,23 @@ ARM_BIND_TARGETS = {
     "r_collar": "r_s_1_0", "r_arm": "r_a_1_0", "r_elbow": "r_a_1_1", "r_hand": "r_w_1_0",
 }
 
+ARM_ROLL_ALIASES = {
+    "l_hand": "l_w_1_0", "r_hand": "r_w_1_0",
+    "l_hand_roll": "l_a_1_1", "l_hand_roll_02": "l_a_1_1", "l_elbow_sharp": "l_a_1_1",
+    "r_hand_roll": "r_a_1_1", "r_hand_roll_02": "r_a_1_1", "r_elbow_sharp": "r_a_1_1",
+}
+
 
 def armature_for_mesh(source):
     modifier = next((item for item in source.modifiers if item.type == "ARMATURE" and item.object), None)
     return modifier.object if modifier is not None and modifier.object.type == "ARMATURE" else None
+
+
+def normalize_arm_roll_aliases(config_data: dict) -> None:
+    aliases = config_data.setdefault("joint_aliases", {})
+    for source_name, target_name in ARM_ROLL_ALIASES.items():
+        if source_name in aliases:
+            aliases[source_name] = target_name
 
 
 def arm_bind_translation_offsets(props) -> dict[str, list[float]]:
@@ -2464,6 +2477,7 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     config = generated_config_path(cache)
     config_data = props.to_config()
     if props.correct_arm_bind:
+        normalize_arm_roll_aliases(config_data)
         config_data["joint_position_transforms"] = arm_bind_segment_transforms(props)
     config.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
     trace_path = cache / "atlas_uv_trace.log"

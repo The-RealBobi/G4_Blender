@@ -1162,8 +1162,8 @@ def compact_joint_index(
             "l_index01": "l_idx_1_0", "l_index02": "l_idx_1_1", "l_index03": "l_idx_1_2",
             "l_arm_roll": "l_a_1_0", "l_arm_roll_02": "l_a_1_0",
             "r_arm_roll": "r_a_1_0", "r_arm_roll_02": "r_a_1_0",
-            "l_hand_roll": "l_wph_1_0", "l_hand_roll_02": "l_wph_1_0",
-            "r_hand_roll": "r_wph_1_0", "r_hand_roll_02": "r_wph_1_0",
+            "l_hand_roll": "l_a_1_1", "l_hand_roll_02": "l_a_1_1",
+            "r_hand_roll": "r_a_1_1", "r_hand_roll_02": "r_a_1_1",
         }
         target = compact_aliases.get(normalize_joint_key(name), "")
     if target and target != name:
