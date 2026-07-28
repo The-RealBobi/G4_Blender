@@ -246,6 +246,18 @@ class PortSkinningSafetyTests(unittest.TestCase):
             PORT.rebuild_native_g4tx_with_custom_textures(template, Path(temporary), output, {})
             self.assertEqual(output.read_bytes(), template.read_bytes())
 
+    def test_uncompressed_replacement_is_rejected_for_a_compressed_native_texture(self):
+        native = bytearray(148)
+        native[:4] = b"DDS "
+        struct.pack_into("<I", native, 80, 4)
+        native[84:88] = b"DX10"
+        struct.pack_into("<I", native, 128, 98)
+        replacement = bytearray(128)
+        replacement[:4] = b"DDS "
+        struct.pack_into("<I", replacement, 80, 0x40)
+        struct.pack_into("<I", replacement, 88, 32)
+        self.assertEqual(PORT.replacement_texture_payload(bytes(replacement), bytes(native)), bytes(native))
+
     def test_replacing_a_native_payload_preserves_the_native_g4tx_tables(self):
         template = Path(
             "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_702/._work/raw/data/"
