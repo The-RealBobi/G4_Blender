@@ -245,7 +245,21 @@ def write_weights_json(path: Path, selected_only: bool) -> int:
     return len(meshes)
 
 
-def export_collada(path: Path, selected_only: bool, align_forward_to_y: bool, apply_modifiers: bool) -> None:
+def remove_pose_export_collection(collection) -> None:
+    if collection is None:
+        return
+    for obj in tuple(collection.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.data.collections.remove(collection)
+
+
+def export_collada(
+    path: Path,
+    selected_only: bool,
+    align_forward_to_y: bool,
+    apply_modifiers: bool,
+    bake_current_pose: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     kwargs = {
         "filepath": str(path),
@@ -262,7 +276,44 @@ def export_collada(path: Path, selected_only: bool, align_forward_to_y: bool, ap
                 "export_object_transformation_type_selection": "matrix",
             }
         )
-    bpy.ops.wm.collada_export(**kwargs)
+    if not bake_current_pose:
+        bpy.ops.wm.collada_export(**kwargs)
+        return
+
+    remove_pose_export_collection(bpy.data.collections.get("__G4PoseExport"))
+    collection = bpy.data.collections.new("__G4PoseExport")
+    bpy.context.scene.collection.children.link(collection)
+    original_selected = tuple(bpy.context.selected_objects)
+    original_active = bpy.context.view_layer.objects.active
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        sources = mesh_objects(selected_only)
+        if not sources:
+            raise RuntimeError("No mesh objects were found to bake for export.")
+        copies = []
+        for source in sources:
+            mesh = bpy.data.meshes.new_from_object(source.evaluated_get(depsgraph), depsgraph=depsgraph)
+            copy = bpy.data.objects.new(source.name, mesh)
+            copy.matrix_world = source.matrix_world
+            collection.objects.link(copy)
+            copies.append(copy)
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for copy in copies:
+            copy.select_set(True)
+        bpy.context.view_layer.objects.active = copies[0]
+        kwargs["selected"] = True
+        kwargs["apply_modifiers"] = False
+        bpy.ops.wm.collada_export(**kwargs)
+    finally:
+        for obj in tuple(bpy.context.selected_objects):
+            obj.select_set(False)
+        remove_pose_export_collection(bpy.data.collections.get("__G4PoseExport"))
+        for obj in original_selected:
+            if obj.name in bpy.data.objects:
+                obj.select_set(True)
+        if original_active is not None and original_active.name in bpy.data.objects:
+            bpy.context.view_layer.objects.active = original_active
 
 
 def load_json(path: Path) -> dict:
@@ -687,6 +738,11 @@ class G4PortSceneSettings(PropertyGroup):
         name="Apply Modifiers",
         default=False,
         description="Apply Blender modifiers in the temporary DAE. Keep disabled unless weights were authored for the evaluated mesh",
+    )
+    bake_current_pose: BoolProperty(
+        name="Bake Current Pose",
+        default=False,
+        description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
     )
     align_forward_to_y: BoolProperty(
         name="Align Forward to Y Axis",
@@ -2245,7 +2301,13 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     report_path = cache / ("analyze_report.json" if props.analyze_only else "export_report.json")
     output_root = package_root / "data"
 
-    export_collada(dae_path, props.selected_only, props.align_forward_to_y, props.apply_modifiers)
+    export_collada(
+        dae_path,
+        props.selected_only,
+        props.align_forward_to_y,
+        props.apply_modifiers,
+        props.bake_current_pose,
+    )
     mesh_count = write_weights_json(weights_path, props.selected_only)
     if mesh_count == 0:
         raise RuntimeError("No mesh objects were found to export.")
@@ -2648,6 +2710,7 @@ class EXPORT_OT_level5_g4_port(Operator, ExportHelper):
         vertices = validation.get("vertices_checked", report.get("vertices", "?"))
         indices = validation.get("indices_checked", report.get("indices", "?"))
         self.report({"INFO"}, f"G4 port exported: {vertices} vertices, {indices} indices. {report_path}")
+        settings(context).show_export = False
         return {"FINISHED"}
 
     def invoke(self, context, event):
@@ -2880,6 +2943,7 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
         draw_texture_replacements(layout, props)
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
+    box.prop(props, "bake_current_pose")
     box.prop(props, "align_forward_to_y")
     box.prop(props, "preserve_native_roundtrip")
 
