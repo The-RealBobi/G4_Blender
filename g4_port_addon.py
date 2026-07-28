@@ -253,6 +253,49 @@ def remove_pose_export_collection(collection) -> None:
     bpy.data.collections.remove(collection)
 
 
+ARM_BIND_TARGETS = {
+    "l_collar": "l_s_1_0", "l_arm": "l_a_1_0", "l_elbow": "l_a_1_1", "l_hand": "l_w_1_0",
+    "r_collar": "r_s_1_0", "r_arm": "r_a_1_0", "r_elbow": "r_a_1_1", "r_hand": "r_w_1_0",
+}
+
+
+def armature_for_mesh(source):
+    modifier = next((item for item in source.modifiers if item.type == "ARMATURE" and item.object), None)
+    return modifier.object if modifier is not None and modifier.object.type == "ARMATURE" else None
+
+
+def arm_bind_translation_offsets(props) -> dict[str, list[float]]:
+    target = bpy.data.objects.get(props.arm_bind_target_rig)
+    if target is None or target.type != "ARMATURE":
+        raise RuntimeError("Select the imported c000101 G4SK armature as Arm Bind Target Rig.")
+    sources = mesh_objects(props.selected_only)
+    armature_counts = {}
+    for mesh in sources:
+        armature = armature_for_mesh(mesh)
+        if armature is not None:
+            armature_counts[armature] = armature_counts.get(armature, 0) + 1
+    if not armature_counts:
+        raise RuntimeError("Arm bind correction requires an exported mesh with an armature modifier.")
+    source = max(armature_counts, key=armature_counts.get)
+    offsets = {}
+    for source_name, target_name in ARM_BIND_TARGETS.items():
+        source_bone = source.pose.bones.get(source_name)
+        target_bone = target.data.bones.get(target_name)
+        if source_bone is None or target_bone is None:
+            continue
+        # Source Blender armatures are X-right/Y-depth/Z-up; G4 is X-right/Y-up/Z-depth.
+        source_translation = source_bone.matrix.translation
+        target_translation = target_bone.matrix_local.translation
+        offsets[target_name] = [
+            target_translation.x - source_translation.x,
+            target_translation.y - source_translation.z,
+            target_translation.z - source_translation.y,
+        ]
+    if not offsets:
+        raise RuntimeError("The selected source and target rigs do not contain a usable arm chain.")
+    return offsets
+
+
 def export_collada(
     path: Path,
     selected_only: bool,
@@ -759,6 +802,16 @@ class G4PortSceneSettings(PropertyGroup):
         name="Bake Current Pose",
         default=True,
         description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
+    )
+    correct_arm_bind: BoolProperty(
+        name="Correct Arm Bind Translation",
+        default=False,
+        description="Apply only weighted collar/arm/elbow/wrist translation offsets against a native G4SK reference",
+    )
+    arm_bind_target_rig: StringProperty(
+        name="Arm Bind Target Rig",
+        default="",
+        description="Imported native c000101 G4SK armature used only to correct the arm-chain bind translations",
     )
     stabilize_finger_weights: BoolProperty(
         name="Stabilize Finger Weights",
@@ -2360,6 +2413,8 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
 
     config = generated_config_path(cache)
     config_data = props.to_config()
+    if props.correct_arm_bind:
+        config_data["joint_position_offsets"] = arm_bind_translation_offsets(props)
     config.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
     trace_path = cache / "atlas_uv_trace.log"
     write_uv_export_trace(props, config_data, trace_path)
@@ -2970,6 +3025,9 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
     box.prop(props, "bake_current_pose")
+    box.prop(props, "correct_arm_bind")
+    if props.correct_arm_bind:
+        box.prop_search(props, "arm_bind_target_rig", bpy.data, "objects")
     box.prop(props, "stabilize_finger_weights")
     box.prop(props, "align_forward_to_y")
     box.prop(props, "preserve_native_roundtrip")
