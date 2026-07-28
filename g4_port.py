@@ -1964,6 +1964,19 @@ def png_to_dds(path: Path) -> bytes:
         tmp.unlink(missing_ok=True)
 
 
+def dds_uses_gpu_compression(payload: bytes) -> bool:
+    if len(payload) < 128 or not payload.startswith(b"DDS "):
+        return False
+    flags = struct.unpack_from("<I", payload, 80)[0]
+    return bool(flags & 0x4 and payload[84:88] in {b"DXT1", b"DXT3", b"DXT5", b"DX10"})
+
+
+def replacement_texture_payload(payload: bytes, native_payload: bytes) -> bytes:
+    if payload.startswith(b"DDS ") and dds_uses_gpu_compression(native_payload) and not dds_uses_gpu_compression(payload):
+        return native_payload
+    return payload
+
+
 def replacement_texture(path: Path, native_payload: bytes) -> bytes:
     suffix = path.suffix.lower()
     if suffix == ".dds":
@@ -1974,6 +1987,8 @@ def replacement_texture(path: Path, native_payload: bytes) -> bytes:
             raise ValueError(f"invalid NXTCH replacement: {path}")
     else:
         payload = png_to_dds(path)
+
+    payload = replacement_texture_payload(payload, native_payload)
 
     native_is_nx = native_payload.startswith(b"NXTCH000")
     replacement_is_nx = payload.startswith(b"NXTCH000")
