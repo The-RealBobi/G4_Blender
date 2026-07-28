@@ -58,9 +58,9 @@ port.register()
 face_assignments = {
     "hair_mesh": "c11010060_20",
     "hair_mesh.001": "c11010060_20",
-    "nose_mesh": "eye_10",
-    "face_mesh": "mouth_10",
-    "face_mesh.001": "mouth_10",
+    "nose_mesh": "c11010060_20",
+    "face_mesh": "c11010060_20",
+    "face_mesh.001": "c11010060_20",
 }
 configure(FACE, face_assignments)
 face_report, _ = port.run_port(bpy.context, str(OUTPUT))
