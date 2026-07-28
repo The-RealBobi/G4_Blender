@@ -14,6 +14,7 @@ from array import array
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -253,12 +254,94 @@ def remove_pose_export_collection(collection) -> None:
     bpy.data.collections.remove(collection)
 
 
+def source_armature_for_mesh(source):
+    modifier = next((item for item in source.modifiers if item.type == "ARMATURE" and item.object), None)
+    return modifier.object if modifier is not None and modifier.object.type == "ARMATURE" else None
+
+
+def find_native_target_armature(name: str):
+    if name:
+        candidate = bpy.data.objects.get(name)
+        if candidate is None or candidate.type != "ARMATURE":
+            raise RuntimeError(f"Target bind rig {name!r} is not an armature.")
+        return candidate
+    candidates = [
+        obj for obj in bpy.data.objects
+        if obj.type == "ARMATURE" and "c_global_0_0" in obj.data.bones and "c_c_1_1" in obj.data.bones
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise RuntimeError("Choose the Target Bind Rig explicitly; multiple native G4SK rigs are in this scene.")
+    raise RuntimeError("Import the target character G4SK rig, then select it as Target Bind Rig.")
+
+
+def target_bone_name(source_name: str, target_armature, catalog) -> str:
+    if source_name in target_armature.pose.bones:
+        return source_name
+    target = resolve_catalog_alias(source_name, catalog, set(target_armature.pose.bones.keys()))
+    return target if target in target_armature.pose.bones else ""
+
+
+def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature) -> int:
+    """Express a posed source mesh in the target G4SK bind space.
+
+    The game applies its own G4SK animation after reading the G4MG.  Baking a
+    foreign A-to-T pose verbatim leaves it in the source rig's bone space,
+    which is visibly wrong when the target shoulders use different bind
+    matrices.  This conversion keeps the source weights, but maps every
+    evaluated influence from its current pose matrix to the target rest bind.
+    """
+    if len(evaluated_mesh.vertices) != len(source.data.vertices):
+        raise RuntimeError(
+            f"{source.name}: evaluated topology changed ({len(source.data.vertices)} to "
+            f"{len(evaluated_mesh.vertices)} vertices); cannot rebase bind space safely."
+        )
+    source_armature = source_armature_for_mesh(source)
+    if source_armature is None:
+        raise RuntimeError(f"{source.name}: no source armature modifier was found for bind rebasing.")
+    catalog = load_joint_alias_catalog()
+    group_names = {group.index: group.name for group in source.vertex_groups}
+    mappings = {}
+    for group_index, source_name in group_names.items():
+        target_name = target_bone_name(source_name, target_armature, catalog)
+        source_bone = source_armature.pose.bones.get(source_name)
+        target_bone = target_armature.data.bones.get(target_name) if target_name else None
+        if source_bone is not None and target_bone is not None:
+            source_pose = source_armature.matrix_world @ source_bone.matrix
+            target_bind = target_armature.matrix_world @ target_bone.matrix_local
+            mappings[group_index] = target_bind @ source_pose.inverted_safe()
+
+    if not mappings:
+        raise RuntimeError(f"{source.name}: none of its vertex groups map to the selected target G4SK.")
+
+    to_world = source.matrix_world
+    to_local = to_world.inverted_safe()
+    rebased_vertices = 0
+    for original, evaluated in zip(source.data.vertices, evaluated_mesh.vertices):
+        contributions = [(mappings[group.group], group.weight) for group in original.groups if group.group in mappings and group.weight > 0.0]
+        if not contributions:
+            continue
+        weight_total = sum(weight for _, weight in contributions)
+        if weight_total <= 1e-8:
+            continue
+        source_position = to_world @ evaluated.co
+        rebased = Vector((0.0, 0.0, 0.0))
+        for matrix, weight in contributions:
+            rebased += (matrix @ source_position) * (weight / weight_total)
+        evaluated.co = to_local @ rebased
+        rebased_vertices += 1
+    return rebased_vertices
+
+
 def export_collada(
     path: Path,
     selected_only: bool,
     align_forward_to_y: bool,
     apply_modifiers: bool,
     bake_current_pose: bool = False,
+    rebase_to_target_bind: bool = False,
+    target_bind_rig: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     kwargs = {
@@ -290,6 +373,7 @@ def export_collada(
         sources = mesh_objects(selected_only)
         if not sources:
             raise RuntimeError("No mesh objects were found to bake for export.")
+        target_armature = find_native_target_armature(target_bind_rig) if rebase_to_target_bind else None
         copies = []
         for source in sources:
             pose_source = source.copy()
@@ -302,6 +386,8 @@ def export_collada(
                         modifier.show_viewport = False
             bpy.context.view_layer.update()
             mesh = bpy.data.meshes.new_from_object(pose_source.evaluated_get(depsgraph), depsgraph=depsgraph)
+            if target_armature is not None:
+                rebase_evaluated_mesh_to_target_bind(source, mesh, target_armature)
             copy = bpy.data.objects.new(source.name, mesh)
             copy.matrix_world = source.matrix_world
             collection.objects.link(copy)
@@ -759,6 +845,16 @@ class G4PortSceneSettings(PropertyGroup):
         name="Bake Current Pose",
         default=True,
         description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
+    )
+    rebase_to_target_bind: BoolProperty(
+        name="Rebase Pose to Target G4SK",
+        default=False,
+        description="Convert the baked mesh from its source pose space into the selected native G4SK bind space",
+    )
+    target_bind_rig: StringProperty(
+        name="Target Bind Rig",
+        default="",
+        description="Imported native G4SK armature. Leave empty only when exactly one native G4SK rig is in the scene",
     )
     stabilize_finger_weights: BoolProperty(
         name="Stabilize Finger Weights",
@@ -2333,6 +2429,8 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         props.align_forward_to_y,
         props.apply_modifiers,
         props.bake_current_pose,
+        props.rebase_to_target_bind,
+        props.target_bind_rig,
     )
     mesh_count = write_weights_json(weights_path, props.selected_only)
     if mesh_count == 0:
@@ -2970,6 +3068,10 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
     box.prop(props, "bake_current_pose")
+    box.prop(props, "rebase_to_target_bind")
+    if props.rebase_to_target_bind:
+        box.prop_search(props, "target_bind_rig", bpy.data, "objects")
+        box.label(text="Use the imported G4SK that the game applies to this uniform.", icon="ARMATURE_DATA")
     box.prop(props, "stabilize_finger_weights")
     box.prop(props, "align_forward_to_y")
     box.prop(props, "preserve_native_roundtrip")
