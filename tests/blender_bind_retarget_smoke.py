@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Vector
 
 
 ROOT = Path(__file__).parents[1]
@@ -55,12 +55,10 @@ modifier.object = source_armature
 evaluated = mesh.copy()
 evaluated.vertices[0].co = (1, 0, 0)
 rebased = ADDON.rebase_evaluated_mesh_to_target_bind(source, evaluated, target_armature)
-g4_to_blender = Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))
 expected = (
-    g4_to_blender
+    target_armature.matrix_world
     @ target_armature.data.bones["l_a_1_0"].matrix_local
-    @ g4_to_blender
-    @ source_armature.pose.bones["l_arm"].matrix.inverted_safe()
+    @ (source_armature.matrix_world @ source_armature.pose.bones["l_arm"].matrix).inverted_safe()
     @ Vector((1, 0, 0))
 )
 assert rebased == 1
