@@ -1021,6 +1021,9 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
     for texture_name in texture_names:
         entry = target.texture_entries.add()
         entry.texture_name = texture_name
+    if target.template_signature != signature:
+        for obj in mesh_objects(False):
+            obj.level5_g4_port.target_record = "__none__"
     material_names = md.get("material_names", [])
     mesh_names = md.get("mesh_names", [])
     if target.template_signature == signature and len(target.records) == len(md.get("records", [])):
