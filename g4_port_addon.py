@@ -14,6 +14,7 @@ from array import array
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix, Vector
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -294,6 +295,55 @@ def arm_bind_translation_offsets(props) -> dict[str, list[float]]:
     if not offsets:
         raise RuntimeError("The selected source and target rigs do not contain a usable arm chain.")
     return offsets
+
+
+def arm_bind_segment_transforms(props) -> dict[str, list[float]]:
+    target = bpy.data.objects.get(props.arm_bind_target_rig)
+    if target is None or target.type != "ARMATURE":
+        raise RuntimeError("Select the imported c000101 G4SK armature as Arm Bind Target Rig.")
+    sources = mesh_objects(props.selected_only)
+    armature_counts = {}
+    for mesh in sources:
+        armature = armature_for_mesh(mesh)
+        if armature is not None:
+            armature_counts[armature] = armature_counts.get(armature, 0) + 1
+    if not armature_counts:
+        raise RuntimeError("Arm bind correction requires an exported mesh with an armature modifier.")
+    source = max(armature_counts, key=armature_counts.get)
+    chains = (
+        ("l_collar", "l_arm", "l_elbow", "l_hand"),
+        ("r_collar", "r_arm", "r_elbow", "r_hand"),
+    )
+
+    def game_position(position):
+        return Vector((position.x, position.z, position.y))
+
+    transforms = {}
+    for chain in chains:
+        for index, source_name in enumerate(chain):
+            target_name = ARM_BIND_TARGETS[source_name]
+            source_bone = source.pose.bones.get(source_name)
+            target_bone = target.data.bones.get(target_name)
+            if source_bone is None or target_bone is None:
+                continue
+            source_head = game_position(source_bone.matrix.translation)
+            target_head = target_bone.matrix_local.translation
+            if index + 1 < len(chain):
+                next_source_name = chain[index + 1]
+                source_vector = game_position(source.pose.bones[next_source_name].matrix.translation) - source_head
+                target_vector = target.data.bones[ARM_BIND_TARGETS[next_source_name]].matrix_local.translation - target_head
+            else:
+                previous_source_name = chain[index - 1]
+                source_vector = source_head - game_position(source.pose.bones[previous_source_name].matrix.translation)
+                target_vector = target_head - target.data.bones[ARM_BIND_TARGETS[previous_source_name]].matrix_local.translation
+            if source_vector.length < 1e-6 or target_vector.length < 1e-6:
+                continue
+            rotation = source_vector.normalized().rotation_difference(target_vector.normalized()).to_matrix().to_4x4()
+            correction = Matrix.Translation(target_head) @ rotation @ Matrix.Translation(-source_head)
+            transforms[target_name] = [value for row in correction for value in row]
+    if not transforms:
+        raise RuntimeError("The selected source and target rigs do not contain a usable arm chain.")
+    return transforms
 
 
 def export_collada(
@@ -804,9 +854,9 @@ class G4PortSceneSettings(PropertyGroup):
         description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
     )
     correct_arm_bind: BoolProperty(
-        name="Correct Arm Bind Translation",
+        name="Correct Arm Bind",
         default=False,
-        description="Apply only weighted collar/arm/elbow/wrist translation offsets against a native G4SK reference",
+        description="Align the weighted collar/arm/elbow/wrist segments to a native G4SK reference",
     )
     arm_bind_target_rig: StringProperty(
         name="Arm Bind Target Rig",
@@ -2414,7 +2464,7 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     config = generated_config_path(cache)
     config_data = props.to_config()
     if props.correct_arm_bind:
-        config_data["joint_position_offsets"] = arm_bind_translation_offsets(props)
+        config_data["joint_position_transforms"] = arm_bind_segment_transforms(props)
     config.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
     trace_path = cache / "atlas_uv_trace.log"
     write_uv_export_trace(props, config_data, trace_path)
