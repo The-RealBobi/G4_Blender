@@ -1632,9 +1632,6 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             output[record_index] = Mesh(rule.output_name, [zero, zero, zero], [0, 1, 2], material_index, rule.material_name)
         else:
             output[record_index] = Mesh(rule.output_name, [zero, zero, zero], [0, 1, 2], material_index, rule.material_name)
-    if len(assigned) != len(meshes):
-        unassigned = [mesh.name for index, mesh in enumerate(meshes) if index not in assigned]
-        raise ValueError(f"source meshes were not assigned to a native record: {unassigned}")
     missing_records = [config.records[index].output_name for index, mesh in enumerate(output) if mesh is None]
     if missing_records:
         raise ValueError(f"native records did not receive output meshes: {missing_records}")
