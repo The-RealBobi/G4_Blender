@@ -300,6 +300,7 @@ def export_collada(
                 for modifier in pose_source.modifiers:
                     if modifier.type != "ARMATURE":
                         modifier.show_viewport = False
+            bpy.context.view_layer.update()
             mesh = bpy.data.meshes.new_from_object(pose_source.evaluated_get(depsgraph), depsgraph=depsgraph)
             copy = bpy.data.objects.new(source.name, mesh)
             copy.matrix_world = source.matrix_world
