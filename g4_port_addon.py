@@ -854,7 +854,7 @@ class G4PortSceneSettings(PropertyGroup):
     )
     rebase_to_target_bind: BoolProperty(
         name="Rebase Pose to Target G4SK",
-        default=True,
+        default=False,
         description="Convert the baked mesh from its source pose space into the selected native G4SK bind space",
     )
     target_bind_rig: StringProperty(
