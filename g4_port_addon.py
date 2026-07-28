@@ -292,7 +292,15 @@ def export_collada(
             raise RuntimeError("No mesh objects were found to bake for export.")
         copies = []
         for source in sources:
-            mesh = bpy.data.meshes.new_from_object(source.evaluated_get(depsgraph), depsgraph=depsgraph)
+            pose_source = source.copy()
+            pose_source.data = source.data.copy()
+            pose_source.matrix_world = source.matrix_world
+            collection.objects.link(pose_source)
+            if not apply_modifiers:
+                for modifier in pose_source.modifiers:
+                    if modifier.type != "ARMATURE":
+                        modifier.show_viewport = False
+            mesh = bpy.data.meshes.new_from_object(pose_source.evaluated_get(depsgraph), depsgraph=depsgraph)
             copy = bpy.data.objects.new(source.name, mesh)
             copy.matrix_world = source.matrix_world
             collection.objects.link(copy)
@@ -825,6 +833,11 @@ class G4PortSceneSettings(PropertyGroup):
                 item.pop("uv_offset", None)
                 item.pop("source_uv_transforms", None)
             records.append(item)
+        source_mesh_assignments = {
+            obj.name: obj.level5_g4_port.target_record
+            for obj in mesh_objects(self.selected_only)
+            if obj.level5_g4_port.target_record not in {"", "__none__"}
+        }
         return {
             "model_rel": self.model_rel,
             "native_material_names": split_csv(self.native_material_names),
@@ -837,6 +850,7 @@ class G4PortSceneSettings(PropertyGroup):
                 for alias in self.joint_aliases
                 if alias.source_group and alias.target_joint
             },
+            "source_mesh_assignments": source_mesh_assignments,
             "generate_tangents": self.generate_tangents,
             "strict_skinning": self.strict_skinning,
             "uv_flip": [self.global_uv_flip_x, self.global_uv_flip_y],
