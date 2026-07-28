@@ -435,6 +435,13 @@ def shared_face_texture_key(texture_names: list[str]) -> str:
     return next((name for name in texture_names if re.search(r"_10$", name) and not is_special_texture(name)), "")
 
 
+def face_texture_is_shared(records, texture_names: list[str]) -> bool:
+    texture_name = shared_face_texture_key(texture_names)
+    return bool(texture_name and any(
+        is_face_atlas_record(record) and record.texture_key == texture_name for record in records
+    ))
+
+
 def is_face_atlas_record(record) -> bool:
     name = record.output_name.lower()
     material = record.material_name.lower().removesuffix("m")
@@ -719,8 +726,8 @@ class G4PortSceneSettings(PropertyGroup):
     expression_pool: CollectionProperty(type=G4PortExpressionImage)
     generate_png_set_on_export: BoolProperty(
         name="Regenerate Atlas On Export",
-        default=False,
-        description="Regenerate only missing or outdated prepared atlases before exporting a custom G4TX",
+        default=True,
+        description="Automatically prepare missing or outdated custom atlases from assigned Blender images",
     )
     use_source_uv_transforms: BoolProperty(
         name="Use Object UV Tiles",
@@ -794,7 +801,8 @@ class G4PortSceneSettings(PropertyGroup):
     def texture_map(self) -> dict:
         result = {}
         atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
-        face_texture = shared_face_texture_key([entry.texture_name for entry in self.texture_entries])
+        texture_names = [entry.texture_name for entry in self.texture_entries]
+        face_texture = shared_face_texture_key(texture_names) if face_texture_is_shared(self.records, texture_names) else ""
         for item in self.texture_entries:
             if not item.texture_name or not item.replacement_path:
                 continue
@@ -804,7 +812,7 @@ class G4PortSceneSettings(PropertyGroup):
             # is allowed to replace this entry.
             if item.texture_name == face_texture and not item.expression_atlas:
                 continue
-            if item.atlas_signature and atlas_states.get(item.texture_name) != "ready":
+            if item.atlas_signature and atlas_states.get(item.texture_name) == "warning":
                 continue
             if self.replace_special_textures or not is_special_texture(item.texture_name):
                 result[item.texture_name] = bpy.path.basename(item.replacement_path)
