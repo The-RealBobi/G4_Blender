@@ -741,8 +741,8 @@ class G4PortSceneSettings(PropertyGroup):
     )
     replace_special_textures: BoolProperty(
         name="Replace Special Maps",
-        default=False,
-        description="Allow custom replacements for line/oc/sp/spm maps instead of keeping bundled G4TX payloads",
+        default=True,
+        description="Write generated line/oc/sp/spm maps instead of retaining the original character effects",
     )
     preserve_native_roundtrip: BoolProperty(
         name="Preserve Untouched Native Import",
@@ -1876,16 +1876,18 @@ def build_texture_spritesheet(
         return False
 
     groups = []
+    grouped_sources = {}
     for record, obj, source, cache_key in sources:
-        # A shared PNG can contain distinct UV islands for separate materials.
-        # Give every assigned object a cell so its transform remains unique.
-        groups.append({
-            "records": [record],
-            "objects": [obj],
-            "source": source,
-            "key": obj.name,
-            "projected": "|projection:" in cache_key,
-        })
+        if source is None or not cache_key:
+            groups.append({"records": [record], "objects": [obj], "source": source, "key": obj.name})
+            continue
+        group = grouped_sources.get(cache_key)
+        if group is None:
+            group = {"records": [], "objects": [], "source": source, "key": cache_key, "projected": "|projection:" in cache_key}
+            grouped_sources[cache_key] = group
+            groups.append(group)
+        group["records"].append(record)
+        group["objects"].append(obj)
 
     columns, rows = atlas_grid(len(groups))
     max_source_width = max((group["source"][0] for group in groups if group["source"] is not None), default=entry["width"])
@@ -2040,8 +2042,10 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
             ):
                 replacements.append(f"{name}={path.name}")
             else:
-                port_log(log_path, f"{name}: no valid special-map source; preserving native G4TX entry")
-                discard_generated_atlas(texture_entry(props, name), path)
+                port_log(log_path, f"{name}: writing neutral generated special map")
+                pixels = image_pixels(entry["width"], entry["height"], default_color)
+                save_png(path, entry["width"], entry["height"], pixels)
+                replacements.append(f"{name}={path.name}")
         else:
             records = records_by_texture.get(name, [])
             port_log(log_path, f"{name}: base map, records={len(records)}")
