@@ -2254,7 +2254,8 @@ def write_port(
     source_meshes, meshes, native_palettes, palettes, _ = prepare_port_geometry(
         source_dae, raw_root, config, weight_sidecar
     )
-    native_joint_indices = native_joint_name_indices((raw_root / config.common_rel).read_bytes())
+    native_model = raw_root / config.common_rel
+    native_joint_indices = native_joint_name_indices(native_model.read_bytes()) if native_model.is_file() else {}
     g4mg, records = build_g4mg(
         meshes, config.uv_flip, config.records, palettes, config.joint_aliases or {}, native_joint_indices
     )
