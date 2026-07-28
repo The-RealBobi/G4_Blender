@@ -260,6 +260,7 @@ class PortSkinningSafetyTests(unittest.TestCase):
             _, output_entries, output_payloads = PORT.parse_g4tx_payloads(output)
             self.assertEqual([entry["name"] for entry in output_entries], [entry["name"] for entry in template_entries])
             self.assertEqual(output_payloads, template_payloads)
+            self.assertEqual(output.read_bytes(), template.read_bytes())
 
     def test_replacing_a_native_payload_preserves_the_native_g4tx_tables(self):
         template = Path(

@@ -2088,6 +2088,7 @@ def rebuild_g4tx(template_path: Path, material_plans: list[MaterialPlan], textur
 def rebuild_native_g4tx_with_custom_textures(
     template_path: Path, custom_dir: Path, out_path: Path, replacements: dict[str, str]
 ) -> list[str]:
+    template_data = template_path.read_bytes()
     header, template_entries, native_payloads = parse_g4tx_payloads(template_path)
     replacement_paths = {name: custom_dir / rel_path for name, rel_path in replacements.items()}
     output_entries: list[dict] = []
@@ -2101,30 +2102,16 @@ def rebuild_native_g4tx_with_custom_textures(
         )
         output_entries.append({"name": name, "payload": payload, "template": entry})
 
-    count = len(output_entries)
+    if all(entry["payload"] == native_payloads[entry["name"]] for entry in output_entries):
+        out_path.write_bytes(template_data)
+        return [entry["name"] for entry in output_entries]
+
+    # The DX11 loader is sensitive to the template's opaque table layout.  Keep
+    # its hashes, IDs, strings and table size intact; only records and payloads
+    # are replaced.  Rebuilding those tables shifted the texture base by 16 B.
     entry_offset = 0x60
-    hash_offset = align(entry_offset + count * 0x30, 0x10)
-    id_offset = hash_offset + count * 4
-    string_offset = align(id_offset + count, 4)
-    string_content_offset = align(string_offset + count * 2 + 7, 4)
-    string_size = sum(len(entry["name"]) + 1 for entry in output_entries)
-    data_offset = align(string_content_offset + string_size, 0x10)
-
-    out = bytearray(data_offset)
-    out[:0x60] = header
-    struct.pack_into("<H", out, 0x20, count)
-    struct.pack_into("<H", out, 0x22, count)
-    struct.pack_into("<B", out, 0x25, 0)
-
-    cursor = string_content_offset
-    for index, entry in enumerate(output_entries):
-        name = entry["name"]
-        struct.pack_into("<H", out, string_offset + index * 2, cursor - string_offset)
-        out[cursor : cursor + len(name)] = name.encode("ascii")
-        cursor += len(name) + 1
-        struct.pack_into("<I", out, hash_offset + index * 4, crc32b(name))
-        out[id_offset + index] = entry["template"].get("id", index) & 0xFF
-
+    data_offset = align(struct.unpack_from("<H", template_data, 0x04)[0] + struct.unpack_from("<I", template_data, 0x0C)[0], 0x10)
+    out = bytearray(template_data[:data_offset])
     data_cursor = data_offset
     for index, entry in enumerate(output_entries):
         payload = entry["payload"]
@@ -2141,8 +2128,6 @@ def rebuild_native_g4tx_with_custom_textures(
         if len(out) < data_cursor:
             out.extend(b"\0" * (data_cursor - len(out)))
 
-    table_size = align(cursor - 0x60, 4)
-    struct.pack_into("<I", out, 0x0C, table_size)
     struct.pack_into("<I", out, 0x2C, len(out) - data_offset)
     out_path.write_bytes(bytes(out))
     return [entry["name"] for entry in output_entries]
