@@ -801,8 +801,7 @@ class G4PortSceneSettings(PropertyGroup):
     def texture_map(self) -> dict:
         result = {}
         atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
-        texture_names = [entry.texture_name for entry in self.texture_entries]
-        face_texture = shared_face_texture_key(texture_names) if face_texture_is_shared(self.records, texture_names) else ""
+        face_texture = shared_face_texture_key([entry.texture_name for entry in self.texture_entries])
         for item in self.texture_entries:
             if not item.texture_name or not item.replacement_path:
                 continue
@@ -2045,10 +2044,8 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
             ):
                 replacements.append(f"{name}={path.name}")
             else:
-                port_log(log_path, f"{name}: writing neutral generated special map")
-                pixels = image_pixels(entry["width"], entry["height"], default_color)
-                save_png(path, entry["width"], entry["height"], pixels)
-                replacements.append(f"{name}={path.name}")
+                port_log(log_path, f"{name}: no valid special-map source; preserving native G4TX entry")
+                discard_generated_atlas(texture_entry(props, name), path)
         else:
             records = records_by_texture.get(name, [])
             port_log(log_path, f"{name}: base map, records={len(records)}")
