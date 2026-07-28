@@ -100,6 +100,13 @@ class AtlasContractTests(unittest.TestCase):
         self.assertIn("ATLAS_GUTTER_PIXELS", source)
         self.assertIn("def bleed_transparent_pixels", source)
 
+    def test_each_assigned_object_gets_its_own_atlas_cell(self):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        builder = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_texture_spritesheet")
+        body = ast.unparse(builder)
+        self.assertIn('"objects": [obj]', body)
+        self.assertNotIn("grouped_sources", body)
+
 
 if __name__ == "__main__":
     unittest.main()

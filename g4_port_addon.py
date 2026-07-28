@@ -1876,24 +1876,16 @@ def build_texture_spritesheet(
         return False
 
     groups = []
-    grouped_sources = {}
     for record, obj, source, cache_key in sources:
-        if source is None or not cache_key:
-            groups.append({"records": [record], "objects": [obj], "source": source, "key": obj.name})
-            continue
-        group = grouped_sources.get(cache_key)
-        if group is None:
-            group = {
-                "records": [],
-                "objects": [],
-                "source": source,
-                "key": cache_key,
-                "projected": "|projection:" in cache_key,
-            }
-            grouped_sources[cache_key] = group
-            groups.append(group)
-        group["records"].append(record)
-        group["objects"].append(obj)
+        # A shared PNG can contain distinct UV islands for separate materials.
+        # Give every assigned object a cell so its transform remains unique.
+        groups.append({
+            "records": [record],
+            "objects": [obj],
+            "source": source,
+            "key": obj.name,
+            "projected": "|projection:" in cache_key,
+        })
 
     columns, rows = atlas_grid(len(groups))
     max_source_width = max((group["source"][0] for group in groups if group["source"] is not None), default=entry["width"])
