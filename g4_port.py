@@ -14,8 +14,10 @@ from pathlib import Path
 
 try:
     from g4_model_probe import dds_to_nxtch
+    from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
 except ImportError:
     from .g4_model_probe import dds_to_nxtch
+    from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
 
 
 DEFAULT_RAW_ROOT = Path(os.environ.get("LEVEL5_G4_RAW_ROOT", "data"))
@@ -72,6 +74,8 @@ class PortConfig:
     strict_skinning: bool = True
     generate_tangents: bool = False
     apply_bind_shape: bool = False
+    source_mesh_assignments: dict[str, str] | None = None
+    stabilize_finger_weights: bool = False
 
     @property
     def common_rel(self) -> Path:
@@ -112,6 +116,8 @@ class Vertex:
     influences: tuple[tuple[str, float], ...] = ()
     tangent: tuple[float, float, float] | None = None
     bitangent: tuple[float, float, float] | None = None
+    color: tuple[int, int, int, int] | None = None
+    color_from_source: bool = False
 
 
 @dataclass
@@ -236,6 +242,8 @@ def load_config(path: Path | None) -> PortConfig:
         strict_skinning=bool(data.get("strict_skinning", True)),
         generate_tangents=bool(data.get("generate_tangents", False)),
         apply_bind_shape=bool(data.get("apply_bind_shape", False)),
+        source_mesh_assignments=dict(data.get("source_mesh_assignments", {})),
+        stabilize_finger_weights=bool(data.get("stabilize_finger_weights", False)),
     )
 
 
@@ -374,6 +382,7 @@ def pack_vertex(
     uv_flip: tuple[bool, bool] = (False, False),
     uv_scale: tuple[float, float] = (1.0, 1.0),
     uv_offset: tuple[float, float] = (0.0, 0.0),
+    fallback_color: tuple[int, int, int, int] = (255, 255, 255, 255),
 ) -> bytes:
     out = bytearray(0x44)
     struct.pack_into("<3f", out, 0x00, *vertex.position)
@@ -395,7 +404,7 @@ def pack_vertex(
     joints.extend([0] * (8 - len(joints)))
     struct.pack_into("<8H", out, 0x24, *weights)
     struct.pack_into("<8B", out, 0x34, *joints)
-    struct.pack_into("<4B", out, 0x3C, 0xFF, 0xFF, 0xFF, 0xFF)
+    struct.pack_into("<4B", out, 0x3C, *(vertex.color or fallback_color))
     local_uv = (1.0 - vertex.uv[0] if uv_flip[0] else vertex.uv[0], 1.0 - vertex.uv[1] if uv_flip[1] else vertex.uv[1])
     uv = (local_uv[0] * uv_scale[0] + uv_offset[0], local_uv[1] * uv_scale[1] + uv_offset[1])
     u = int(round(max(0.0, min(1.0, uv[0])) * 65535.0))
@@ -1002,6 +1011,9 @@ def build_g4mg(
     record_rules: list[RecordRule] | None = None,
     palettes: list[list[int]] | None = None,
     joint_aliases: dict[str, str | int] | None = None,
+    native_joint_indices: dict[str, int] | None = None,
+    fallback_colors: list[tuple[int, int, int, int]] | None = None,
+    stabilize_finger_weights: bool = False,
 ) -> tuple[bytes, list[dict]]:
     buf = bytearray()
     records = []
@@ -1016,19 +1028,27 @@ def build_g4mg(
         )
         rule = record_rules[mesh_index] if record_rules is not None and mesh_index < len(record_rules) else None
         palette = palettes[mesh_index] if palettes is not None and mesh_index < len(palettes) else []
-        resolved = [resolve_vertex_influences(vertex, palette, rule, joint_aliases or {}) for vertex in mesh.vertices]
+        resolved = [
+            resolve_vertex_influences(
+                vertex, palette, rule, joint_aliases or {}, native_joint_indices, stabilize_finger_weights
+            )
+            for vertex in mesh.vertices
+        ]
         unresolved = sum(item[1] for item in resolved)
+        fallback_color = fallback_colors[mesh_index] if fallback_colors and mesh_index < len(fallback_colors) else (255, 255, 255, 255)
         for vertex, (influences, _) in zip(mesh.vertices, resolved):
-            buf.extend(pack_vertex(vertex, influences, record_uv_flip, uv_scale, uv_offset))
+            buf.extend(pack_vertex(vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color))
         records.append({
             "vertex_offset": vertex_offset,
             "vertex_count": len(mesh.vertices),
             "weighted_vertices": sum(bool(vertex.influences) for vertex in mesh.vertices),
             "unresolved_influences": unresolved,
             "palette": palette,
+            "source_color_vertices": sum(vertex.color_from_source for vertex in mesh.vertices),
+            "fallback_color": list(fallback_color),
         })
     vertex_buffer_size = len(buf)
-    append_aligned(buf, 0x10)
+    append_aligned(buf, 0x40)
     index_base = len(buf)
     for mesh, record in zip(meshes, records):
         record["index_offset"] = len(buf) - index_base
@@ -1036,7 +1056,7 @@ def build_g4mg(
         for index in mesh.indices:
             buf.extend(struct.pack("<H", index))
     index_buffer_size = len(buf) - index_base
-    append_aligned(buf, 0x10)
+    append_aligned(buf, 0x40)
     for record in records:
         record["vertex_buffer_size"] = vertex_buffer_size
         record["index_base"] = index_base
@@ -1044,10 +1064,44 @@ def build_g4mg(
     return bytes(buf), records
 
 
+def realign_g4mg_index_buffer(md: bytes, mg: bytes) -> tuple[bytes, bytes]:
+    """Repair older 0x10-aligned index payloads without touching vertex data."""
+    vertex_size = struct.unpack_from("<I", md, 0x50)[0]
+    index_size = struct.unpack_from("<I", md, 0x54)[0]
+    index_base = struct.unpack_from("<I", md, 0x5C)[0]
+    if index_base % 0x40 == 0 and len(mg) % 0x40 == 0:
+        return md, mg
+    if vertex_size > len(mg) or index_base + index_size > len(mg):
+        raise ValueError("legacy G4MG buffer sizes are inconsistent")
+    repaired = bytearray(mg[:vertex_size])
+    append_aligned(repaired, 0x40)
+    repaired_base = len(repaired)
+    repaired.extend(mg[index_base:index_base + index_size])
+    append_aligned(repaired, 0x40)
+    repaired_md = bytearray(md)
+    struct.pack_into("<I", repaired_md, 0x5C, repaired_base)
+    return bytes(repaired_md), bytes(repaired)
+
+
+def transfer_native_vertex_colors(
+    meshes: list[Mesh], native_colors: list[list[tuple[tuple[float, float, float], tuple[int, int, int, int]]]],
+    fallback_colors: list[tuple[int, int, int, int]],
+) -> None:
+    for mesh_index, mesh in enumerate(meshes):
+        colors = native_colors[mesh_index] if mesh_index < len(native_colors) else []
+        fallback = fallback_colors[mesh_index] if mesh_index < len(fallback_colors) else (255, 255, 255, 255)
+        for vertex in mesh.vertices:
+            if vertex.color_from_source:
+                continue
+            closest = min(colors, key=lambda item: sum((a - b) ** 2 for a, b in zip(vertex.position, item[0])), default=None)
+            vertex.color = closest[1] if closest is not None else fallback
+
+
 def compact_joint_index(
     name: str,
     aliases: dict[str, str | int] | None = None,
     visited: set[str] | None = None,
+    native_joint_indices: dict[str, int] | None = None,
 ) -> int | None:
     visited = set() if visited is None else visited
     if name in visited:
@@ -1057,26 +1111,45 @@ def compact_joint_index(
     if isinstance(alias, int):
         return alias
     if isinstance(alias, str) and alias != name:
-        return compact_joint_index(alias, aliases, visited)
+        return compact_joint_index(alias, aliases, visited, native_joint_indices)
+    catalog = load_joint_alias_catalog()
+    target = resolve_catalog_alias(name, catalog)
+    if not target:
+        compact_aliases = {
+            "spine01": "c_c_1_1", "spine02": "c_c_1_1",
+            "r_index01": "r_idx_1_0", "r_index02": "r_idx_1_1", "r_index03": "r_idx_1_2",
+            "l_index01": "l_idx_1_0", "l_index02": "l_idx_1_1", "l_index03": "l_idx_1_2",
+            "l_arm_roll": "l_a_1_0", "l_arm_roll_02": "l_a_1_0",
+            "r_arm_roll": "r_a_1_0", "r_arm_roll_02": "r_a_1_0",
+            "l_hand_roll": "l_wph_1_0", "l_hand_roll_02": "l_wph_1_0",
+            "r_hand_roll": "r_wph_1_0", "r_hand_roll_02": "r_wph_1_0",
+        }
+        target = compact_aliases.get(normalize_joint_key(name), "")
+    if target and target != name:
+        return compact_joint_index(target, aliases, visited, native_joint_indices)
     if name in COMPACT_JOINT_NAMES:
+        if native_joint_indices and name in native_joint_indices:
+            return native_joint_indices[name]
         return COMPACT_JOINT_NAMES.index(name)
     match = re.fullmatch(r"joint_(\d+)", name)
     return int(match.group(1)) if match else None
 
 
 def rigid_local_joint(
-    rule: RecordRule | None, palette: list[int], aliases: dict[str, str | int] | None = None
+    rule: RecordRule | None, palette: list[int], aliases: dict[str, str | int] | None = None,
+    native_joint_indices: dict[str, int] | None = None,
 ) -> int:
     if rule is None or rule.rigid_joint is None:
         return 0
     global_joint = (
         rule.rigid_joint
         if isinstance(rule.rigid_joint, int)
-        else compact_joint_index(rule.rigid_joint, aliases)
+        else compact_joint_index(rule.rigid_joint, aliases, native_joint_indices=native_joint_indices)
     )
     if global_joint is None:
         raise ValueError(f"unknown compact joint {rule.rigid_joint!r}")
-    if global_joint not in palette:
+    global_joint = palette_compatible_joint(global_joint, palette, native_joint_indices or {})
+    if global_joint is None:
         raise ValueError(f"joint {rule.rigid_joint!r} ({global_joint}) is not present in native palette {palette}")
     return palette.index(global_joint)
 
@@ -1086,19 +1159,34 @@ def resolve_vertex_influences(
     palette: list[int],
     rule: RecordRule | None,
     aliases: dict[str, str | int] | None = None,
+    native_joint_indices: dict[str, int] | None = None,
+    stabilize_finger_weights: bool = False,
 ) -> tuple[list[tuple[int, float]], int]:
     if not vertex.influences:
-        return [(rigid_local_joint(rule, palette, aliases), 1.0)], 0
+        return [(rigid_local_joint(rule, palette, aliases, native_joint_indices), 1.0)], 0
     resolved: list[tuple[int, float]] = []
     unresolved = 0
+    joint_names = {index: joint_name for joint_name, index in (native_joint_indices or {}).items()}
     for name, weight in vertex.influences:
-        global_joint = compact_joint_index(name, aliases)
-        if global_joint is None or global_joint not in palette:
+        global_joint = compact_joint_index(name, aliases, native_joint_indices=native_joint_indices)
+        global_joint = palette_compatible_joint(global_joint, palette, native_joint_indices or {})
+        if stabilize_finger_weights and global_joint is not None:
+            finger = re.fullmatch(r"([lr])_(?:idx|mid|rng|thb|pky)_1_[0-2]", joint_names.get(global_joint, ""))
+            if finger:
+                wrist = (native_joint_indices or {}).get(f"{finger.group(1)}_w_1_0")
+                if wrist in palette:
+                    global_joint = wrist
+        if global_joint is None:
             unresolved += 1
             continue
         resolved.append((palette.index(global_joint), weight))
     if not resolved:
-        return [(rigid_local_joint(rule, palette, aliases), 1.0)], unresolved
+        return [(rigid_local_joint(rule, palette, aliases, native_joint_indices), 1.0)], unresolved
+    if stabilize_finger_weights:
+        combined: dict[int, float] = {}
+        for local_joint, weight in resolved:
+            combined[local_joint] = combined.get(local_joint, 0.0) + weight
+        resolved = list(combined.items())
     if rule is not None and rule.secondary_weight_scale != 1.0:
         if not 0.0 <= rule.secondary_weight_scale <= 1.0:
             raise ValueError(
@@ -1147,26 +1235,73 @@ def native_record_palettes(md: bytes) -> list[list[int]]:
     return palettes
 
 
+def native_joint_name_indices(md: bytes) -> dict[str, int]:
+    """Resolve joint indices from the native G4MD hash table, not a shared rig order."""
+    if len(md) < 0x84:
+        return {}
+    header_size = struct.unpack_from("<H", md, 0x04)[0]
+    start = header_size + struct.unpack_from("<H", md, 0x74)[0] * 4
+    end = header_size + struct.unpack_from("<H", md, 0x82)[0] * 4
+    if not 0 <= start <= end <= len(md):
+        return {}
+    by_hash = {crc32b(name): name for name in COMPACT_JOINT_NAMES}
+    indices: dict[str, int] = {}
+    for offset in range(start, end - 3, 4):
+        name = by_hash.get(struct.unpack_from("<I", md, offset)[0])
+        if name is not None:
+            indices[name] = (offset - start) // 4
+    return indices
+
+
+def palette_compatible_joint(
+    joint: int | None, palette: list[int], native_joint_indices: dict[str, int]
+) -> int | None:
+    if joint is None:
+        return None
+    if joint in palette:
+        return joint
+    names = {index: name for name, index in native_joint_indices.items()}
+    name = names.get(joint, "")
+    replacements: list[str] = []
+    if name == "c_global_0_0":
+        replacements.append("c_c_1_0")
+    elif name.endswith("_wph_1_0"):
+        replacements.append(name.replace("_wph_1_0", "_w_1_0"))
+    elif name.endswith("_foot_1_1"):
+        replacements.append(name.replace("_foot_1_1", "_foot_1_0"))
+    elif re.match(r"^[lr]_(?:idx|mid|rng|thb|pky)_1_[0-2]$", name):
+        replacements.append(f"{name[:2]}w_1_0")
+    for replacement in replacements:
+        candidate = native_joint_indices.get(replacement)
+        if candidate in palette:
+            return candidate
+    return None
+
+
 def configured_record_palettes(
     native_palettes: list[list[int]],
     records: list[RecordRule],
     meshes: list[Mesh],
     aliases: dict[str, str | int],
+    native_joint_indices: dict[str, int] | None = None,
 ) -> list[list[int]]:
     palettes: list[list[int]] = []
 
-    def used_palette_joints(mesh: Mesh, rule: RecordRule) -> set[int]:
+    def used_palette_joints(mesh: Mesh, rule: RecordRule, native_palette: list[int]) -> set[int]:
         used_joints: set[int] = set()
         for vertex in mesh.vertices:
             for joint_name, _ in vertex.influences:
-                resolved = compact_joint_index(joint_name, aliases)
+                resolved = compact_joint_index(joint_name, aliases, native_joint_indices=native_joint_indices)
+                compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
+                if compatible is not None:
+                    resolved = compatible
                 if resolved is not None:
                     used_joints.add(resolved)
         return used_joints
 
     def expanded_native_palette(index: int, rule: RecordRule, mesh: Mesh) -> list[int]:
         palette = list(native_palettes[index])
-        used_joints = used_palette_joints(mesh, rule)
+        used_joints = used_palette_joints(mesh, rule, palette)
         palette.extend(sorted(used_joints.difference(palette)))
         if len(palette) > 0xFF:
             raise ValueError(f"automatic palette for {rule.output_name} exceeds 255 joints")
@@ -1178,7 +1313,7 @@ def configured_record_palettes(
             continue
         if rule.palette_joints is None:
             native_palette = native_palettes[index]
-            used_joints = used_palette_joints(meshes[index], rule)
+            used_joints = used_palette_joints(meshes[index], rule, native_palette)
             if used_joints.difference(native_palette):
                 palettes.append(expanded_native_palette(index, rule, meshes[index]))
             else:
@@ -1186,7 +1321,7 @@ def configured_record_palettes(
             continue
         palette: list[int] = []
         for joint in rule.palette_joints:
-            resolved = joint if isinstance(joint, int) else compact_joint_index(joint, aliases)
+            resolved = joint if isinstance(joint, int) else compact_joint_index(joint, aliases, native_joint_indices=native_joint_indices)
             if resolved is None:
                 raise ValueError(f"unknown compact joint {joint!r} in palette for {rule.output_name}")
             if not 0 <= resolved < 0x10000:
@@ -1342,7 +1477,10 @@ def transformed_source_vertex(vertex: Vertex, scale: tuple[float, float], offset
     # neighbouring, often empty, cell.
     local_uv = tuple(value - math.floor(value) for value in vertex.uv)
     uv = (local_uv[0] * scale[0] + offset[0], local_uv[1] * scale[1] + offset[1])
-    return Vertex(vertex.position, vertex.normal, uv, vertex.influences, vertex.tangent, vertex.bitangent)
+    return Vertex(
+        vertex.position, vertex.normal, uv, vertex.influences, vertex.tangent, vertex.bitangent,
+        vertex.color, vertex.color_from_source,
+    )
 
 
 def split_mesh_by_vertex_limit(mesh: Mesh, output_names: list[str], max_vertices: int = 0xFFFF) -> list[Mesh]:
@@ -1419,6 +1557,14 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
     wildcard_rules = [rule for rule in config.records if "*" in rule.match_names]
     explicit_rules = [rule for rule in config.records if "*" not in rule.match_names]
 
+    def assigned_record(mesh: Mesh) -> str:
+        assignments = config.source_mesh_assignments or {}
+        key = re.sub(r"_\d+$", "", normalize_joint_key(mesh.name))
+        for source_name, record_name in assignments.items():
+            if re.sub(r"_\d+$", "", normalize_joint_key(source_name)) == key:
+                return record_name
+        return ""
+
     def is_best_explicit_match(mesh: Mesh, rule: RecordRule) -> bool:
         rank = mesh_match_rank(mesh, rule)
         return rank > 0 and rank == max(mesh_match_rank(mesh, explicit) for explicit in explicit_rules)
@@ -1430,13 +1576,19 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             selected = [
                 (index, mesh)
                 for index, mesh in enumerate(meshes)
-                if index not in assigned and not any(mesh_matches_rule(mesh, explicit) for explicit in explicit_rules)
+                if index not in assigned
+                and (assigned_record(mesh) == rule.output_name or (
+                    not assigned_record(mesh) and not any(mesh_matches_rule(mesh, explicit) for explicit in explicit_rules)
+                ))
             ]
         else:
             selected = [
                 (index, mesh)
                 for index, mesh in enumerate(meshes)
-                if index not in assigned and is_best_explicit_match(mesh, rule)
+                if index not in assigned and (
+                    assigned_record(mesh) == rule.output_name
+                    or (not assigned_record(mesh) and is_best_explicit_match(mesh, rule))
+                )
             ]
         parts = [mesh for _, mesh in selected]
         part_indices = {index for index, _ in selected}
@@ -1812,6 +1964,19 @@ def png_to_dds(path: Path) -> bytes:
         tmp.unlink(missing_ok=True)
 
 
+def dds_uses_gpu_compression(payload: bytes) -> bool:
+    if len(payload) < 128 or not payload.startswith(b"DDS "):
+        return False
+    flags = struct.unpack_from("<I", payload, 80)[0]
+    return bool(flags & 0x4 and payload[84:88] in {b"DXT1", b"DXT3", b"DXT5", b"DX10"})
+
+
+def replacement_texture_payload(payload: bytes, native_payload: bytes) -> bytes:
+    if payload.startswith(b"DDS ") and dds_uses_gpu_compression(native_payload) and not dds_uses_gpu_compression(payload):
+        return native_payload
+    return payload
+
+
 def replacement_texture(path: Path, native_payload: bytes) -> bytes:
     suffix = path.suffix.lower()
     if suffix == ".dds":
@@ -1822,6 +1987,8 @@ def replacement_texture(path: Path, native_payload: bytes) -> bytes:
             raise ValueError(f"invalid NXTCH replacement: {path}")
     else:
         payload = png_to_dds(path)
+
+    payload = replacement_texture_payload(payload, native_payload)
 
     native_is_nx = native_payload.startswith(b"NXTCH000")
     replacement_is_nx = payload.startswith(b"NXTCH000")
@@ -1941,6 +2108,9 @@ def rebuild_native_g4tx_with_custom_textures(
 ) -> list[str]:
     header, template_entries, native_payloads = parse_g4tx_payloads(template_path)
     replacement_paths = {name: custom_dir / rel_path for name, rel_path in replacements.items()}
+    if not replacements:
+        out_path.write_bytes(template_path.read_bytes())
+        return [entry["name"] for entry in template_entries]
     output_entries: list[dict] = []
     for entry in template_entries:
         name = entry["name"]
@@ -1951,6 +2121,10 @@ def rebuild_native_g4tx_with_custom_textures(
             else native_payloads[name]
         )
         output_entries.append({"name": name, "payload": payload, "template": entry})
+
+    if all(entry["payload"] == native_payloads[entry["name"]] for entry in output_entries):
+        out_path.write_bytes(template_path.read_bytes())
+        return [entry["name"] for entry in output_entries]
 
     count = len(output_entries)
     entry_offset = 0x60
@@ -2020,10 +2194,21 @@ def prepare_port_geometry(
     meshes = merged_native_meshes(source_meshes, config)
     native_g4md = (raw_root / config.common_rel).read_bytes()
     native_palettes = native_record_palettes(native_g4md)
-    palettes = configured_record_palettes(native_palettes, config.records, meshes, config.joint_aliases or {})
+    native_joint_indices = native_joint_name_indices(native_g4md)
+    palettes = configured_record_palettes(native_palettes, config.records, meshes, config.joint_aliases or {}, native_joint_indices)
     resolved_records = []
     for mesh, palette, rule in zip(meshes, palettes, config.records):
-        resolved = [resolve_vertex_influences(vertex, palette, rule, config.joint_aliases or {}) for vertex in mesh.vertices]
+        resolved = [
+            resolve_vertex_influences(
+                vertex,
+                palette,
+                rule,
+                config.joint_aliases or {},
+                native_joint_indices,
+                config.stabilize_finger_weights,
+            )
+            for vertex in mesh.vertices
+        ]
         resolved_records.append({
             "record": mesh.name,
             "source_names": list(mesh.source_names),
@@ -2089,6 +2274,7 @@ def analyze_port(
         "native_palettes": native_palettes,
         "palettes": palettes,
         "palette_expanded": palettes != native_palettes,
+        "unresolved_influences": unresolved,
         "expected_skeleton": expected_skeleton,
         "skeleton_validation": skeleton,
         "recommendations": recommendations,
@@ -2108,11 +2294,19 @@ def write_port(
     source_meshes, meshes, native_palettes, palettes, _ = prepare_port_geometry(
         source_dae, raw_root, config, weight_sidecar
     )
+    native_model = raw_root / config.common_rel
+    native_joint_indices = native_joint_name_indices(native_model.read_bytes()) if native_model.is_file() else {}
     g4mg, records = build_g4mg(
-        meshes, config.uv_flip, config.records, palettes, config.joint_aliases or {}
+        meshes,
+        config.uv_flip,
+        config.records,
+        palettes,
+        config.joint_aliases or {},
+        native_joint_indices,
+        stabilize_finger_weights=config.stabilize_finger_weights,
     )
     unresolved_influences = sum(record["unresolved_influences"] for record in records)
-    if config.strict_skinning and unresolved_influences:
+    if unresolved_influences:
         raise ValueError(
             f"{unresolved_influences} skin influences could not be represented by their native record palettes"
         )

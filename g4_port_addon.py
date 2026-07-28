@@ -245,7 +245,21 @@ def write_weights_json(path: Path, selected_only: bool) -> int:
     return len(meshes)
 
 
-def export_collada(path: Path, selected_only: bool, align_forward_to_y: bool, apply_modifiers: bool) -> None:
+def remove_pose_export_collection(collection) -> None:
+    if collection is None:
+        return
+    for obj in tuple(collection.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.data.collections.remove(collection)
+
+
+def export_collada(
+    path: Path,
+    selected_only: bool,
+    align_forward_to_y: bool,
+    apply_modifiers: bool,
+    bake_current_pose: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     kwargs = {
         "filepath": str(path),
@@ -262,7 +276,53 @@ def export_collada(path: Path, selected_only: bool, align_forward_to_y: bool, ap
                 "export_object_transformation_type_selection": "matrix",
             }
         )
-    bpy.ops.wm.collada_export(**kwargs)
+    if not bake_current_pose:
+        bpy.ops.wm.collada_export(**kwargs)
+        return
+
+    remove_pose_export_collection(bpy.data.collections.get("__G4PoseExport"))
+    collection = bpy.data.collections.new("__G4PoseExport")
+    bpy.context.scene.collection.children.link(collection)
+    original_selected = tuple(bpy.context.selected_objects)
+    original_active = bpy.context.view_layer.objects.active
+    try:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        sources = mesh_objects(selected_only)
+        if not sources:
+            raise RuntimeError("No mesh objects were found to bake for export.")
+        copies = []
+        for source in sources:
+            pose_source = source.copy()
+            pose_source.data = source.data.copy()
+            pose_source.matrix_world = source.matrix_world
+            collection.objects.link(pose_source)
+            if not apply_modifiers:
+                for modifier in pose_source.modifiers:
+                    if modifier.type != "ARMATURE":
+                        modifier.show_viewport = False
+            bpy.context.view_layer.update()
+            mesh = bpy.data.meshes.new_from_object(pose_source.evaluated_get(depsgraph), depsgraph=depsgraph)
+            copy = bpy.data.objects.new(source.name, mesh)
+            copy.matrix_world = source.matrix_world
+            collection.objects.link(copy)
+            copies.append(copy)
+        for obj in bpy.context.selected_objects:
+            obj.select_set(False)
+        for copy in copies:
+            copy.select_set(True)
+        bpy.context.view_layer.objects.active = copies[0]
+        kwargs["selected"] = True
+        kwargs["apply_modifiers"] = False
+        bpy.ops.wm.collada_export(**kwargs)
+    finally:
+        for obj in tuple(bpy.context.selected_objects):
+            obj.select_set(False)
+        remove_pose_export_collection(bpy.data.collections.get("__G4PoseExport"))
+        for obj in original_selected:
+            if obj.name in bpy.data.objects:
+                obj.select_set(True)
+        if original_active is not None and original_active.name in bpy.data.objects:
+            bpy.context.view_layer.objects.active = original_active
 
 
 def load_json(path: Path) -> dict:
@@ -373,6 +433,13 @@ def texture_key_for_record(record_name: str, texture_names: list[str]) -> str:
 def shared_face_texture_key(texture_names: list[str]) -> str:
     """Return the native base map shared by the eye and mouth expression meshes."""
     return next((name for name in texture_names if re.search(r"_10$", name) and not is_special_texture(name)), "")
+
+
+def face_texture_is_shared(records, texture_names: list[str]) -> bool:
+    texture_name = shared_face_texture_key(texture_names)
+    return bool(texture_name and any(
+        is_face_atlas_record(record) and record.texture_key == texture_name for record in records
+    ))
 
 
 def is_face_atlas_record(record) -> bool:
@@ -688,6 +755,16 @@ class G4PortSceneSettings(PropertyGroup):
         default=False,
         description="Apply Blender modifiers in the temporary DAE. Keep disabled unless weights were authored for the evaluated mesh",
     )
+    bake_current_pose: BoolProperty(
+        name="Bake Current Pose",
+        default=False,
+        description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
+    )
+    stabilize_finger_weights: BoolProperty(
+        name="Stabilize Finger Weights",
+        default=True,
+        description="Bind finger vertices to the native wrist when the custom and game finger rigs differ",
+    )
     align_forward_to_y: BoolProperty(
         name="Align Forward to Y Axis",
         default=False,
@@ -724,7 +801,8 @@ class G4PortSceneSettings(PropertyGroup):
     def texture_map(self) -> dict:
         result = {}
         atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
-        face_texture = shared_face_texture_key([entry.texture_name for entry in self.texture_entries])
+        texture_names = [entry.texture_name for entry in self.texture_entries]
+        face_texture = shared_face_texture_key(texture_names) if face_texture_is_shared(self.records, texture_names) else ""
         for item in self.texture_entries:
             if not item.texture_name or not item.replacement_path:
                 continue
@@ -769,6 +847,11 @@ class G4PortSceneSettings(PropertyGroup):
                 item.pop("uv_offset", None)
                 item.pop("source_uv_transforms", None)
             records.append(item)
+        source_mesh_assignments = {
+            obj.name: obj.level5_g4_port.target_record
+            for obj in mesh_objects(self.selected_only)
+            if obj.level5_g4_port.target_record not in {"", "__none__"}
+        }
         return {
             "model_rel": self.model_rel,
             "native_material_names": split_csv(self.native_material_names),
@@ -781,8 +864,10 @@ class G4PortSceneSettings(PropertyGroup):
                 for alias in self.joint_aliases
                 if alias.source_group and alias.target_joint
             },
+            "source_mesh_assignments": source_mesh_assignments,
             "generate_tangents": self.generate_tangents,
             "strict_skinning": self.strict_skinning,
+            "stabilize_finger_weights": self.stabilize_finger_weights,
             "uv_flip": [self.global_uv_flip_x, self.global_uv_flip_y],
         }
 
@@ -801,6 +886,7 @@ def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
         entry.replacement_path = str(replacements.get(entry.texture_name, ""))
     target.generate_tangents = bool(config.get("generate_tangents", False))
     target.strict_skinning = bool(config.get("strict_skinning", False))
+    target.stabilize_finger_weights = bool(config.get("stabilize_finger_weights", True))
     uv_flip = config.get("uv_flip") or [False, True]
     target.global_uv_flip_x = bool(uv_flip[0]) if len(uv_flip) > 0 else False
     target.global_uv_flip_y = bool(uv_flip[1]) if len(uv_flip) > 1 else False
@@ -935,6 +1021,9 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
     for texture_name in texture_names:
         entry = target.texture_entries.add()
         entry.texture_name = texture_name
+    if target.template_signature != signature:
+        for obj in mesh_objects(False):
+            obj.level5_g4_port.target_record = "__none__"
     material_names = md.get("material_names", [])
     mesh_names = md.get("mesh_names", [])
     if target.template_signature == signature and len(target.records) == len(md.get("records", [])):
@@ -1797,13 +1886,7 @@ def build_texture_spritesheet(
             continue
         group = grouped_sources.get(cache_key)
         if group is None:
-            group = {
-                "records": [],
-                "objects": [],
-                "source": source,
-                "key": cache_key,
-                "projected": "|projection:" in cache_key,
-            }
+            group = {"records": [], "objects": [], "source": source, "key": cache_key, "projected": "|projection:" in cache_key}
             grouped_sources[cache_key] = group
             groups.append(group)
         group["records"].append(record)
@@ -1962,8 +2045,10 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
             ):
                 replacements.append(f"{name}={path.name}")
             else:
-                port_log(log_path, f"{name}: no valid special-map source; preserving native G4TX entry")
-                discard_generated_atlas(texture_entry(props, name), path)
+                port_log(log_path, f"{name}: writing neutral generated special map")
+                pixels = image_pixels(entry["width"], entry["height"], default_color)
+                save_png(path, entry["width"], entry["height"], pixels)
+                replacements.append(f"{name}={path.name}")
         else:
             records = records_by_texture.get(name, [])
             port_log(log_path, f"{name}: base map, records={len(records)}")
@@ -2245,7 +2330,13 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     report_path = cache / ("analyze_report.json" if props.analyze_only else "export_report.json")
     output_root = package_root / "data"
 
-    export_collada(dae_path, props.selected_only, props.align_forward_to_y, props.apply_modifiers)
+    export_collada(
+        dae_path,
+        props.selected_only,
+        props.align_forward_to_y,
+        props.apply_modifiers,
+        props.bake_current_pose,
+    )
     mesh_count = write_weights_json(weights_path, props.selected_only)
     if mesh_count == 0:
         raise RuntimeError("No mesh objects were found to export.")
@@ -2648,6 +2739,7 @@ class EXPORT_OT_level5_g4_port(Operator, ExportHelper):
         vertices = validation.get("vertices_checked", report.get("vertices", "?"))
         indices = validation.get("indices_checked", report.get("indices", "?"))
         self.report({"INFO"}, f"G4 port exported: {vertices} vertices, {indices} indices. {report_path}")
+        settings(context).show_export = False
         return {"FINISHED"}
 
     def invoke(self, context, event):
@@ -2880,6 +2972,8 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
         draw_texture_replacements(layout, props)
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
+    box.prop(props, "bake_current_pose")
+    box.prop(props, "stabilize_finger_weights")
     box.prop(props, "align_forward_to_y")
     box.prop(props, "preserve_native_roundtrip")
 
