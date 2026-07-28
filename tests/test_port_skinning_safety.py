@@ -93,6 +93,24 @@ class PortSkinningSafetyTests(unittest.TestCase):
         )
         self.assertEqual((resolved, unresolved), ([(0, 1.0)], 0))
 
+    def test_finger_stabilization_collapses_native_finger_weights_to_the_wrist(self):
+        indices = {"l_w_1_0": 8, "l_idx_1_0": 10, "l_idx_1_1": 11}
+        vertex = PORT.Vertex(
+            (0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0),
+            (("l_index01", 0.4), ("l_index02", 0.6)),
+        )
+        resolved, unresolved = PORT.resolve_vertex_influences(
+            vertex,
+            [8, 10, 11],
+            None,
+            {"l_index01": "l_idx_1_0", "l_index02": "l_idx_1_1"},
+            indices,
+            stabilize_finger_weights=True,
+        )
+        self.assertEqual((resolved, unresolved), ([(0, 1.0)], 0))
+
     def test_analyze_port_reports_unresolved_influences_at_top_level(self):
         config = PORT.PortConfig(Path("chr/test/test.g4md"), ["mat"], [PORT.RecordRule("native", "mat", ["*"])], {})
         original_prepare = PORT.prepare_port_geometry

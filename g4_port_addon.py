@@ -753,6 +753,11 @@ class G4PortSceneSettings(PropertyGroup):
         default=False,
         description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
     )
+    stabilize_finger_weights: BoolProperty(
+        name="Stabilize Finger Weights",
+        default=True,
+        description="Bind finger vertices to the native wrist when the custom and game finger rigs differ",
+    )
     align_forward_to_y: BoolProperty(
         name="Align Forward to Y Axis",
         default=False,
@@ -854,6 +859,7 @@ class G4PortSceneSettings(PropertyGroup):
             "source_mesh_assignments": source_mesh_assignments,
             "generate_tangents": self.generate_tangents,
             "strict_skinning": self.strict_skinning,
+            "stabilize_finger_weights": self.stabilize_finger_weights,
             "uv_flip": [self.global_uv_flip_x, self.global_uv_flip_y],
         }
 
@@ -872,6 +878,7 @@ def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
         entry.replacement_path = str(replacements.get(entry.texture_name, ""))
     target.generate_tangents = bool(config.get("generate_tangents", False))
     target.strict_skinning = bool(config.get("strict_skinning", False))
+    target.stabilize_finger_weights = bool(config.get("stabilize_finger_weights", True))
     uv_flip = config.get("uv_flip") or [False, True]
     target.global_uv_flip_x = bool(uv_flip[0]) if len(uv_flip) > 0 else False
     target.global_uv_flip_y = bool(uv_flip[1]) if len(uv_flip) > 1 else False
@@ -2959,6 +2966,7 @@ def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> N
     box.prop(props, "selected_only")
     box.prop(props, "apply_modifiers")
     box.prop(props, "bake_current_pose")
+    box.prop(props, "stabilize_finger_weights")
     box.prop(props, "align_forward_to_y")
     box.prop(props, "preserve_native_roundtrip")
 

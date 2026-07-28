@@ -75,6 +75,7 @@ class PortConfig:
     generate_tangents: bool = False
     apply_bind_shape: bool = False
     source_mesh_assignments: dict[str, str] | None = None
+    stabilize_finger_weights: bool = False
 
     @property
     def common_rel(self) -> Path:
@@ -242,6 +243,7 @@ def load_config(path: Path | None) -> PortConfig:
         generate_tangents=bool(data.get("generate_tangents", False)),
         apply_bind_shape=bool(data.get("apply_bind_shape", False)),
         source_mesh_assignments=dict(data.get("source_mesh_assignments", {})),
+        stabilize_finger_weights=bool(data.get("stabilize_finger_weights", False)),
     )
 
 
@@ -1011,6 +1013,7 @@ def build_g4mg(
     joint_aliases: dict[str, str | int] | None = None,
     native_joint_indices: dict[str, int] | None = None,
     fallback_colors: list[tuple[int, int, int, int]] | None = None,
+    stabilize_finger_weights: bool = False,
 ) -> tuple[bytes, list[dict]]:
     buf = bytearray()
     records = []
@@ -1026,7 +1029,9 @@ def build_g4mg(
         rule = record_rules[mesh_index] if record_rules is not None and mesh_index < len(record_rules) else None
         palette = palettes[mesh_index] if palettes is not None and mesh_index < len(palettes) else []
         resolved = [
-            resolve_vertex_influences(vertex, palette, rule, joint_aliases or {}, native_joint_indices)
+            resolve_vertex_influences(
+                vertex, palette, rule, joint_aliases or {}, native_joint_indices, stabilize_finger_weights
+            )
             for vertex in mesh.vertices
         ]
         unresolved = sum(item[1] for item in resolved)
@@ -1155,20 +1160,33 @@ def resolve_vertex_influences(
     rule: RecordRule | None,
     aliases: dict[str, str | int] | None = None,
     native_joint_indices: dict[str, int] | None = None,
+    stabilize_finger_weights: bool = False,
 ) -> tuple[list[tuple[int, float]], int]:
     if not vertex.influences:
         return [(rigid_local_joint(rule, palette, aliases, native_joint_indices), 1.0)], 0
     resolved: list[tuple[int, float]] = []
     unresolved = 0
+    joint_names = {index: joint_name for joint_name, index in (native_joint_indices or {}).items()}
     for name, weight in vertex.influences:
         global_joint = compact_joint_index(name, aliases, native_joint_indices=native_joint_indices)
         global_joint = palette_compatible_joint(global_joint, palette, native_joint_indices or {})
+        if stabilize_finger_weights and global_joint is not None:
+            finger = re.fullmatch(r"([lr])_(?:idx|mid|rng|thb|pky)_1_[0-2]", joint_names.get(global_joint, ""))
+            if finger:
+                wrist = (native_joint_indices or {}).get(f"{finger.group(1)}_w_1_0")
+                if wrist in palette:
+                    global_joint = wrist
         if global_joint is None:
             unresolved += 1
             continue
         resolved.append((palette.index(global_joint), weight))
     if not resolved:
         return [(rigid_local_joint(rule, palette, aliases, native_joint_indices), 1.0)], unresolved
+    if stabilize_finger_weights:
+        combined: dict[int, float] = {}
+        for local_joint, weight in resolved:
+            combined[local_joint] = combined.get(local_joint, 0.0) + weight
+        resolved = list(combined.items())
     if rule is not None and rule.secondary_weight_scale != 1.0:
         if not 0.0 <= rule.secondary_weight_scale <= 1.0:
             raise ValueError(
@@ -2166,7 +2184,14 @@ def prepare_port_geometry(
     resolved_records = []
     for mesh, palette, rule in zip(meshes, palettes, config.records):
         resolved = [
-            resolve_vertex_influences(vertex, palette, rule, config.joint_aliases or {}, native_joint_indices)
+            resolve_vertex_influences(
+                vertex,
+                palette,
+                rule,
+                config.joint_aliases or {},
+                native_joint_indices,
+                config.stabilize_finger_weights,
+            )
             for vertex in mesh.vertices
         ]
         resolved_records.append({
@@ -2257,7 +2282,13 @@ def write_port(
     native_model = raw_root / config.common_rel
     native_joint_indices = native_joint_name_indices(native_model.read_bytes()) if native_model.is_file() else {}
     g4mg, records = build_g4mg(
-        meshes, config.uv_flip, config.records, palettes, config.joint_aliases or {}, native_joint_indices
+        meshes,
+        config.uv_flip,
+        config.records,
+        palettes,
+        config.joint_aliases or {},
+        native_joint_indices,
+        stabilize_finger_weights=config.stabilize_finger_weights,
     )
     unresolved_influences = sum(record["unresolved_influences"] for record in records)
     if unresolved_influences:
