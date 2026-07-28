@@ -726,8 +726,8 @@ class G4PortSceneSettings(PropertyGroup):
     expression_pool: CollectionProperty(type=G4PortExpressionImage)
     generate_png_set_on_export: BoolProperty(
         name="Regenerate Atlas On Export",
-        default=True,
-        description="Automatically prepare missing or outdated custom atlases from assigned Blender images",
+        default=False,
+        description="Regenerate only missing or outdated prepared atlases before exporting a custom G4TX",
     )
     use_source_uv_transforms: BoolProperty(
         name="Use Object UV Tiles",
@@ -741,8 +741,8 @@ class G4PortSceneSettings(PropertyGroup):
     )
     replace_special_textures: BoolProperty(
         name="Replace Special Maps",
-        default=True,
-        description="Write generated line/oc/sp/spm maps instead of retaining the original character effects",
+        default=False,
+        description="Allow custom replacements for line/oc/sp/spm maps instead of keeping bundled G4TX payloads",
     )
     preserve_native_roundtrip: BoolProperty(
         name="Preserve Untouched Native Import",
@@ -812,7 +812,7 @@ class G4PortSceneSettings(PropertyGroup):
             # is allowed to replace this entry.
             if item.texture_name == face_texture and not item.expression_atlas:
                 continue
-            if item.atlas_signature and atlas_states.get(item.texture_name) == "warning":
+            if item.atlas_signature and atlas_states.get(item.texture_name) != "ready":
                 continue
             if self.replace_special_textures or not is_special_texture(item.texture_name):
                 result[item.texture_name] = bpy.path.basename(item.replacement_path)
