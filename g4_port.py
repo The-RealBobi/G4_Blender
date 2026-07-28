@@ -76,6 +76,7 @@ class PortConfig:
     apply_bind_shape: bool = False
     source_mesh_assignments: dict[str, str] | None = None
     stabilize_finger_weights: bool = False
+    joint_position_offsets: dict[str, tuple[float, float, float]] | None = None
 
     @property
     def common_rel(self) -> Path:
@@ -244,6 +245,11 @@ def load_config(path: Path | None) -> PortConfig:
         apply_bind_shape=bool(data.get("apply_bind_shape", False)),
         source_mesh_assignments=dict(data.get("source_mesh_assignments", {})),
         stabilize_finger_weights=bool(data.get("stabilize_finger_weights", False)),
+        joint_position_offsets={
+            str(name): tuple(float(component) for component in value)
+            for name, value in dict(data.get("joint_position_offsets", {})).items()
+            if isinstance(value, (list, tuple)) and len(value) == 3
+        },
     )
 
 
@@ -1014,6 +1020,7 @@ def build_g4mg(
     native_joint_indices: dict[str, int] | None = None,
     fallback_colors: list[tuple[int, int, int, int]] | None = None,
     stabilize_finger_weights: bool = False,
+    joint_position_offsets: dict[str, tuple[float, float, float]] | None = None,
 ) -> tuple[bytes, list[dict]]:
     buf = bytearray()
     records = []
@@ -1037,7 +1044,23 @@ def build_g4mg(
         unresolved = sum(item[1] for item in resolved)
         fallback_color = fallback_colors[mesh_index] if fallback_colors and mesh_index < len(fallback_colors) else (255, 255, 255, 255)
         for vertex, (influences, _) in zip(mesh.vertices, resolved):
-            buf.extend(pack_vertex(vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color))
+            adjusted_vertex = vertex
+            if joint_position_offsets and influences:
+                offset = [0.0, 0.0, 0.0]
+                names_by_index = {index: name for name, index in (native_joint_indices or {}).items()}
+                for local_joint, weight in influences:
+                    name = names_by_index.get(palette[local_joint]) if local_joint < len(palette) else None
+                    delta = joint_position_offsets.get(name or "")
+                    if delta is not None:
+                        for axis in range(3):
+                            offset[axis] += delta[axis] * weight
+                if any(offset):
+                    adjusted_vertex = Vertex(
+                        tuple(vertex.position[axis] + offset[axis] for axis in range(3)),
+                        vertex.normal, vertex.uv, vertex.influences, vertex.tangent, vertex.bitangent,
+                        vertex.color, vertex.color_from_source,
+                    )
+            buf.extend(pack_vertex(adjusted_vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color))
         records.append({
             "vertex_offset": vertex_offset,
             "vertex_count": len(mesh.vertices),
@@ -2264,6 +2287,7 @@ def write_port(
         config.joint_aliases or {},
         native_joint_indices,
         stabilize_finger_weights=config.stabilize_finger_weights,
+        joint_position_offsets=config.joint_position_offsets,
     )
     unresolved_influences = sum(record["unresolved_influences"] for record in records)
     if unresolved_influences:

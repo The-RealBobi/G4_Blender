@@ -111,6 +111,20 @@ class PortSkinningSafetyTests(unittest.TestCase):
         )
         self.assertEqual((resolved, unresolved), ([(0, 1.0)], 0))
 
+    def test_joint_position_offsets_move_only_the_weighted_arm_vertices(self):
+        arm = PORT.Vertex((1.0, 2.0, 3.0), (0.0, 1.0, 0.0), (0.0, 0.0), (("l_arm", 1.0),))
+        torso = PORT.Vertex((4.0, 5.0, 6.0), (0.0, 1.0, 0.0), (0.0, 0.0), (("c_c_1_1", 1.0),))
+        mesh = PORT.Mesh("body", [arm, torso, torso], [0, 1, 2], 0, "body")
+        payload, _ = PORT.build_g4mg(
+            [mesh],
+            palettes=[[6, 4]],
+            native_joint_indices={"l_a_1_0": 6, "c_c_1_1": 4},
+            joint_aliases={"l_arm": "l_a_1_0"},
+            joint_position_offsets={"l_a_1_0": (0.5, -0.25, 0.125)},
+        )
+        self.assertEqual(struct.unpack_from("<3f", payload, 0), (1.5, 1.75, 3.125))
+        self.assertEqual(struct.unpack_from("<3f", payload, 0x44), (4.0, 5.0, 6.0))
+
     def test_analyze_port_reports_unresolved_influences_at_top_level(self):
         config = PORT.PortConfig(Path("chr/test/test.g4md"), ["mat"], [PORT.RecordRule("native", "mat", ["*"])], {})
         original_prepare = PORT.prepare_port_geometry
