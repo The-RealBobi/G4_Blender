@@ -14,7 +14,7 @@ from array import array
 from pathlib import Path
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -301,6 +301,14 @@ def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature
     if source_armature is None:
         raise RuntimeError(f"{source.name}: no source armature modifier was found for bind rebasing.")
     catalog = load_joint_alias_catalog()
+    # G4 data is X-right, Y-up, Z-forward; Blender's imported character
+    # meshes are X-right, Y-depth, Z-up.  Do this conversion in armature-local
+    # space.  Using the target object's world matrix here is wrong: imported
+    # reference rigs may carry their own display rotation, which would bake
+    # that rotation into the G4MG.
+    g4_to_blender = Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))
+    source_to_armature = source_armature.matrix_world.inverted_safe() @ source.matrix_world
+    armature_to_source = source_to_armature.inverted_safe()
     group_names = {group.index: group.name for group in source.vertex_groups}
     mappings = {}
     for group_index, source_name in group_names.items():
@@ -308,15 +316,13 @@ def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature
         source_bone = source_armature.pose.bones.get(source_name)
         target_bone = target_armature.data.bones.get(target_name) if target_name else None
         if source_bone is not None and target_bone is not None:
-            source_pose = source_armature.matrix_world @ source_bone.matrix
-            target_bind = target_armature.matrix_world @ target_bone.matrix_local
+            source_pose = source_bone.matrix
+            target_bind = g4_to_blender @ target_bone.matrix_local @ g4_to_blender
             mappings[group_index] = target_bind @ source_pose.inverted_safe()
 
     if not mappings:
         raise RuntimeError(f"{source.name}: none of its vertex groups map to the selected target G4SK.")
 
-    to_world = source.matrix_world
-    to_local = to_world.inverted_safe()
     rebased_vertices = 0
     for original, evaluated in zip(source.data.vertices, evaluated_mesh.vertices):
         contributions = [(mappings[group.group], group.weight) for group in original.groups if group.group in mappings and group.weight > 0.0]
@@ -325,11 +331,11 @@ def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature
         weight_total = sum(weight for _, weight in contributions)
         if weight_total <= 1e-8:
             continue
-        source_position = to_world @ evaluated.co
+        source_position = source_to_armature @ evaluated.co
         rebased = Vector((0.0, 0.0, 0.0))
         for matrix, weight in contributions:
             rebased += (matrix @ source_position) * (weight / weight_total)
-        evaluated.co = to_local @ rebased
+        evaluated.co = armature_to_source @ rebased
         rebased_vertices += 1
     return rebased_vertices
 
