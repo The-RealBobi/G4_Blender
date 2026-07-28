@@ -1114,6 +1114,10 @@ def compact_joint_index(
             "spine01": "c_c_1_1", "spine02": "c_c_1_1",
             "r_index01": "r_idx_1_0", "r_index02": "r_idx_1_1", "r_index03": "r_idx_1_2",
             "l_index01": "l_idx_1_0", "l_index02": "l_idx_1_1", "l_index03": "l_idx_1_2",
+            "l_arm_roll": "l_a_1_0", "l_arm_roll_02": "l_a_1_0",
+            "r_arm_roll": "r_a_1_0", "r_arm_roll_02": "r_a_1_0",
+            "l_hand_roll": "l_wph_1_0", "l_hand_roll_02": "l_wph_1_0",
+            "r_hand_roll": "r_wph_1_0", "r_hand_roll_02": "r_wph_1_0",
         }
         target = compact_aliases.get(normalize_joint_key(name), "")
     if target and target != name:
@@ -1270,7 +1274,9 @@ def configured_record_palettes(
         for vertex in mesh.vertices:
             for joint_name, _ in vertex.influences:
                 resolved = compact_joint_index(joint_name, aliases, native_joint_indices=native_joint_indices)
-                resolved = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
+                compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
+                if compatible is not None:
+                    resolved = compatible
                 if resolved is not None:
                     used_joints.add(resolved)
         return used_joints
@@ -2248,8 +2254,9 @@ def write_port(
     source_meshes, meshes, native_palettes, palettes, _ = prepare_port_geometry(
         source_dae, raw_root, config, weight_sidecar
     )
+    native_joint_indices = native_joint_name_indices((raw_root / config.common_rel).read_bytes())
     g4mg, records = build_g4mg(
-        meshes, config.uv_flip, config.records, palettes, config.joint_aliases or {}
+        meshes, config.uv_flip, config.records, palettes, config.joint_aliases or {}, native_joint_indices
     )
     unresolved_influences = sum(record["unresolved_influences"] for record in records)
     if unresolved_influences:
