@@ -60,8 +60,8 @@ expected = (
     g4_to_blender
     @ target_armature.data.bones["l_a_1_0"].matrix_local
     @ g4_to_blender
-    @ source_armature.data.bones["l_arm"].matrix_local.inverted_safe()
-    @ Vector((0, 0, 0))
+    @ source_armature.pose.bones["l_arm"].matrix.inverted_safe()
+    @ Vector((1, 0, 0))
 )
 assert rebased == 1
 assert (evaluated.vertices[0].co - expected).length < 1e-5

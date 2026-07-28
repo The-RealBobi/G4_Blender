@@ -284,12 +284,13 @@ def target_bone_name(source_name: str, target_armature, catalog) -> str:
 
 
 def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature) -> int:
-    """Retarget a source rest mesh to the target G4SK bind space.
+    """Express a posed source mesh in the target G4SK bind space.
 
-    Skinning is a weighted matrix blend and has no reliable per-vertex inverse
-    after Blender has evaluated a pose.  Reconstructing from that evaluated
-    result splits vertices at joints.  Instead, transform the original rest
-    position from each source bind matrix directly into the target bind.
+    The game applies its own G4SK animation after reading the G4MG.  Baking a
+    foreign A-to-T pose verbatim leaves it in the source rig's bone space,
+    which is visibly wrong when the target shoulders use different bind
+    matrices.  This conversion keeps the source weights, but maps every
+    evaluated influence from its current pose matrix to the target rest bind.
     """
     if len(evaluated_mesh.vertices) != len(source.data.vertices):
         raise RuntimeError(
@@ -312,12 +313,12 @@ def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature
     mappings = {}
     for group_index, source_name in group_names.items():
         target_name = target_bone_name(source_name, target_armature, catalog)
-        source_bone = source_armature.data.bones.get(source_name)
+        source_bone = source_armature.pose.bones.get(source_name)
         target_bone = target_armature.data.bones.get(target_name) if target_name else None
         if source_bone is not None and target_bone is not None:
-            source_bind = source_bone.matrix_local
+            source_pose = source_bone.matrix
             target_bind = g4_to_blender @ target_bone.matrix_local @ g4_to_blender
-            mappings[group_index] = target_bind @ source_bind.inverted_safe()
+            mappings[group_index] = target_bind @ source_pose.inverted_safe()
 
     if not mappings:
         raise RuntimeError(f"{source.name}: none of its vertex groups map to the selected target G4SK.")
@@ -330,7 +331,7 @@ def rebase_evaluated_mesh_to_target_bind(source, evaluated_mesh, target_armature
         weight_total = sum(weight for _, weight in contributions)
         if weight_total <= 1e-8:
             continue
-        source_position = source_to_armature @ original.co
+        source_position = source_to_armature @ evaluated.co
         rebased = Vector((0.0, 0.0, 0.0))
         for matrix, weight in contributions:
             rebased += (matrix @ source_position) * (weight / weight_total)
