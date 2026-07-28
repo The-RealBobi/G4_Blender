@@ -757,7 +757,7 @@ class G4PortSceneSettings(PropertyGroup):
     )
     bake_current_pose: BoolProperty(
         name="Bake Current Pose",
-        default=False,
+        default=True,
         description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
     )
     stabilize_finger_weights: BoolProperty(
