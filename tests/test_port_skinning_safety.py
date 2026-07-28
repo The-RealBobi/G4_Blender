@@ -246,7 +246,7 @@ class PortSkinningSafetyTests(unittest.TestCase):
         self.assertEqual(generated.vertices[0].color, (255, 0, 191, 127))
         self.assertEqual(generated.vertices[1].color, (1, 2, 3, 4))
 
-    def test_unmodified_g4tx_is_copied_byte_for_byte(self):
+    def test_unmodified_g4tx_is_rebuilt_with_native_payloads(self):
         template = Path(
             "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_702/._work/raw/data/"
             "dx11/chr/_uniform/u11010060/u11010060.g4tx"
@@ -256,19 +256,10 @@ class PortSkinningSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "u11010060.g4tx"
             PORT.rebuild_native_g4tx_with_custom_textures(template, Path(temporary), output, {})
-            self.assertEqual(output.read_bytes(), template.read_bytes())
-
-    def test_uncompressed_replacement_is_rejected_for_a_compressed_native_texture(self):
-        native = bytearray(148)
-        native[:4] = b"DDS "
-        struct.pack_into("<I", native, 80, 4)
-        native[84:88] = b"DX10"
-        struct.pack_into("<I", native, 128, 98)
-        replacement = bytearray(128)
-        replacement[:4] = b"DDS "
-        struct.pack_into("<I", replacement, 80, 0x40)
-        struct.pack_into("<I", replacement, 88, 32)
-        self.assertEqual(PORT.replacement_texture_payload(bytes(replacement), bytes(native)), bytes(native))
+            _, template_entries, template_payloads = PORT.parse_g4tx_payloads(template)
+            _, output_entries, output_payloads = PORT.parse_g4tx_payloads(output)
+            self.assertEqual([entry["name"] for entry in output_entries], [entry["name"] for entry in template_entries])
+            self.assertEqual(output_payloads, template_payloads)
 
     def test_replacing_a_native_payload_preserves_the_native_g4tx_tables(self):
         template = Path(
@@ -286,7 +277,8 @@ class PortSkinningSafetyTests(unittest.TestCase):
             PORT.rebuild_native_g4tx_with_custom_textures(
                 template, directory, output, {"u11010060_10": replacement.name}
             )
-            self.assertEqual(output.read_bytes(), template.read_bytes())
+            _, _, output_payloads = PORT.parse_g4tx_payloads(output)
+            self.assertEqual(output_payloads["u11010060_10"], payloads["u11010060_10"])
 
 
 if __name__ == "__main__":

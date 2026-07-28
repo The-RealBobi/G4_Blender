@@ -47,14 +47,14 @@ class AtlasContractTests(unittest.TestCase):
         settings = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "G4PortSceneSettings")
         texture_map = next(node for node in settings.body if isinstance(node, ast.FunctionDef) and node.name == "texture_map")
         body = ast.unparse(texture_map)
-        self.assertIn("face_texture_is_shared", body)
+        self.assertIn("shared_face_texture_key([entry.texture_name for entry in self.texture_entries])", body)
 
-    def test_port_defaults_to_native_vertex_layout_without_generated_tangents(self):
+    def test_port_defaults_to_generated_tangents(self):
         source = SOURCE.read_text(encoding="utf-8")
         tree = ast.parse(source)
         settings = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "G4PortSceneSettings")
         tangents = next(node for node in settings.body if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "generate_tangents")
-        self.assertIn("default=False", ast.unparse(tangents.annotation))
+        self.assertIn("default=True", ast.unparse(tangents.annotation))
 
     def test_file_export_opens_the_full_intermediate_dialog(self):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
@@ -77,20 +77,20 @@ class AtlasContractTests(unittest.TestCase):
         self.assertIn("props.use_source_uv_transforms", body)
         self.assertIn("props.auto_pack_source_uvs", body)
 
-    def test_custom_export_prepares_available_atlases_by_default(self):
+    def test_custom_export_only_regenerates_atlases_when_requested(self):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         settings = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "G4PortSceneSettings")
         auto_prepare = next(
             node for node in settings.body
             if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "generate_png_set_on_export"
         )
-        self.assertIn("default=True", ast.unparse(auto_prepare.annotation))
+        self.assertIn("default=False", ast.unparse(auto_prepare.annotation))
 
-    def test_prepared_atlas_is_exported_when_scene_assignment_is_stale(self):
+    def test_prepared_atlas_requires_a_ready_scene_assignment(self):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         settings = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "G4PortSceneSettings")
         texture_map = next(node for node in settings.body if isinstance(node, ast.FunctionDef) and node.name == "texture_map")
-        self.assertIn("atlas_states.get(item.texture_name) == 'warning'", ast.unparse(texture_map))
+        self.assertIn("atlas_states.get(item.texture_name) != 'ready'", ast.unparse(texture_map))
 
     def test_atlas_cells_are_stable_and_filter_safe(self):
         source = SOURCE.read_text(encoding="utf-8")
