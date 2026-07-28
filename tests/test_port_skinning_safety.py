@@ -166,6 +166,18 @@ class PortSkinningSafetyTests(unittest.TestCase):
 
         self.assertEqual(merged[0].source_names, ("body_mesh_007", "hand_mesh_004"))
 
+    def test_unassigned_source_meshes_are_omitted_from_native_output(self):
+        vertex = PORT.Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
+        body = PORT.Mesh("body_mesh", [vertex, vertex, vertex], [0, 1, 2], 0, "body")
+        hand = PORT.Mesh("hand_mesh", [vertex, vertex, vertex], [0, 1, 2], 0, "hand")
+        config = PORT.PortConfig(
+            Path("chr/test/test.g4md"), ["mat"], [PORT.RecordRule("body", "mat", ["body_mesh"])], {}
+        )
+
+        merged = PORT.merged_native_meshes([body, hand], config)
+
+        self.assertEqual(merged[0].source_names, ("body_mesh",))
+
     def test_vertex_color_fallback_preserves_the_native_material_contract(self):
         vertex = PORT.Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
         packed = PORT.pack_vertex(vertex, fallback_color=(255, 0, 191, 127))
