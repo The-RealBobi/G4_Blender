@@ -41,7 +41,8 @@ def configure(original, assignments):
     port.addon_preferences = lambda: prefs
     summary = port.run_model_probe(original, prefs)
     port.apply_original_model_to_settings(props, original, summary)
-    props.texture_mode = "native"
+    props.texture_mode = os.environ.get("G4_PORT_TEST_TEXTURE_MODE", "native")
+    props.generate_png_set_on_export = props.texture_mode == "custom"
     props.selected_only = True
     props.apply_modifiers = False
     props.bake_current_pose = True
