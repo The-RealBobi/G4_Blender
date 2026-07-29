@@ -76,6 +76,8 @@ class PortConfig:
     apply_bind_shape: bool = False
     source_mesh_assignments: dict[str, str] | None = None
     stabilize_finger_weights: bool = False
+    joint_position_offsets: dict[str, tuple[float, float, float]] | None = None
+    joint_position_transforms: dict[str, tuple[float, ...]] | None = None
 
     @property
     def common_rel(self) -> Path:
@@ -244,6 +246,16 @@ def load_config(path: Path | None) -> PortConfig:
         apply_bind_shape=bool(data.get("apply_bind_shape", False)),
         source_mesh_assignments=dict(data.get("source_mesh_assignments", {})),
         stabilize_finger_weights=bool(data.get("stabilize_finger_weights", False)),
+        joint_position_offsets={
+            str(name): tuple(float(component) for component in value)
+            for name, value in dict(data.get("joint_position_offsets", {})).items()
+            if isinstance(value, (list, tuple)) and len(value) == 3
+        },
+        joint_position_transforms={
+            str(name): tuple(float(component) for component in value)
+            for name, value in dict(data.get("joint_position_transforms", {})).items()
+            if isinstance(value, (list, tuple)) and len(value) == 16
+        },
     )
 
 
@@ -1014,6 +1026,8 @@ def build_g4mg(
     native_joint_indices: dict[str, int] | None = None,
     fallback_colors: list[tuple[int, int, int, int]] | None = None,
     stabilize_finger_weights: bool = False,
+    joint_position_offsets: dict[str, tuple[float, float, float]] | None = None,
+    joint_position_transforms: dict[str, tuple[float, ...]] | None = None,
 ) -> tuple[bytes, list[dict]]:
     buf = bytearray()
     records = []
@@ -1037,7 +1051,34 @@ def build_g4mg(
         unresolved = sum(item[1] for item in resolved)
         fallback_color = fallback_colors[mesh_index] if fallback_colors and mesh_index < len(fallback_colors) else (255, 255, 255, 255)
         for vertex, (influences, _) in zip(mesh.vertices, resolved):
-            buf.extend(pack_vertex(vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color))
+            adjusted_vertex = vertex
+            if (joint_position_offsets or joint_position_transforms) and influences:
+                offset = [0.0, 0.0, 0.0]
+                names_by_index = {index: name for name, index in (native_joint_indices or {}).items()}
+                for local_joint, weight in influences:
+                    name = names_by_index.get(palette[local_joint]) if local_joint < len(palette) else None
+                    transform = (joint_position_transforms or {}).get(name or "")
+                    if transform is not None:
+                        transformed = (
+                            transform[0] * vertex.position[0] + transform[1] * vertex.position[1] + transform[2] * vertex.position[2] + transform[3],
+                            transform[4] * vertex.position[0] + transform[5] * vertex.position[1] + transform[6] * vertex.position[2] + transform[7],
+                            transform[8] * vertex.position[0] + transform[9] * vertex.position[1] + transform[10] * vertex.position[2] + transform[11],
+                        )
+                        for axis in range(3):
+                            offset[axis] += (transformed[axis] - vertex.position[axis]) * weight
+                    else:
+                        delta = (joint_position_offsets or {}).get(name or "")
+                        if delta is None:
+                            continue
+                        for axis in range(3):
+                            offset[axis] += delta[axis] * weight
+                if any(offset):
+                    adjusted_vertex = Vertex(
+                        tuple(vertex.position[axis] + offset[axis] for axis in range(3)),
+                        vertex.normal, vertex.uv, vertex.influences, vertex.tangent, vertex.bitangent,
+                        vertex.color, vertex.color_from_source,
+                    )
+            buf.extend(pack_vertex(adjusted_vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color))
         records.append({
             "vertex_offset": vertex_offset,
             "vertex_count": len(mesh.vertices),
@@ -1121,8 +1162,8 @@ def compact_joint_index(
             "l_index01": "l_idx_1_0", "l_index02": "l_idx_1_1", "l_index03": "l_idx_1_2",
             "l_arm_roll": "l_a_1_0", "l_arm_roll_02": "l_a_1_0",
             "r_arm_roll": "r_a_1_0", "r_arm_roll_02": "r_a_1_0",
-            "l_hand_roll": "l_wph_1_0", "l_hand_roll_02": "l_wph_1_0",
-            "r_hand_roll": "r_wph_1_0", "r_hand_roll_02": "r_wph_1_0",
+            "l_hand_roll": "l_a_1_1", "l_hand_roll_02": "l_a_1_1",
+            "r_hand_roll": "r_a_1_1", "r_hand_roll_02": "r_a_1_1",
         }
         target = compact_aliases.get(normalize_joint_key(name), "")
     if target and target != name:
@@ -2264,6 +2305,8 @@ def write_port(
         config.joint_aliases or {},
         native_joint_indices,
         stabilize_finger_weights=config.stabilize_finger_weights,
+        joint_position_offsets=config.joint_position_offsets,
+        joint_position_transforms=config.joint_position_transforms,
     )
     unresolved_influences = sum(record["unresolved_influences"] for record in records)
     if unresolved_influences:
