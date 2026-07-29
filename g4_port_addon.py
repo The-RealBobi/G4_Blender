@@ -329,7 +329,7 @@ def arm_bind_segment_transforms(props) -> dict[str, list[float]]:
     )
 
     def game_position(position):
-        return Vector((position.x, position.z, position.y))
+        return Vector((position.x, position.z, -position.y))
 
     transforms = {}
     for chain in chains:
