@@ -917,7 +917,8 @@ class G4PortSceneSettings(PropertyGroup):
     def texture_map(self) -> dict:
         result = {}
         atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
-        face_texture = shared_face_texture_key([entry.texture_name for entry in self.texture_entries])
+        texture_names = [entry.texture_name for entry in self.texture_entries]
+        face_texture = shared_face_texture_key(texture_names) if face_texture_is_shared(self.records, texture_names) else ""
         for item in self.texture_entries:
             if not item.texture_name or not item.replacement_path:
                 continue

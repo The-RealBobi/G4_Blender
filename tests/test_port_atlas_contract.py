@@ -47,7 +47,7 @@ class AtlasContractTests(unittest.TestCase):
         settings = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "G4PortSceneSettings")
         texture_map = next(node for node in settings.body if isinstance(node, ast.FunctionDef) and node.name == "texture_map")
         body = ast.unparse(texture_map)
-        self.assertIn("shared_face_texture_key([entry.texture_name for entry in self.texture_entries])", body)
+        self.assertIn("face_texture_is_shared(self.records, texture_names)", body)
 
     def test_port_defaults_to_generated_tangents(self):
         source = SOURCE.read_text(encoding="utf-8")
