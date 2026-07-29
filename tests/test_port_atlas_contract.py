@@ -86,6 +86,14 @@ class AtlasContractTests(unittest.TestCase):
         )
         self.assertIn("default=False", ast.unparse(auto_prepare.annotation))
 
+    def test_default_texture_export_preserves_authored_uv_layout(self):
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+        builder = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_texture_spritesheet")
+        body = ast.unparse(builder)
+        self.assertIn("if not props.auto_pack_source_uvs", body)
+        self.assertIn("preserved original UV layout", body)
+        self.assertIn("props.use_source_uv_transforms = False", body)
+
     def test_prepared_atlas_requires_a_ready_scene_assignment(self):
         tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         settings = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "G4PortSceneSettings")
