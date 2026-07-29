@@ -1994,6 +1994,24 @@ def build_texture_spritesheet(
         )
         return False
 
+    if not props.auto_pack_source_uvs:
+        # The normal body workflow keeps the author's UV layout.  Repacking
+        # source images into generated cells changes the G4MD UV coordinates
+        # and turns an existing material layout into a different atlas.
+        primary = next((source for _, _, source, _ in sources if source is not None), None)
+        if primary is None:
+            return False
+        for _, obj, _, _ in sources:
+            obj_uv = obj.level5_g4_port
+            obj_uv.uv_scale_u = 1.0
+            obj_uv.uv_scale_v = 1.0
+            obj_uv.uv_offset_u = 0.0
+            obj_uv.uv_offset_v = 0.0
+        save_png(path, *primary)
+        props.use_source_uv_transforms = False
+        port_log(log_path, f"{entry['name']}: preserved original UV layout using the primary source image")
+        return True
+
     groups = []
     grouped_sources = {}
     for record, obj, source, cache_key in sources:
