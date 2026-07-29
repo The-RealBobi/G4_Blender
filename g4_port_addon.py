@@ -2198,6 +2198,10 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
     for entry in props.texture_entries:
         if entry.texture_name in generated:
             entry.replacement_path = str(output_dir / generated[entry.texture_name])
+    # Preparing an atlas is an explicit request for custom texture export. Keep
+    # that intent for the following Export action so its DAE and G4TX use the
+    # same atlas layout.
+    props.generate_png_set_on_export = True
     port_log(log_path, f"Generate PNG set finished; replacements={len(replacements)}")
     return len(replacements)
 
@@ -2443,20 +2447,6 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     report_path = cache / ("analyze_report.json" if props.analyze_only else "export_report.json")
     output_root = package_root / "data"
 
-    if not props.use_source_uv_transforms and not props.auto_pack_source_uvs:
-        reset_uv_tiles(props)
-
-    export_collada(
-        dae_path,
-        props.selected_only,
-        props.align_forward_to_y,
-        props.apply_modifiers,
-        props.bake_current_pose,
-    )
-    mesh_count = write_weights_json(weights_path, props.selected_only)
-    if mesh_count == 0:
-        raise RuntimeError("No mesh objects were found to export.")
-
     if props.texture_mode == "custom":
         atlas_rows = atlas_status_rows(props)
         refresh_needed = [
@@ -2472,6 +2462,20 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         elif refresh_needed:
             names = ", ".join(row["name"] for row in refresh_needed)
             port_log(None, f"Prepared atlas missing or stale for {names}; preserving native G4TX entries")
+
+    if not props.use_source_uv_transforms and not props.auto_pack_source_uvs:
+        reset_uv_tiles(props)
+
+    export_collada(
+        dae_path,
+        props.selected_only,
+        props.align_forward_to_y,
+        props.apply_modifiers,
+        props.bake_current_pose,
+    )
+    mesh_count = write_weights_json(weights_path, props.selected_only)
+    if mesh_count == 0:
+        raise RuntimeError("No mesh objects were found to export.")
 
     prepare_custom_textures(props, dae_path)
 
