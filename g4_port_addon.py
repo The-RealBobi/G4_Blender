@@ -868,7 +868,7 @@ class G4PortSceneSettings(PropertyGroup):
     )
     correct_arm_bind: BoolProperty(
         name="Correct Arm Bind",
-        default=False,
+        default=True,
         description="Align the weighted collar/arm/elbow/wrist segments to a native G4SK reference",
     )
     arm_bind_target_rig: StringProperty(
