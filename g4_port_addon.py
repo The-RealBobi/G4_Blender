@@ -2443,6 +2443,9 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     report_path = cache / ("analyze_report.json" if props.analyze_only else "export_report.json")
     output_root = package_root / "data"
 
+    if not props.use_source_uv_transforms and not props.auto_pack_source_uvs:
+        reset_uv_tiles(props)
+
     export_collada(
         dae_path,
         props.selected_only,
@@ -2453,8 +2456,6 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     mesh_count = write_weights_json(weights_path, props.selected_only)
     if mesh_count == 0:
         raise RuntimeError("No mesh objects were found to export.")
-    if not props.use_source_uv_transforms and not props.auto_pack_source_uvs:
-        reset_uv_tiles(props)
 
     if props.texture_mode == "custom":
         atlas_rows = atlas_status_rows(props)
