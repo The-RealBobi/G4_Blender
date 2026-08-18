@@ -31,6 +31,8 @@ NOSE_MESH_NAMES = {"nose_mesh", "nose_mesh_001"}
 NON_FACE_NAME_INDEX = 95
 FACE_NAME_INDEX = 96
 EYE_NAME_INDEX = 97
+G4_PORT_CONVERTER_MARKER = "expression-face-v9-json-marker-1"
+G4_PORT_SCRIPT_VERSION = "1.0.4"
 
 
 @dataclass
@@ -46,6 +48,7 @@ class RecordRule:
     uv_offset: tuple[float, float] = (0.0, 0.0)
     uv_flip: tuple[bool, bool] | None = None
     source_uv_transforms: dict[str, dict[str, list[float]]] | None = None
+    uv_fit_display_rect: tuple[float, float, float, float] | None = None
     rigid_joint: str | int | None = None
     palette_joints: list[str | int] | None = None
     auto_palette: bool = False
@@ -75,9 +78,12 @@ class PortConfig:
     generate_tangents: bool = False
     apply_bind_shape: bool = False
     source_mesh_assignments: dict[str, str] | None = None
-    stabilize_finger_weights: bool = False
     joint_position_offsets: dict[str, tuple[float, float, float]] | None = None
     joint_position_transforms: dict[str, tuple[float, ...]] | None = None
+    producer_plugin_version: str = ""
+    producer_expected_script_version: str = ""
+    producer_marker: str = ""
+    producer_source: str = ""
 
     @property
     def common_rel(self) -> Path:
@@ -217,6 +223,7 @@ def load_config(path: Path | None) -> PortConfig:
                 uv_offset=tuple(item.get("uv_offset", [0.0, 0.0])),
                 uv_flip=tuple(item["uv_flip"]) if "uv_flip" in item else None,
                 source_uv_transforms=dict(item.get("source_uv_transforms", {})),
+                uv_fit_display_rect=tuple(item["uv_fit_display_rect"]) if "uv_fit_display_rect" in item else None,
                 rigid_joint=item.get("rigid_joint"),
                 palette_joints=list(item["palette_joints"]) if "palette_joints" in item else None,
                 auto_palette=bool(item.get("auto_palette", False)),
@@ -245,7 +252,6 @@ def load_config(path: Path | None) -> PortConfig:
         generate_tangents=bool(data.get("generate_tangents", False)),
         apply_bind_shape=bool(data.get("apply_bind_shape", False)),
         source_mesh_assignments=dict(data.get("source_mesh_assignments", {})),
-        stabilize_finger_weights=bool(data.get("stabilize_finger_weights", False)),
         joint_position_offsets={
             str(name): tuple(float(component) for component in value)
             for name, value in dict(data.get("joint_position_offsets", {})).items()
@@ -256,6 +262,10 @@ def load_config(path: Path | None) -> PortConfig:
             for name, value in dict(data.get("joint_position_transforms", {})).items()
             if isinstance(value, (list, tuple)) and len(value) == 16
         },
+        producer_plugin_version=str(data.get("g4_blender_plugin_version", "")),
+        producer_expected_script_version=str(data.get("g4_port_script_version_expected", "")),
+        producer_marker=str(data.get("g4_blender_addon_marker", "")),
+        producer_source=str(data.get("g4_blender_addon_source", "")),
     )
 
 
@@ -395,6 +405,7 @@ def pack_vertex(
     uv_scale: tuple[float, float] = (1.0, 1.0),
     uv_offset: tuple[float, float] = (0.0, 0.0),
     fallback_color: tuple[int, int, int, int] = (255, 255, 255, 255),
+    uv_format_id: int = 14,
 ) -> bytes:
     out = bytearray(0x44)
     struct.pack_into("<3f", out, 0x00, *vertex.position)
@@ -419,9 +430,23 @@ def pack_vertex(
     struct.pack_into("<4B", out, 0x3C, *(vertex.color or fallback_color))
     local_uv = (1.0 - vertex.uv[0] if uv_flip[0] else vertex.uv[0], 1.0 - vertex.uv[1] if uv_flip[1] else vertex.uv[1])
     uv = (local_uv[0] * uv_scale[0] + uv_offset[0], local_uv[1] * uv_scale[1] + uv_offset[1])
-    u = int(round(max(0.0, min(1.0, uv[0])) * 65535.0))
-    v = int(round(max(0.0, min(1.0, uv[1])) * 65535.0))
-    struct.pack_into("<2H", out, 0x40, u, v)
+    if uv_format_id in (18, 20):
+        # Signed-normalized 16-bit.  eye_10 in c11010060 uses format 18.
+        # Writing these values as UNORM16 makes the importer reinterpret the
+        # upper half of the range as negative and stretches the UV island.
+        u = int(round(max(-1.0, min(1.0, uv[0])) * 32767.0))
+        v = int(round(max(-1.0, min(1.0, uv[1])) * 32767.0))
+        struct.pack_into("<2h", out, 0x40, u, v)
+    elif uv_format_id == 12:
+        u = int(round(max(0.0, min(1.0, uv[0])) * 255.0))
+        v = int(round(max(0.0, min(1.0, uv[1])) * 255.0))
+        struct.pack_into("<2B", out, 0x40, u, v)
+        struct.pack_into("<H", out, 0x42, 0)
+    else:
+        # Native format 14 and the legacy fallback are unsigned-normalized.
+        u = int(round(max(0.0, min(1.0, uv[0])) * 65535.0))
+        v = int(round(max(0.0, min(1.0, uv[1])) * 65535.0))
+        struct.pack_into("<2H", out, 0x40, u, v)
     return bytes(out)
 
 
@@ -646,9 +671,19 @@ def parse_dae_bind_shapes(root: ET.Element) -> dict[str, tuple[float, ...]]:
 
 
 def canonical_mesh_name(name: str) -> str:
+    """Normalize Blender/Collada duplicate and geometry suffixes deterministically.
+
+    Baked exports commonly turn ``face_mesh.001`` into names such as
+    ``face_mesh_006``.  Remove both kinds of generated suffixes repeatedly so
+    the original sidecar identity can still be recovered.
+    """
     name = clean_symbol(name)
-    name = re.sub(r"_mesh$", "", name)
-    return re.sub(r"_\d+$", "", name)
+    previous = None
+    while name != previous:
+        previous = name
+        name = re.sub(r"_\d{3}$", "", name)
+        name = re.sub(r"_mesh$", "", name)
+    return name
 
 
 def sidecar_exact_names(name: str) -> set[str]:
@@ -681,54 +716,98 @@ def sidecar_influences(mesh: dict, vertex_count: int):
     ]
 
 
+def sidecar_mesh_for_geometry(
+    sidecar_meshes: list[dict],
+    geometry: ET.Element,
+    vertex_count: int,
+    used_sidecar_indices: set[int] | None = None,
+    instance_name: str = "",
+) -> dict | None:
+    """Resolve one exported DAE geometry back to its original Blender object.
+
+    Blender/Collada may sanitize duplicate object names (``Part.001`` ->
+    ``Part_001``) or reuse a geometry-style name.  The weight sidecar is the
+    authoritative source identity because it is written directly from the
+    Blender objects before the DAE is parsed.
+    """
+    if not sidecar_meshes:
+        return None
+    used_sidecar_indices = used_sidecar_indices if used_sidecar_indices is not None else set()
+    available = [mesh for mesh in sidecar_meshes if int(mesh.get("_sidecar_index", -1)) not in used_sidecar_indices]
+    if not available:
+        return None
+
+    exact_names = (
+        sidecar_exact_names(geometry.attrib.get("id", ""))
+        | sidecar_exact_names(geometry.attrib.get("name", ""))
+        | sidecar_exact_names(instance_name)
+    )
+    exact = [mesh for mesh in available if clean_symbol(str(mesh.get("name", ""))) in exact_names]
+    exact_with_count = [mesh for mesh in exact if int(mesh.get("vertex_count", -1)) == vertex_count]
+    if exact_with_count:
+        chosen = exact_with_count[0]
+    elif len(exact) == 1:
+        # Modifiers can change the DAE vertex count.  An unambiguous exact name
+        # is still safe for source identity, even when its skin sidecar cannot
+        # be reused for influences.
+        chosen = exact[0]
+    else:
+        names = {
+            canonical_mesh_name(geometry.attrib.get("id", "")),
+            canonical_mesh_name(geometry.attrib.get("name", "")),
+            canonical_mesh_name(instance_name),
+        }
+        canonical_all = [
+            mesh
+            for mesh in available
+            if canonical_mesh_name(str(mesh.get("name", ""))) in names
+        ]
+        canonical_exact_count = [
+            mesh for mesh in canonical_all
+            if int(mesh.get("vertex_count", -1)) == vertex_count
+        ]
+        if len(canonical_exact_count) == 1:
+            chosen = canonical_exact_count[0]
+        else:
+            # Applying outline/solidify modifiers before Collada export often
+            # multiplies the evaluated vertex count (2x in the common outline
+            # case).  Use that stable ratio to distinguish source objects that
+            # share a canonical Blender base name.
+            canonical_multiple_count = []
+            for mesh in canonical_all:
+                source_count = int(mesh.get("vertex_count", -1))
+                if source_count > 0 and vertex_count >= source_count and vertex_count % source_count == 0:
+                    ratio = vertex_count // source_count
+                    if 1 <= ratio <= 8:
+                        canonical_multiple_count.append(mesh)
+            if len(canonical_multiple_count) == 1:
+                chosen = canonical_multiple_count[0]
+            elif len(canonical_all) == 1:
+                # An unambiguous canonical identity remains safe even when an
+                # arbitrary modifier changed the evaluated topology.
+                chosen = canonical_all[0]
+            else:
+                by_count = [mesh for mesh in available if int(mesh.get("vertex_count", -1)) == vertex_count]
+                chosen = by_count[0] if len(by_count) == 1 else None
+
+    if chosen is None:
+        return None
+    used_sidecar_indices.add(int(chosen.get("_sidecar_index", -1)))
+    return chosen
+
+
 def sidecar_skin_for_geometry(
     sidecar_meshes: list[dict],
     geometry: ET.Element,
     vertex_count: int,
     used_sidecar_indices: set[int] | None = None,
 ):
-    if not sidecar_meshes:
+    chosen = sidecar_mesh_for_geometry(sidecar_meshes, geometry, vertex_count, used_sidecar_indices)
+    if chosen is None:
         return None
-    used_sidecar_indices = used_sidecar_indices if used_sidecar_indices is not None else set()
-    available = [mesh for mesh in sidecar_meshes if int(mesh.get("_sidecar_index", -1)) not in used_sidecar_indices]
-    exact_names = sidecar_exact_names(geometry.attrib.get("id", "")) | sidecar_exact_names(geometry.attrib.get("name", ""))
-    candidates = [
-        mesh
-        for mesh in available
-        if clean_symbol(str(mesh.get("name", ""))) in exact_names
-        and int(mesh.get("vertex_count", -1)) == vertex_count
-    ]
-    if candidates:
-        chosen = candidates[0]
-        used_sidecar_indices.add(int(chosen.get("_sidecar_index", -1)))
-        return sidecar_influences(chosen, vertex_count)
-    names = {
-        canonical_mesh_name(geometry.attrib.get("id", "")),
-        canonical_mesh_name(geometry.attrib.get("name", "")),
-    }
-    candidates = [
-        mesh
-        for mesh in available
-        if canonical_mesh_name(str(mesh.get("name", ""))) in names
-        and int(mesh.get("vertex_count", -1)) == vertex_count
-    ]
-    if not candidates:
-        candidates = [mesh for mesh in available if int(mesh.get("vertex_count", -1)) == vertex_count]
-    if candidates:
-        chosen = candidates[0]
-        used_sidecar_indices.add(int(chosen.get("_sidecar_index", -1)))
-        return sidecar_influences(chosen, vertex_count)
-    matching_names = [
-        str(mesh.get("name", ""))
-        for mesh in sidecar_meshes
-        if int(mesh.get("vertex_count", -1)) == vertex_count
-    ]
-    if not matching_names:
-        raise ValueError(
-            f"could not match weight sidecar to geometry {geometry.attrib.get('name')!r} "
-            f"with {vertex_count} positions; sidecar candidates={matching_names}"
-        )
-    return None
+    if int(chosen.get("vertex_count", -1)) != vertex_count:
+        return None
+    return sidecar_influences(chosen, vertex_count)
 
 
 def identity_matrix() -> tuple[float, ...]:
@@ -879,11 +958,16 @@ def parse_dae(
 
         position_sources = list(vertices_map.values())
         position_count = len(parse_float_source(root, position_sources[0], 3)) if position_sources else 0
-        sidecar_skin = None
-        if not skin_influences:
-            sidecar_skin = sidecar_skin_for_geometry(sidecar_meshes, geometry, position_count, used_sidecar_indices)
-        if sidecar_skin is not None:
-            skin_influences = sidecar_skin
+        sidecar_mesh = sidecar_mesh_for_geometry(
+            sidecar_meshes,
+            geometry,
+            position_count,
+            used_sidecar_indices,
+            geometry_instance_names.get(geometry_id, ""),
+        )
+        sidecar_source_name = str(sidecar_mesh.get("name", "")) if sidecar_mesh is not None else ""
+        if not skin_influences and sidecar_mesh is not None and int(sidecar_mesh.get("vertex_count", -1)) == position_count:
+            skin_influences = sidecar_influences(sidecar_mesh, position_count)
 
         for primitive_name in ("triangles", "polylist"):
             for primitive in mesh_node.findall(ns_name(mesh_node, primitive_name)):
@@ -993,7 +1077,8 @@ def parse_dae(
                         or geometry.attrib.get("id")
                         or material_name
                     )
-                    meshes.append(Mesh(mesh_name, vertices, indices, material_indices[material_name], material_name))
+                    source_names = (sidecar_source_name,) if sidecar_source_name else ()
+                    meshes.append(Mesh(mesh_name, vertices, indices, material_indices[material_name], material_name, source_names))
     return meshes or calibration_mesh()
 
 
@@ -1025,7 +1110,7 @@ def build_g4mg(
     joint_aliases: dict[str, str | int] | None = None,
     native_joint_indices: dict[str, int] | None = None,
     fallback_colors: list[tuple[int, int, int, int]] | None = None,
-    stabilize_finger_weights: bool = False,
+    uv_formats: list[int] | None = None,
     joint_position_offsets: dict[str, tuple[float, float, float]] | None = None,
     joint_position_transforms: dict[str, tuple[float, ...]] | None = None,
 ) -> tuple[bytes, list[dict]]:
@@ -1041,10 +1126,11 @@ def build_g4mg(
             else uv_flip
         )
         rule = record_rules[mesh_index] if record_rules is not None and mesh_index < len(record_rules) else None
+        uv_format_id = uv_formats[mesh_index] if uv_formats is not None and mesh_index < len(uv_formats) else 14
         palette = palettes[mesh_index] if palettes is not None and mesh_index < len(palettes) else []
         resolved = [
             resolve_vertex_influences(
-                vertex, palette, rule, joint_aliases or {}, native_joint_indices, stabilize_finger_weights
+                vertex, palette, rule, joint_aliases or {}, native_joint_indices
             )
             for vertex in mesh.vertices
         ]
@@ -1078,7 +1164,9 @@ def build_g4mg(
                         vertex.normal, vertex.uv, vertex.influences, vertex.tangent, vertex.bitangent,
                         vertex.color, vertex.color_from_source,
                     )
-            buf.extend(pack_vertex(adjusted_vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color))
+            buf.extend(pack_vertex(
+                adjusted_vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color, uv_format_id
+            ))
         records.append({
             "vertex_offset": vertex_offset,
             "vertex_count": len(mesh.vertices),
@@ -1087,6 +1175,7 @@ def build_g4mg(
             "palette": palette,
             "source_color_vertices": sum(vertex.color_from_source for vertex in mesh.vertices),
             "fallback_color": list(fallback_color),
+            "uv_format_id": uv_format_id,
         })
     vertex_buffer_size = len(buf)
     append_aligned(buf, 0x40)
@@ -1201,33 +1290,28 @@ def resolve_vertex_influences(
     rule: RecordRule | None,
     aliases: dict[str, str | int] | None = None,
     native_joint_indices: dict[str, int] | None = None,
-    stabilize_finger_weights: bool = False,
 ) -> tuple[list[tuple[int, float]], int]:
     if not vertex.influences:
         return [(rigid_local_joint(rule, palette, aliases, native_joint_indices), 1.0)], 0
+
     resolved: list[tuple[int, float]] = []
     unresolved = 0
-    joint_names = {index: joint_name for joint_name, index in (native_joint_indices or {}).items()}
     for name, weight in vertex.influences:
         global_joint = compact_joint_index(name, aliases, native_joint_indices=native_joint_indices)
         global_joint = palette_compatible_joint(global_joint, palette, native_joint_indices or {})
-        if stabilize_finger_weights and global_joint is not None:
-            finger = re.fullmatch(r"([lr])_(?:idx|mid|rng|thb|pky)_1_[0-2]", joint_names.get(global_joint, ""))
-            if finger:
-                wrist = (native_joint_indices or {}).get(f"{finger.group(1)}_w_1_0")
-                if wrist in palette:
-                    global_joint = wrist
         if global_joint is None:
             unresolved += 1
             continue
         resolved.append((palette.index(global_joint), weight))
+
     if not resolved:
         return [(rigid_local_joint(rule, palette, aliases, native_joint_indices), 1.0)], unresolved
-    if stabilize_finger_weights:
-        combined: dict[int, float] = {}
-        for local_joint, weight in resolved:
-            combined[local_joint] = combined.get(local_joint, 0.0) + weight
-        resolved = list(combined.items())
+
+    combined: dict[int, float] = {}
+    for local_joint, weight in resolved:
+        combined[local_joint] = combined.get(local_joint, 0.0) + weight
+    resolved = list(combined.items())
+
     if rule is not None and rule.secondary_weight_scale != 1.0:
         if not 0.0 <= rule.secondary_weight_scale <= 1.0:
             raise ValueError(
@@ -1239,12 +1323,15 @@ def resolve_vertex_influences(
                 f"record {rule.output_name} needs weight_anchor_joint or rigid_joint when damping weights"
             )
         anchor_global = (
-            anchor_joint if isinstance(anchor_joint, int) else compact_joint_index(anchor_joint, aliases)
+            anchor_joint
+            if isinstance(anchor_joint, int)
+            else compact_joint_index(anchor_joint, aliases, native_joint_indices=native_joint_indices)
         )
-        if anchor_global is None or anchor_global not in palette:
+        anchor_global = palette_compatible_joint(anchor_global, palette, native_joint_indices or {})
+        if anchor_global is None:
             raise ValueError(f"weight anchor {anchor_joint!r} is not present in palette {palette}")
         anchor_local = palette.index(anchor_global)
-        combined: dict[int, float] = {}
+        combined = {}
         transferred = 0.0
         for local_joint, weight in resolved:
             if local_joint == anchor_local:
@@ -1255,7 +1342,44 @@ def resolve_vertex_influences(
                 transferred += weight - scaled
         combined[anchor_local] = combined.get(anchor_local, 0.0) + transferred
         resolved = [(joint, weight) for joint, weight in combined.items() if weight > 0.0]
+
     return resolved, unresolved
+
+
+def native_record_uv_formats(md: bytes) -> list[int]:
+    """Return the native UV0 format id selected by each mesh record."""
+    if len(md) < 0x28:
+        return []
+    header_size = struct.unpack_from("<H", md, 0x04)[0]
+    mesh_count = struct.unpack_from("<H", md, 0x20)[0]
+    layout_count = md[0x26]
+    cursor = header_size + mesh_count * 0x50
+    layout_uv_formats: list[int] = []
+    for _ in range(layout_count):
+        if cursor + 8 > len(md):
+            break
+        entry_count = md[cursor + 1]
+        uv_format = 14
+        element_pos = cursor + 8
+        for _entry in range(entry_count):
+            if element_pos + 8 > len(md):
+                break
+            element_type, _value_offset, _padding, format_id = struct.unpack_from("<BHBI", md, element_pos)
+            if element_type == 10:
+                uv_format = int(format_id)
+            element_pos += 8
+        layout_uv_formats.append(uv_format)
+        cursor += 8 + entry_count * 8
+
+    formats: list[int] = []
+    for mesh_index in range(mesh_count):
+        record_off = header_size + mesh_index * 0x50
+        if record_off + 0x43 > len(md):
+            formats.append(14)
+            continue
+        layout_index = md[record_off + 0x42]
+        formats.append(layout_uv_formats[layout_index] if layout_index < len(layout_uv_formats) else 14)
+    return formats
 
 
 def native_record_palettes(md: bytes) -> list[list[int]]:
@@ -1494,19 +1618,77 @@ def mesh_matches_rule(mesh: Mesh, rule: RecordRule) -> bool:
 
 def source_uv_transform(mesh: Mesh, rule: RecordRule) -> tuple[tuple[float, float], tuple[float, float]]:
     transforms = rule.source_uv_transforms or {}
-    exact_names = {mesh.name, clean_symbol(mesh.name)}
+
+    def values(transform: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+        scale = transform.get("scale", [1.0, 1.0])
+        offset = transform.get("offset", [0.0, 0.0])
+        return (float(scale[0]), float(scale[1])), (float(offset[0]), float(offset[1]))
+
+    # The sidecar-preserved Blender object identity is authoritative.  A DAE
+    # mesh name can be a sanitized duplicate (Part.001 -> Part_001), and using
+    # it first can make every part inherit the same atlas tile.
+    source_names = [name for name in mesh.source_names if name]
+    lookup_names = source_names + ([mesh.name] if mesh.name else [])
+    for name in lookup_names:
+        exact = {name, clean_symbol(name)}
+        for key, transform in transforms.items():
+            if exact & {key, clean_symbol(key)}:
+                return values(transform)
+
+    # Canonical matching is only a last-resort compatibility path.  Never pick
+    # the first of several duplicate Blender names because that silently folds
+    # different atlas cells onto one another.
+    candidates: list[tuple[str, tuple[tuple[float, float], tuple[float, float]]]] = []
+    canonical_names = {canonical_mesh_name(name) for name in lookup_names if name}
     for key, transform in transforms.items():
-        if exact_names & {key, clean_symbol(key)}:
-            scale = transform.get("scale", [1.0, 1.0])
-            offset = transform.get("offset", [0.0, 0.0])
-            return (float(scale[0]), float(scale[1])), (float(offset[0]), float(offset[1]))
-    canonical = canonical_mesh_name(mesh.name)
-    for key, transform in transforms.items():
-        if canonical == canonical_mesh_name(key):
-            scale = transform.get("scale", [1.0, 1.0])
-            offset = transform.get("offset", [0.0, 0.0])
-            return (float(scale[0]), float(scale[1])), (float(offset[0]), float(offset[1]))
+        if canonical_mesh_name(key) in canonical_names:
+            candidates.append((key, values(transform)))
+    if candidates:
+        distinct = {value for _, value in candidates}
+        if len(distinct) == 1:
+            return candidates[0][1]
+        names = ", ".join(key for key, _ in candidates)
+        raise ValueError(
+            f"ambiguous source UV transform for {mesh.name!r}; original source names={source_names!r}; "
+            f"matching config objects={names}. Re-export the DAE/weights sidecar together."
+        )
     return (1.0, 1.0), (0.0, 0.0)
+
+
+def fit_mesh_uv_to_display_rect(
+    mesh: Mesh,
+    target_display_rect: tuple[float, float, float, float],
+    flip_y: bool = True,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Fit the actual post-modifier DAE UV bounds into a displayed atlas rectangle.
+
+    The exporter may apply Blender modifiers while producing the DAE, so bounds
+    measured on the pre-export Blender object are not authoritative.  Compute
+    from the Mesh vertices parsed by g4_port instead.  Returned offset is in the
+    stored G4 convention; read_uv0/importer inverts V back for Blender display.
+    """
+    if not mesh.vertices:
+        return (1.0, 1.0), (0.0, 0.0)
+    min_u = min(vertex.uv[0] for vertex in mesh.vertices)
+    max_u = max(vertex.uv[0] for vertex in mesh.vertices)
+    min_v = min(vertex.uv[1] for vertex in mesh.vertices)
+    max_v = max(vertex.uv[1] for vertex in mesh.vertices)
+    origin_u, origin_v, width, height = target_display_rect
+    bounds_u = max(max_u - min_u, 0.0001)
+    bounds_v = max(max_v - min_v, 0.0001)
+    scale = min(width / bounds_u, height / bounds_v)
+    used_u = bounds_u * scale
+    used_v = bounds_v * scale
+    display_offset_u = origin_u + (width - used_u) * 0.5 - min_u * scale
+    display_min_v = origin_v + (height - used_v) * 0.5
+    if flip_y:
+        display_offset_v = display_min_v - min_v * scale
+        stored_offset_v = 1.0 - scale - display_offset_v
+    else:
+        # Without the pre-pack V flip, Blender's import-side inversion reverses
+        # the source V direction.  Position max_v at the requested display min.
+        stored_offset_v = 1.0 - max_v * scale - display_min_v
+    return (scale, scale), (display_offset_u, stored_offset_v)
 
 
 def transformed_source_vertex(vertex: Vertex, scale: tuple[float, float], offset: tuple[float, float]) -> Vertex:
@@ -1574,6 +1756,7 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             scale, offset = source_uv_transform(part, rule)
             uv_transform_trace.append({
                 "source": part.name,
+                "source_names": list(part.source_names),
                 "material": part.material_name,
                 "scale": list(scale),
                 "offset": list(offset),
@@ -1590,7 +1773,11 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             indices,
             material_index,
             material_name,
-            tuple(part.name for part in parts),
+            tuple(
+                source_name
+                for part in parts
+                for source_name in (part.source_names or (part.name,))
+            ),
             tuple(uv_transform_trace),
         )
 
@@ -1600,11 +1787,32 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
 
     def assigned_record(mesh: Mesh) -> str:
         assignments = config.source_mesh_assignments or {}
-        key = re.sub(r"_\d+$", "", normalize_joint_key(mesh.name))
+        if not assignments:
+            return ""
+
+        # Prefer the original Blender identity preserved in the sidecar.  Do
+        # not strip .001/.002-style suffixes during the exact pass: those are
+        # distinct objects and may intentionally target different native
+        # records / atlas cells.
+        lookup_names = [name for name in mesh.source_names if name]
+        if mesh.name:
+            lookup_names.append(mesh.name)
+        for lookup_name in lookup_names:
+            key = clean_symbol(lookup_name).casefold()
+            for source_name, record_name in assignments.items():
+                if clean_symbol(source_name).casefold() == key:
+                    return record_name
+
+        # Legacy files may only expose a canonicalized Collada name.  Accept a
+        # suffix-stripped fallback only when it resolves to one unique record;
+        # otherwise leave it unassigned instead of silently choosing the first
+        # duplicate object.
+        fallback_records: set[str] = set()
+        canonical_keys = {canonical_mesh_name(name).casefold() for name in lookup_names}
         for source_name, record_name in assignments.items():
-            if re.sub(r"_\d+$", "", normalize_joint_key(source_name)) == key:
-                return record_name
-        return ""
+            if canonical_mesh_name(source_name).casefold() in canonical_keys:
+                fallback_records.add(record_name)
+        return next(iter(fallback_records)) if len(fallback_records) == 1 else ""
 
     def is_best_explicit_match(mesh: Mesh, rule: RecordRule) -> bool:
         rank = mesh_match_rank(mesh, rule)
@@ -1613,22 +1821,33 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
     for record_index, rule in enumerate(config.records):
         if output[record_index] is not None:
             continue
+        explicit_assignment_mode = bool(config.source_mesh_assignments)
         if "*" in rule.match_names:
             selected = [
                 (index, mesh)
                 for index, mesh in enumerate(meshes)
                 if index not in assigned
-                and (assigned_record(mesh) == rule.output_name or (
-                    not assigned_record(mesh) and not any(mesh_matches_rule(mesh, explicit) for explicit in explicit_rules)
-                ))
+                and (
+                    assigned_record(mesh) == rule.output_name
+                    or (
+                        not explicit_assignment_mode
+                        and not assigned_record(mesh)
+                        and not any(mesh_matches_rule(mesh, explicit) for explicit in explicit_rules)
+                    )
+                )
             ]
         else:
             selected = [
                 (index, mesh)
                 for index, mesh in enumerate(meshes)
-                if index not in assigned and (
+                if index not in assigned
+                and (
                     assigned_record(mesh) == rule.output_name
-                    or (not assigned_record(mesh) and is_best_explicit_match(mesh, rule))
+                    or (
+                        not explicit_assignment_mode
+                        and not assigned_record(mesh)
+                        and is_best_explicit_match(mesh, rule)
+                    )
                 )
             ]
         parts = [mesh for _, mesh in selected]
@@ -2193,6 +2412,16 @@ def prepare_port_geometry(
         else calibration_mesh()
     )
     meshes = merged_native_meshes(source_meshes, config)
+    # Resolve UV fitting only after Collada has been parsed and modifiers are
+    # already baked into the actual exported mesh.  This prevents a mirrored or
+    # modifier-expanded face from using stale pre-export Blender UV bounds.
+    for mesh, rule in zip(meshes, config.records):
+        if rule.uv_fit_display_rect is None:
+            continue
+        effective_flip = rule.uv_flip if rule.uv_flip is not None else config.uv_flip
+        rule.uv_scale, rule.uv_offset = fit_mesh_uv_to_display_rect(
+            mesh, rule.uv_fit_display_rect, bool(effective_flip[1])
+        )
     native_g4md = (raw_root / config.common_rel).read_bytes()
     native_palettes = native_record_palettes(native_g4md)
     native_joint_indices = native_joint_name_indices(native_g4md)
@@ -2206,8 +2435,7 @@ def prepare_port_geometry(
                 rule,
                 config.joint_aliases or {},
                 native_joint_indices,
-                config.stabilize_finger_weights,
-            )
+                )
             for vertex in mesh.vertices
         ]
         resolved_records.append({
@@ -2220,6 +2448,9 @@ def prepare_port_geometry(
             "max_influences": max((len(vertex.influences) for vertex in mesh.vertices), default=0),
             "unresolved_influences": sum(item[1] for item in resolved),
             "palette": palette,
+            "uv_scale": list(rule.uv_scale),
+            "uv_offset": list(rule.uv_offset),
+            "uv_fit_display_rect": list(rule.uv_fit_display_rect) if rule.uv_fit_display_rect is not None else None,
         })
     return source_meshes, meshes, native_palettes, palettes, resolved_records
 
@@ -2296,7 +2527,9 @@ def write_port(
         source_dae, raw_root, config, weight_sidecar
     )
     native_model = raw_root / config.common_rel
-    native_joint_indices = native_joint_name_indices(native_model.read_bytes()) if native_model.is_file() else {}
+    native_md = native_model.read_bytes() if native_model.is_file() else b""
+    native_joint_indices = native_joint_name_indices(native_md) if native_md else {}
+    native_uv_formats = native_record_uv_formats(native_md) if native_md else []
     g4mg, records = build_g4mg(
         meshes,
         config.uv_flip,
@@ -2304,12 +2537,12 @@ def write_port(
         palettes,
         config.joint_aliases or {},
         native_joint_indices,
-        stabilize_finger_weights=config.stabilize_finger_weights,
+        uv_formats=native_uv_formats,
         joint_position_offsets=config.joint_position_offsets,
         joint_position_transforms=config.joint_position_transforms,
     )
     unresolved_influences = sum(record["unresolved_influences"] for record in records)
-    if unresolved_influences:
+    if config.strict_skinning and unresolved_influences:
         raise ValueError(
             f"{unresolved_influences} skin influences could not be represented by their native record palettes"
         )
@@ -2363,11 +2596,20 @@ def write_port(
         "unresolved_influences": unresolved_influences,
         "palettes": [record["palette"] for record in records],
         "native_palettes": native_palettes,
+        "native_uv_formats": native_uv_formats,
         "palette_expanded": palettes != native_palettes,
         "validation": validation,
         "expected_skeleton": expected_skeleton,
         "skeleton_validation": skeleton_validation,
         "record_assignments": {mesh.name: list(mesh.source_names) for mesh in meshes},
+        "uv_record_transforms": {
+            rule.output_name: {
+                "scale": list(rule.uv_scale),
+                "offset": list(rule.uv_offset),
+                "fit_display_rect": list(rule.uv_fit_display_rect) if rule.uv_fit_display_rect is not None else None,
+            }
+            for rule in config.records
+        },
         "g4md": str(common_out),
         "g4mg": str(mg_out),
         "g4tx": str(texture_out),
@@ -2418,6 +2660,20 @@ def main() -> None:
             args.g4sk,
             args.chara_model,
         )
+    result["g4_port_script_version"] = G4_PORT_SCRIPT_VERSION
+    result["g4_port_converter_marker"] = G4_PORT_CONVERTER_MARKER
+    result["g4_port_converter_source"] = str(Path(__file__).resolve())
+    if config.producer_plugin_version:
+        result["g4_blender_plugin_version"] = config.producer_plugin_version
+    if config.producer_expected_script_version:
+        result["g4_port_script_version_expected"] = config.producer_expected_script_version
+        result["g4_port_script_version_match"] = (
+            config.producer_expected_script_version == G4_PORT_SCRIPT_VERSION
+        )
+    if config.producer_marker:
+        result["g4_blender_addon_marker"] = config.producer_marker
+    if config.producer_source:
+        result["g4_blender_addon_source"] = config.producer_source
     if args.report_json:
         args.report_json.parent.mkdir(parents=True, exist_ok=True)
         args.report_json.write_text(json.dumps(result, indent=2))

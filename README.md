@@ -15,7 +15,7 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 | Models | Import individual assets or folders, create materials, extract textures and assign them automatically. |
 | Characters | Build character rigs, resolve shared skeletons, attach modular body parts and preserve skin weights. |
 | Maps | Reconstruct map placement, transforms and linked instances from world hierarchies. |
-| Animation | Import G4MT motions, G4CM cameras, event folders, facial expressions and P3LIP lip-sync data. |
+| Animation | Import G4MT motions, G4CM cameras, event folders and facial expressions. |
 | Rendering | Recreate Level-5-style character materials, toon shading, authored recolour masks and outlines. |
 | Porting | Export edited Blender or DAE geometry to native `G4MD`/`G4MG` pairs and update compatible `G4TX` archives. |
 
@@ -31,7 +31,6 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 | `G4CM` | Camera animation |
 | `G4PK` | Animation containers |
 | `NXTCH` | Nintendo Switch texture payloads |
-| `P3LIP` | Lip-sync sequences |
 
 ## Installation
 
@@ -114,7 +113,7 @@ Import G4MT motions onto a character rig and G4CM camera data into the scene. An
 
 **Level-5 G4 Event Folder** imports character animation G4PK files and the event G4CM from a directory. Each cut becomes a named Action and NLA strip, with markers for cut boundaries and one rig per actor. Disjoint source ranges retain their timing; overlapping alternatives are concatenated by cut number so Blender can represent them in one NLA scene.
 
-When available, event configuration files provide actor placement links. The importer applies those placements, hides actors absent from a cut, reads per-cut lighting from `EventMap_fix` resources, imports matching event effects by default, and can use `.g4ma` sidecars for facial-expression atlas changes. It also creates separate P3LIP controllers for voice-line visemes when the selected language data is present.
+When available, event configuration files provide actor placement links. The importer applies those placements, hides actors absent from a cut, reads per-cut lighting from `EventMap_fix` resources, and imports matching event effects by default.
 
 Large events produce large Blender files because source transforms are sampled per frame to preserve G4 quaternion interpolation. This is expected. The add-on writes curves in bulk and omits channels with no animation, but memory and disk use still scale with actor count, bone count and duration.
 
