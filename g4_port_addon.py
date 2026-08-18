@@ -23,8 +23,9 @@ from bpy.props import (
     IntProperty,
     StringProperty,
 )
+from bpy.app.handlers import persistent
 from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup, UIList
-from bpy_extras.io_utils import ExportHelper, ImportHelper
+from bpy_extras.io_utils import ImportHelper
 
 try:
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
@@ -45,6 +46,18 @@ FACE_ATLAS_COLUMNS = 4
 FACE_ATLAS_ROWS = 2
 FACE_ATLAS_SLOTS = FACE_ATLAS_COLUMNS * FACE_ATLAS_ROWS
 ATLAS_GUTTER_PIXELS = 2
+G4_PORT_ADDON_MARKER = "expression-face-v9-json-marker-1"
+G4_BLENDER_PLUGIN_VERSION_FALLBACK = (1, 0, 22)
+G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.4"
+
+
+def g4_blender_plugin_version() -> str:
+    package = sys.modules.get(ADDON_ID)
+    info = getattr(package, "bl_info", None) if package is not None else None
+    version = info.get("version") if isinstance(info, dict) else None
+    if isinstance(version, (list, tuple)) and version:
+        return ".".join(str(int(part)) for part in version)
+    return ".".join(str(part) for part in G4_BLENDER_PLUGIN_VERSION_FALLBACK)
 
 
 def default_python() -> str:
@@ -242,7 +255,15 @@ def mesh_weights(obj: bpy.types.Object) -> dict:
 def write_weights_json(path: Path, selected_only: bool) -> int:
     meshes = [mesh_weights(obj) for obj in mesh_objects(selected_only)]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": 1, "meshes": meshes}, indent=2), encoding="utf-8")
+    payload = {
+        "version": 1,
+        "g4_blender_plugin_version": g4_blender_plugin_version(),
+        "g4_port_script_version_expected": G4_PORT_SCRIPT_VERSION_EXPECTED,
+        "g4_blender_addon_marker": G4_PORT_ADDON_MARKER,
+        "g4_blender_addon_source": str(Path(__file__).resolve()),
+        "meshes": meshes,
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return len(meshes)
 
 
@@ -254,10 +275,7 @@ def remove_pose_export_collection(collection) -> None:
     bpy.data.collections.remove(collection)
 
 
-ARM_BIND_TARGETS = {
-    "l_collar": "l_s_1_0", "l_arm": "l_a_1_0", "l_elbow": "l_a_1_1", "l_hand": "l_w_1_0",
-    "r_collar": "r_s_1_0", "r_arm": "r_a_1_0", "r_elbow": "r_a_1_1", "r_hand": "r_w_1_0",
-}
+
 
 ARM_ROLL_ALIASES = {
     "l_hand": "l_w_1_0", "r_hand": "r_w_1_0",
@@ -554,12 +572,194 @@ def is_face_atlas_record(record) -> bool:
     return name in {"eye_10", "mouth_10"} or material in {"eye_10", "mouth_10"}
 
 
+def resolved_record_texture_key(props, record) -> str:
+    """Return the effective native texture key for a record.
+
+    eye_10 and mouth_10 share one native *_10 texture.  Older scene/preset
+    state can retain the record names themselves as texture_key, which makes
+    the expression atlas invisible to serialization.  Resolve that association
+    from the native texture table instead of trusting stale scene state.
+    """
+    if is_face_atlas_record(record):
+        shared = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+        if shared:
+            return shared
+    return record.texture_key
+
+
+def normalize_shared_face_record_keys(props) -> int:
+    """Repair stale eye/mouth texture_key state outside Blender draw contexts."""
+    shared = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+    if not shared:
+        return 0
+    changed = 0
+    for record in props.records:
+        if is_face_atlas_record(record) and record.texture_key != shared:
+            record.texture_key = shared
+            changed += 1
+    return changed
+
+
 def face_pool_atlas_active(props, record) -> bool:
-    """Only a newly built expression pool remaps the source face into cell 1."""
+    """Return whether the native eye/mouth record is using a replacement 4x2 expression atlas."""
     if not is_face_atlas_record(record):
         return False
+    entry = texture_entry(props, resolved_record_texture_key(props, record))
+    return bool(
+        entry
+        and entry.expression_atlas
+        and entry.expression_atlas_mode in {"pool", "existing"}
+    )
+
+
+def fit_expression_record_uv(
+    bounds: tuple[float, float, float, float],
+    target_display_rect: tuple[float, float, float, float],
+    flip_y: bool = True,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Fit source UV bounds into an atlas rect as Blender displays it after G4 import.
+
+    G4 export flips V for custom atlases and the importer flips stored V back for
+    Blender/DDS coordinates.  This helper therefore returns the *stored G4*
+    scale/offset that round-trips into the requested displayed rectangle.
+    """
+    min_u, max_u, min_v, max_v = bounds
+    origin_u, origin_v, width, height = target_display_rect
+    bounds_u = max(max_u - min_u, 0.0001)
+    bounds_v = max(max_v - min_v, 0.0001)
+    scale = min(width / bounds_u, height / bounds_v)
+    used_u = bounds_u * scale
+    used_v = bounds_v * scale
+
+    display_offset_u = origin_u + (width - used_u) * 0.5 - min_u * scale
+    display_min_v = origin_v + (height - used_v) * 0.5
+    if flip_y:
+        display_offset_v = display_min_v - min_v * scale
+        stored_offset_v = 1.0 - scale - display_offset_v
+    else:
+        stored_offset_v = 1.0 - max_v * scale - display_min_v
+    return (scale, scale), (display_offset_u, stored_offset_v)
+
+
+def expression_record_source_bounds(record) -> tuple[float, float, float, float] | None:
+    """Return the union of the authored UV bounds for objects assigned to one record."""
+    bounds = [object_uv_bounds(obj) for obj in objects_for_record(record)]
+    bounds = [item for item in bounds if item is not None]
+    if not bounds:
+        return None
+    return (
+        min(item[0] for item in bounds),
+        max(item[1] for item in bounds),
+        min(item[2] for item in bounds),
+        max(item[3] for item in bounds),
+    )
+
+
+def expression_tile_record_uv(
+    target_display_rect: tuple[float, float, float, float],
+    flip_y: bool = True,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Move a 0..1 source layout into an atlas rect without changing its relative UVs."""
+    origin_u, origin_v, scale_u, scale_v = target_display_rect
+    # With the normal G4 V flip, importer roundtrip is:
+    # displayedV = scaleV * sourceV + (1 - scaleV - storedOffsetV).
+    # Solve for storedOffsetV so displayed origin is the requested atlas row.
+    stored_offset_v = 1.0 - scale_v - origin_v
+    return (scale_u, scale_v), (origin_u, stored_offset_v)
+
+
+def expression_pool_record_uv(
+    record_name: str,
+    target_display_rect: tuple[float, float, float, float],
+    flip_y: bool = True,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Place a face-pool record in Cell 1 without fitting its mesh UV bounds.
+
+    The expression images are full source textures.  eye_10 and mouth_10 must
+    therefore preserve their authored 0..1 UV coordinates and only translate
+    that complete texture domain into the atlas cell.  Fitting eye_10 to its
+    mesh bounds moves the eye features relative to the texture and is wrong.
+    """
+    if record_name.lower() not in {"eye_10", "mouth_10"}:
+        raise ValueError(f"unsupported expression-pool record {record_name!r}")
+    return expression_tile_record_uv(target_display_rect, flip_y)
+
+
+def face_expression_record_uv(props, record) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Resolve the UV window used by eye_10/mouth_10 for expression cell 1.
+
+    Existing/prepared atlases use a record-wide transform. Pool atlases prefer
+    per-object source UV transforms, but we still expose the precise first-cell
+    rectangle here as a fallback.
+    """
+    if not face_pool_atlas_active(props, record):
+        return (1.0, 1.0), (0.0, 0.0)
+
     entry = texture_entry(props, record.texture_key)
-    return bool(entry and entry.expression_atlas and entry.expression_atlas_mode == "pool")
+    if entry is not None and entry.expression_cell_scale_u > 0.0 and entry.expression_cell_scale_v > 0.0:
+        return (
+            (float(entry.expression_cell_scale_u), float(entry.expression_cell_scale_v)),
+            (float(entry.expression_cell_origin_u), float(entry.expression_cell_origin_v)),
+        )
+
+    return (
+        (1.0 / FACE_ATLAS_COLUMNS, 1.0 / FACE_ATLAS_ROWS),
+        (0.0, (FACE_ATLAS_ROWS - 1.0) / FACE_ATLAS_ROWS),
+    )
+
+
+def face_expression_prefit_rect(props, record) -> tuple[float, float, float, float]:
+    """Return the pre-flip atlas rect that should be fitted into by source UVs."""
+    (scale_u, scale_v), (origin_u, origin_v) = face_expression_record_uv(props, record)
+    pre_u = 1.0 - origin_u - scale_u if props.global_uv_flip_x else origin_u
+    pre_v = 1.0 - origin_v - scale_v if props.global_uv_flip_y else origin_v
+    return pre_u, pre_v, scale_u, scale_v
+
+
+def apply_face_expression_object_transforms(props, record, log_path: Path | None = None) -> None:
+    """Fit assigned face/mouth meshes into expression cell 1 before the global flip."""
+    if not face_pool_atlas_active(props, record):
+        return
+    pre_u, pre_v, scale_u, scale_v = face_expression_prefit_rect(props, record)
+    for obj in objects_for_record(record):
+        set_object_uv_fit(obj, pre_u, pre_v, scale_u, scale_v)
+        port_log(
+            log_path,
+            f"{record.output_name}: pre-fit expression rect -> {obj.name} "
+            f"scale=({obj.level5_g4_port.uv_scale_u:.6f},{obj.level5_g4_port.uv_scale_v:.6f}) "
+            f"offset=({obj.level5_g4_port.uv_offset_u:.6f},{obj.level5_g4_port.uv_offset_v:.6f})",
+        )
+
+
+def inject_expression_atlas_uv_into_config(
+    config: dict,
+    texture_name: str,
+    scale: tuple[float, float],
+    offset: tuple[float, float],
+    replacement_name: str,
+) -> int:
+    """Make the generated config authoritative for the shared 4x2 face atlas.
+
+    This deliberately does not depend on Blender record state.  By the time this
+    runs we already know which texture file is the expression atlas, so eye_10
+    and mouth_10 must sample Cell 1 in the serialized config even if temporary
+    UI/DAE state lost their record properties.
+    """
+    changed = 0
+    for record in config.get("records", []):
+        name = str(record.get("output_name", "")).lower()
+        material = str(record.get("material_name", "")).lower()
+        if material.endswith("m"):
+            material = material[:-1]
+        if name not in {"eye_10", "mouth_10"} and material not in {"eye_10", "mouth_10"}:
+            continue
+        record["uv_scale"] = [float(scale[0]), float(scale[1])]
+        record["uv_offset"] = [float(offset[0]), float(offset[1])]
+        record.pop("source_uv_transforms", None)
+        changed += 1
+    if texture_name and replacement_name:
+        config.setdefault("texture_replacements", {})[texture_name] = replacement_name
+    return changed
 
 
 def assign_shared_face_texture_key(records, texture_names: list[str]) -> str:
@@ -721,6 +921,10 @@ class G4PortTextureReplacement(PropertyGroup):
         default="pool",
         options={"HIDDEN"},
     )
+    expression_cell_origin_u: FloatProperty(default=0.0, options={"HIDDEN"})
+    expression_cell_origin_v: FloatProperty(default=0.0, options={"HIDDEN"})
+    expression_cell_scale_u: FloatProperty(default=0.0, options={"HIDDEN"})
+    expression_cell_scale_v: FloatProperty(default=0.0, options={"HIDDEN"})
 
 
 class G4PortExpressionImage(PropertyGroup):
@@ -741,7 +945,7 @@ class G4PortRecord(PropertyGroup):
     uv_offset_u: FloatProperty(name="U Offset", default=0.0, soft_min=0.0, soft_max=1.0)
     uv_offset_v: FloatProperty(name="V Offset", default=0.0, soft_min=0.0, soft_max=1.0)
     fallback_degenerate: BoolProperty(name="Fallback Triangle", default=True)
-    rigid_joint: StringProperty(name="Default Joint", default="c_head_1_0")
+    rigid_joint: StringProperty(name="Default Joint", default="c_c_1_0")
     auto_palette: BoolProperty(name="Auto Palette", default=True)
     force_layout_material: BoolProperty(name="Force Layout/Material", default=False)
     layout_index: IntProperty(name="Layout", default=1, min=0)
@@ -856,31 +1060,7 @@ class G4PortSceneSettings(PropertyGroup):
         description="Copy the original G4MD/G4MG/G4TX byte-for-byte when all assigned imported meshes are unchanged",
     )
     selected_only: BoolProperty(name="Selected Meshes Only", default=False)
-    apply_modifiers: BoolProperty(
-        name="Apply Modifiers",
-        default=False,
-        description="Apply Blender modifiers in the temporary DAE. Keep disabled unless weights were authored for the evaluated mesh",
-    )
-    bake_current_pose: BoolProperty(
-        name="Bake Current Pose",
-        default=True,
-        description="Export evaluated posed geometry as the G4MD default mesh without changing this Blender scene",
-    )
-    correct_arm_bind: BoolProperty(
-        name="Correct Arm Bind",
-        default=True,
-        description="Align the weighted collar/arm/elbow/wrist segments to a native G4SK reference",
-    )
-    arm_bind_target_rig: StringProperty(
-        name="Arm Bind Target Rig",
-        default="",
-        description="Imported native c000101 G4SK armature used only to correct the arm-chain bind translations",
-    )
-    stabilize_finger_weights: BoolProperty(
-        name="Stabilize Finger Weights",
-        default=True,
-        description="Bind finger vertices to the native wrist when the custom and game finger rigs differ",
-    )
+
     align_forward_to_y: BoolProperty(
         name="Align Forward to Y Axis",
         default=False,
@@ -916,7 +1096,7 @@ class G4PortSceneSettings(PropertyGroup):
 
     def texture_map(self) -> dict:
         result = {}
-        atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self)}
+        atlas_states = {row["name"]: row["state"] for row in atlas_status_rows(self, validate_images=True)}
         texture_names = [entry.texture_name for entry in self.texture_entries]
         face_texture = shared_face_texture_key(texture_names) if face_texture_is_shared(self.records, texture_names) else ""
         for item in self.texture_entries:
@@ -949,13 +1129,49 @@ class G4PortSceneSettings(PropertyGroup):
         active_texture_keys = set(self.texture_map())
         records = []
         for record in self.records:
+            effective_texture_key = resolved_record_texture_key(self, record)
+            face_expression_transform = (
+                is_face_atlas_record(record)
+                and effective_texture_key in active_texture_keys
+                and face_pool_atlas_active(self, record)
+            )
+            entry = texture_entry(self, effective_texture_key) if face_expression_transform else None
+            face_expression_pool = bool(entry and entry.expression_atlas_mode == "pool")
             atlas_transform = (
                 self.use_source_uv_transforms
-                and record.texture_key in active_texture_keys
-                and (not is_face_atlas_record(record) or face_pool_atlas_active(self, record))
+                and effective_texture_key in active_texture_keys
+                and (not is_face_atlas_record(record) or face_expression_pool or face_expression_transform)
             )
             item = record.to_config(atlas_transform)
-            if not atlas_transform:
+            if face_expression_transform and not face_expression_pool:
+                # Existing/prepared face atlases keep a record-wide transform.
+                scale, offset = face_expression_record_uv(self, record)
+                item["uv_scale"] = [scale[0], scale[1]]
+                item["uv_offset"] = [offset[0], offset[1]]
+                item.pop("source_uv_transforms", None)
+            elif face_expression_pool:
+                # Pool expressions are serialized entirely at record level.
+                # eye_10 is a face mask, so fit its complete authored UV island
+                # into the first sprite. mouth_10 already has the right size,
+                # so preserve its relative UV scale and only move it to Cell 1.
+                prepared_scale = (float(record.uv_scale_u), float(record.uv_scale_v))
+                prepared_offset = (float(record.uv_offset_u), float(record.uv_offset_v))
+                if prepared_scale != (1.0, 1.0) or prepared_offset != (0.0, 0.0):
+                    display_scale, display_offset = prepared_scale, prepared_offset
+                else:
+                    display_scale, display_offset = face_expression_record_uv(self, record)
+                target_rect = (
+                    display_offset[0], display_offset[1],
+                    display_scale[0], display_scale[1],
+                )
+                scale, offset = expression_pool_record_uv(
+                    record.output_name, target_rect, self.global_uv_flip_y
+                )
+                item["uv_scale"] = [scale[0], scale[1]]
+                item["uv_offset"] = [offset[0], offset[1]]
+                item.pop("uv_fit_display_rect", None)
+                item.pop("source_uv_transforms", None)
+            if not atlas_transform and not face_expression_transform:
                 # Native G4TX entries retain their authored UV windows.  Atlas
                 # controls are meaningful only for an explicitly replaced map.
                 item.pop("uv_flip", None)
@@ -983,13 +1199,39 @@ class G4PortSceneSettings(PropertyGroup):
             "source_mesh_assignments": source_mesh_assignments,
             "generate_tangents": self.generate_tangents,
             "strict_skinning": self.strict_skinning,
-            "stabilize_finger_weights": self.stabilize_finger_weights,
             "uv_flip": [self.global_uv_flip_x, self.global_uv_flip_y],
         }
 
 
 def settings(context) -> G4PortSceneSettings:
+    """Return the scene port settings without mutating Blender data.
+
+    Blender may call panel/operator draw methods from a restricted context where
+    writing to ID datablocks is forbidden.  Keep this accessor strictly read-only
+    and perform migrations/default initialization from operators or handlers.
+    """
     return context.scene.level5_g4_port
+
+
+def ensure_expression_pool(props: G4PortSceneSettings) -> None:
+    """Ensure the fixed 4x2 expression pool exists outside UI draw contexts."""
+    while len(props.expression_pool) < FACE_ATLAS_SLOTS:
+        props.expression_pool.add()
+
+
+def ensure_scene_defaults(context) -> G4PortSceneSettings:
+    props = settings(context)
+    ensure_expression_pool(props)
+    return props
+
+
+@persistent
+def initialize_g4_port_scene_defaults(_dummy=None) -> None:
+    """Migrate existing .blend scenes after registration or file load."""
+    for scene in bpy.data.scenes:
+        props = getattr(scene, "level5_g4_port", None)
+        if props is not None:
+            ensure_expression_pool(props)
 
 
 def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
@@ -1002,7 +1244,6 @@ def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
         entry.replacement_path = str(replacements.get(entry.texture_name, ""))
     target.generate_tangents = bool(config.get("generate_tangents", False))
     target.strict_skinning = bool(config.get("strict_skinning", False))
-    target.stabilize_finger_weights = bool(config.get("stabilize_finger_weights", True))
     uv_flip = config.get("uv_flip") or [False, True]
     target.global_uv_flip_x = bool(uv_flip[0]) if len(uv_flip) > 0 else False
     target.global_uv_flip_y = bool(uv_flip[1]) if len(uv_flip) > 1 else False
@@ -1032,6 +1273,10 @@ def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
             record.material_index = int(forced[1])
         record.secondary_weight_scale = float(source.get("secondary_weight_scale", 1.0))
         record.weight_anchor_joint = str(source.get("weight_anchor_joint", ""))
+    assign_shared_face_texture_key(
+        target.records,
+        [entry.texture_name for entry in target.texture_entries if entry.texture_name],
+    )
     target.joint_aliases.clear()
     for source_group, target_joint in (config.get("joint_aliases") or {}).items():
         alias = target.joint_aliases.add()
@@ -1097,7 +1342,33 @@ def original_template_signature(md: dict) -> str:
     return json.dumps(rows, separators=(",", ":"))
 
 
-def record_default_joint(md: dict, source: dict) -> str:
+def g4md_joint_index(path: Path, joint_name: str) -> int | None:
+    """Return the native G4MD joint-table index for *joint_name*, if present."""
+    try:
+        data = path.read_bytes()
+        if len(data) < 0x84 or data[:4] != b"G4MD":
+            return None
+        header_size = struct.unpack_from("<H", data, 0x04)[0]
+        start = header_size + struct.unpack_from("<H", data, 0x74)[0] * 4
+        end = header_size + struct.unpack_from("<H", data, 0x82)[0] * 4
+        if not 0 <= start <= end <= len(data):
+            return None
+        target_hash = __import__("zlib").crc32(joint_name.encode("ascii")) & 0xFFFFFFFF
+        for index, offset in enumerate(range(start, end - 3, 4)):
+            if struct.unpack_from("<I", data, offset)[0] == target_hash:
+                return index
+    except (OSError, UnicodeEncodeError, struct.error):
+        return None
+    return None
+
+
+def record_default_joint(md: dict, source: dict, preferred_joint: str | None = None) -> str:
+    # Rigid ports should follow the character's central body transform whenever
+    # the template exposes it. Auto Palette will add it to the record palette
+    # when the native record itself does not list it.
+    if preferred_joint:
+        return preferred_joint
+
     flags = int(source.get("flags0", 0))
     palette_length = flags & 0xFF if flags & 0x100 else 0
     palette_offset = int(source.get("palette_or_list", 0))
@@ -1119,6 +1390,7 @@ def original_g4tx_path(data_root: Path, model_rel: str) -> Path | None:
 
 
 def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, summary: dict) -> None:
+    ensure_expression_pool(target)
     md = summary.get("g4md") or {}
     data_root = infer_data_root(path)
     if data_root is None:
@@ -1142,6 +1414,7 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
             obj.level5_g4_port.target_record = "__none__"
     material_names = md.get("material_names", [])
     mesh_names = md.get("mesh_names", [])
+    preferred_rigid_joint = "c_c_1_0" if g4md_joint_index(path, "c_c_1_0") is not None else None
     if target.template_signature == signature and len(target.records) == len(md.get("records", [])):
         for record in target.records:
             if not record.texture_key:
@@ -1163,7 +1436,7 @@ def apply_original_model_to_settings(target: G4PortSceneSettings, path: Path, su
         record.force_layout_material = True
         record.layout_index = layout_index
         record.material_index = material_index
-        record.rigid_joint = record_default_joint(md, source)
+        record.rigid_joint = record_default_joint(md, source, preferred_rigid_joint)
         record.auto_palette = True
     assign_shared_face_texture_key(target.records, texture_names)
     target.active_record = 0
@@ -1758,6 +2031,21 @@ def records_grouped_by_texture(props: G4PortSceneSettings) -> dict[str, list[G4P
     return records_by_texture
 
 
+def auto_configure_uv_handling(props: G4PortSceneSettings) -> None:
+    """Auto-configure UV handling based on number of texture records.
+    
+    Single record: preserve source UVs (no packing needed)
+    Multiple records: auto-pack UVs into tiles
+    """
+    record_count = len(props.records)
+    if record_count <= 1:
+        # Single texture: preserve source UV transforms
+        props.auto_pack_source_uvs = False
+    else:
+        # Multiple textures: auto-pack source UVs into tiles
+        props.auto_pack_source_uvs = True
+
+
 def source_path_for_object(obj: bpy.types.Object) -> str:
     override = bpy.path.abspath(obj.level5_g4_port.source_texture)
     return override if override and Path(override).is_file() else first_used_material_image(obj)
@@ -1815,7 +2103,7 @@ def is_shared_face_atlas(texture_name: str, records) -> bool:
     )
 
 
-def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
+def atlas_status_rows(props: G4PortSceneSettings, validate_images: bool = False) -> list[dict]:
     rows = []
     grouped = records_grouped_by_texture(props)
     names = list(grouped)
@@ -1832,7 +2120,7 @@ def atlas_status_rows(props: G4PortSceneSettings) -> list[dict]:
         unreadable = [
             obj.name for obj in objects
             if source_path_for_object(obj) and load_image_pixels(source_path_for_object(obj)) is None
-        ] if not shared_face else []
+        ] if validate_images and not shared_face else []
         repeated = [
             obj.name for obj in objects
             if (bounds := object_uv_bounds(obj)) and (bounds[0] < 0.0 or bounds[1] > 1.0 or bounds[2] < 0.0 or bounds[3] > 1.0)
@@ -2116,6 +2404,7 @@ def discard_generated_atlas(entry: G4PortTextureReplacement | None, generated_pa
 
 def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = None) -> int:
     props = settings(context)
+    normalize_shared_face_record_keys(props)
     port_log(log_path, "Generate PNG set started")
     port_log(log_path, f"Output folder: {output_dir}")
     port_log(log_path, f"Max generated texture size: {MAX_GENERATED_TEXTURE_SIZE}")
@@ -2225,7 +2514,17 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
     return len(replacements)
 
 
+def atlas_pixel_rect_uv_transform(
+    atlas_width: int, atlas_height: int, rect: tuple[int, int, int, int]
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    if atlas_width <= 0 or atlas_height <= 0:
+        raise ValueError("atlas dimensions must be positive")
+    x, y, width, height = rect
+    return (width / atlas_width, height / atlas_height), (x / atlas_width, y / atlas_height)
+
+
 def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path, log_path: Path | None = None) -> Path:
+    normalize_shared_face_record_keys(props)
     texture_name = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
     entry = texture_entry(props, texture_name)
     if entry is None:
@@ -2243,6 +2542,7 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path, lo
     cell_width = width // FACE_ATLAS_COLUMNS
     cell_height = height // FACE_ATLAS_ROWS
     pixels = image_pixels(width, height, (0.0, 0.0, 0.0, 0.0))
+    first_sprite_rect: tuple[int, int, int, int] | None = None
     for index, source_path in enumerate(sources):
         source = load_image_pixels(str(source_path))
         if source is None:
@@ -2253,7 +2553,7 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path, lo
         # at the bottom.  Convert only at this boundary so slot order remains
         # the visible left-to-right, top-to-bottom order.
         cell_y = (FACE_ATLAS_ROWS - 1 - row) * cell_height
-        blit_image_fit(
+        placed_rect = blit_image_fit(
             pixels,
             width,
             height,
@@ -2263,6 +2563,8 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path, lo
             cell_width,
             cell_height,
         )
+        if index == 0:
+            first_sprite_rect = placed_rect
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{texture_name}.png"
     save_png(output_path, width, height, pixels)
@@ -2272,22 +2574,37 @@ def build_expression_pool_atlas(props: G4PortSceneSettings, output_dir: Path, lo
     entry.expression_atlas = True
     entry.expression_atlas_mode = "pool"
     props.texture_source_dir = str(output_dir)
-    # Pool cells contain complete face expressions.  The source face and mouth
-    # therefore both sample Cell 1 (top-left) instead of spanning all eight.
+    # Expression-atlas cells contain complete face expressions.  The source face and mouth
+    # therefore both sample the exact pixel rectangle occupied by Cell 1
+    # (top-left).  This transform belongs to the native eye/mouth record, not
+    # to individual Blender objects: record UV transforms are applied after
+    # the global G4 V flip, so the sprite stays in the intended atlas row and
+    # cannot be lost when Blender renames temporary Collada copies.
     face_records = [record for record in props.records if is_face_atlas_record(record) and record.texture_key == texture_name]
-    origin_u = 0.0
-    origin_v = (FACE_ATLAS_ROWS - 1) / FACE_ATLAS_ROWS
-    scale_u = 1.0 / FACE_ATLAS_COLUMNS
-    scale_v = 1.0 / FACE_ATLAS_ROWS
+    if first_sprite_rect is None:
+        raise RuntimeError("Expression atlas did not produce a first sprite rectangle")
+    (scale_u, scale_v), (origin_u, origin_v) = atlas_pixel_rect_uv_transform(
+        width, height, first_sprite_rect
+    )
     for record in face_records:
+        record.uv_scale_u = scale_u
+        record.uv_scale_v = scale_v
+        record.uv_offset_u = origin_u
+        record.uv_offset_v = origin_v
         for obj in objects_for_record(record):
-            set_object_uv_tile(obj, origin_u, origin_v, scale_u, scale_v)
+            # Face atlas placement is record-wide.  Keep object transforms at
+            # identity so the source UVs are not scaled twice.
+            set_object_uv_tile(obj, 0.0, 0.0, 1.0, 1.0)
             port_log(
                 log_path,
-                f"{texture_name}: expression pool Cell 1 -> {obj.name} ({record.output_name}) "
+                f"{texture_name}: expression Cell 1 display target -> {obj.name} ({record.output_name}) "
                 f"scale=({scale_u:.6f},{scale_v:.6f}) offset=({origin_u:.6f},{origin_v:.6f})",
             )
-    props.use_source_uv_transforms = bool(face_records)
+    if face_records:
+        # Keep transforms already prepared for other atlas-backed records.
+        # The expression pool adds another transformed texture; it must never
+        # disable an existing body/hair atlas mapping.
+        props.use_source_uv_transforms = True
     return output_path
 
 
@@ -2405,12 +2722,21 @@ def copy_unchanged_native_roundtrip(
 
 def write_uv_export_trace(props: G4PortSceneSettings, config: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["G4 atlas UV export trace", f"Texture replacements: {config.get('texture_replacements', {})}"]
-    for record in config.get("records", []):
+    lines = [
+        "G4 atlas UV export trace",
+        "UV pipeline: expression-face-v9",
+        f"Texture replacements: {config.get('texture_replacements', {})}",
+    ]
+    for index, record in enumerate(config.get("records", [])):
         transforms = record.get("source_uv_transforms", {})
+        props_record = props.records[index] if index < len(props.records) else None
+        raw_key = props_record.texture_key if props_record is not None else ""
+        effective_key = resolved_record_texture_key(props, props_record) if props_record is not None else ""
         lines.append(
             f"Record {record.get('output_name')}: source transforms={len(transforms)} "
-            f"record_scale={record.get('uv_scale', [1.0, 1.0])} record_offset={record.get('uv_offset', [0.0, 0.0])}"
+            f"record_scale={record.get('uv_scale', [1.0, 1.0])} record_offset={record.get('uv_offset', [0.0, 0.0])} "
+            f"fit_display_rect={record.get('uv_fit_display_rect')} "
+            f"texture_key={raw_key!r} effective_texture_key={effective_key!r}"
         )
         for name, transform in transforms.items():
             lines.append(f"  {name}: scale={transform.get('scale')} offset={transform.get('offset')}")
@@ -2431,7 +2757,14 @@ def enforce_g4_uv_orientation(props: G4PortSceneSettings) -> bool:
 
 def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     prefs = addon_preferences()
-    props = settings(context)
+    props = ensure_scene_defaults(context)
+    repaired_face_keys = normalize_shared_face_record_keys(props)
+    if repaired_face_keys:
+        port_log(None, f"Repaired shared face texture key on {repaired_face_keys} record(s)")
+    
+    # Auto-configure UV handling based on number of records
+    auto_configure_uv_handling(props)
+    
     original_model = resolve_file(props.original_model)
     if not original_model.is_file():
         raise RuntimeError(
@@ -2451,6 +2784,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         port_log(None, "Enabled Global Flip V for custom atlas export (G4 stores V inverted)")
     if has_unchanged_native_roundtrip(props, original_model):
         report = copy_unchanged_native_roundtrip(props, original_model, raw_root, package_root, source_g4tx)
+        report["g4_blender_plugin_version"] = g4_blender_plugin_version()
+        report["g4_port_script_version_expected"] = G4_PORT_SCRIPT_VERSION_EXPECTED
+        report["g4_blender_addon_marker"] = G4_PORT_ADDON_MARKER
+        report["g4_blender_addon_source"] = str(Path(__file__).resolve())
         cache = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir())
         cache.mkdir(parents=True, exist_ok=True)
         report_path = cache / "export_report.json"
@@ -2467,7 +2804,9 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     output_root = package_root / "data"
 
     if props.texture_mode == "custom":
-        atlas_rows = atlas_status_rows(props)
+        model_name = Path(props.model_rel).name or "model"
+        prepared_texture_dir = package_root / "texture_sources" / model_name
+        atlas_rows = atlas_status_rows(props, validate_images=True)
         refresh_needed = [
             row for row in atlas_rows
             if row["state"] in {"native", "stale"} and not row.get("shared_face", False)
@@ -2475,34 +2814,130 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         warnings = [row for row in atlas_rows if row["state"] == "warning"]
         for row in warnings:
             port_log(None, f"Texture {row['name']}: {row['message']}; preserving native G4TX entry")
-        if props.generate_png_set_on_export and refresh_needed:
-            model_name = Path(props.model_rel).name or "model"
-            generate_texture_png_set(context, package_root / "texture_sources" / model_name)
+
+        # Auto-packed atlas UVs live on the Blender objects.  A ready PNG can
+        # survive between exports while those per-object values are reset or
+        # come from an older scene state, so rebuild/reapply the packing on
+        # every export that has Auto Pack enabled.  This keeps the PNG and the
+        # G4MG UV transforms as one atomic operation.
+        if props.auto_pack_source_uvs or (props.generate_png_set_on_export and refresh_needed):
+            generate_texture_png_set(context, prepared_texture_dir)
         elif refresh_needed:
             names = ", ".join(row["name"] for row in refresh_needed)
             port_log(None, f"Prepared atlas missing or stale for {names}; preserving native G4TX entries")
 
+        # Rebuild the expression pool before serialising configuration or
+        # copying customTextures.  Besides writing the 4x2 PNG this reapplies
+        # the Cell-1 UV transform to the explicitly assigned eye/mouth source
+        # objects.
+        try:
+            pool_paths = expression_pool_paths(props)
+            if len(pool_paths) == FACE_ATLAS_SLOTS and all(path.is_file() for path in pool_paths):
+                build_expression_pool_atlas(props, prepared_texture_dir)
+        except Exception as exc:
+            port_log(None, f"Note: Could not auto-build expression atlas: {exc}")
+
     if not props.use_source_uv_transforms and not props.auto_pack_source_uvs:
         reset_uv_tiles(props)
+
+    # All generated atlases must exist before this copy.  Previously the
+    # expression pool was built afterwards, so a fresh c*_10 atlas could miss
+    # the G4TX replacement directory entirely.
+    prepare_custom_textures(props, dae_path)
 
     export_collada(
         dae_path,
         props.selected_only,
         props.align_forward_to_y,
-        props.apply_modifiers,
-        props.bake_current_pose,
+        True,  # always apply modifiers
+        True,  # always bake current pose
     )
     mesh_count = write_weights_json(weights_path, props.selected_only)
     if mesh_count == 0:
         raise RuntimeError("No mesh objects were found to export.")
 
-    prepare_custom_textures(props, dae_path)
-
     config = generated_config_path(cache)
     config_data = props.to_config()
-    if props.correct_arm_bind:
-        normalize_arm_roll_aliases(config_data)
-        config_data["joint_position_transforms"] = arm_bind_segment_transforms(props)
+    config_data["g4_blender_plugin_version"] = g4_blender_plugin_version()
+    config_data["g4_port_script_version_expected"] = G4_PORT_SCRIPT_VERSION_EXPECTED
+    config_data["g4_blender_addon_marker"] = G4_PORT_ADDON_MARKER
+    config_data["g4_blender_addon_source"] = str(Path(__file__).resolve())
+    config_data["g4_shared_face_texture_key"] = shared_face_texture_key(
+        [entry.texture_name for entry in props.texture_entries]
+    )
+    config_data["g4_face_record_texture_keys"] = {
+        record.output_name: {
+            "stored": record.texture_key,
+            "effective": resolved_record_texture_key(props, record),
+        }
+        for record in props.records
+        if is_face_atlas_record(record)
+    }
+
+    # Final serialization barrier for the expression atlas.  The texture file
+    # and its UV window are one contract: once an expression atlas is active,
+    # eye_10/mouth_10 must never reach g4_port with identity UVs.  Do this after
+    # props.to_config() so no later generic filtering can erase the transform.
+    face_texture_name = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+    face_entry = texture_entry(props, face_texture_name) if face_texture_name else None
+    if face_texture_name and face_texture_name in config_data.get("texture_replacements", {}):
+        replacement_name = config_data["texture_replacements"][face_texture_name]
+        if not (face_entry and face_entry.expression_atlas_mode == "pool"):
+            # Existing/manual 4x2 atlases still rely on a record-wide UV window.
+            face_scale = (1.0 / FACE_ATLAS_COLUMNS, 1.0 / FACE_ATLAS_ROWS)
+            face_offset = (0.0, (FACE_ATLAS_ROWS - 1.0) / FACE_ATLAS_ROWS)
+            for face_record in props.records:
+                if not is_face_atlas_record(face_record):
+                    continue
+                candidate_scale, candidate_offset = face_expression_record_uv(props, face_record)
+                face_scale = candidate_scale
+                face_offset = candidate_offset
+                break
+            injected = inject_expression_atlas_uv_into_config(
+                config_data,
+                face_texture_name,
+                face_scale,
+                face_offset,
+                replacement_name,
+            )
+            if injected:
+                port_log(
+                    None,
+                    f"Forced expression atlas UVs into generated config for {injected} record(s): "
+                    f"scale={face_scale} offset={face_offset}",
+                )
+        else:
+            port_log(None, f"Expression atlas pool active for {face_texture_name}; preserving record-space face UV transforms")
+
+    # Never emit a custom atlas while silently dropping the corresponding UV
+    # mapping.  This exact mismatch produces a valid-looking G4TX with a
+    # scrambled model, so fail before g4_port writes corrupted geometry.
+    replacement_keys = set(config_data.get("texture_replacements", {}))
+    for record_props, record_data in zip(props.records, config_data.get("records", [])):
+        if resolved_record_texture_key(props, record_props) not in replacement_keys:
+            continue
+        if is_face_atlas_record(record_props) and not face_pool_atlas_active(props, record_props):
+            continue
+        if not objects_for_record(record_props):
+            continue
+        face_record_transform = (
+            list(record_data.get("uv_scale", [1.0, 1.0])) != [1.0, 1.0]
+            or list(record_data.get("uv_offset", [0.0, 0.0])) != [0.0, 0.0]
+            or record_data.get("uv_fit_display_rect") is not None
+        )
+        if is_face_atlas_record(record_props) and face_pool_atlas_active(props, record_props):
+            if not face_record_transform:
+                raise RuntimeError(
+                    f"Expression atlas UV mapping was lost for {record_props.output_name}. "
+                    "Regenerate the expression atlas and export again."
+                )
+            continue
+        if props.use_source_uv_transforms and not record_data.get("source_uv_transforms"):
+            raise RuntimeError(
+                f"Atlas UV mapping was lost for {record_props.output_name}. "
+                "Regenerate the prepared atlas and export again."
+            )
+
     config.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
     trace_path = cache / "atlas_uv_trace.log"
     write_uv_export_trace(props, config_data, trace_path)
@@ -2598,7 +3033,7 @@ class LEVEL5_G4PORT_OT_load_original_model(Operator, ImportHelper):
             self.report({"ERROR"}, "Select a G4MD or G4PKM model")
             return {"CANCELLED"}
         try:
-            apply_original_model_to_settings(settings(context), path, run_model_probe(path, addon_preferences()))
+            apply_original_model_to_settings(ensure_scene_defaults(context), path, run_model_probe(path, addon_preferences()))
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -2681,7 +3116,7 @@ class LEVEL5_G4PORT_OT_generate_texture_pngs(Operator):
 
     def execute(self, context):
         prefs = addon_preferences()
-        props = settings(context)
+        props = ensure_scene_defaults(context)
         sync_assignment_table(context)
         package_root = resolve_file(getattr(prefs, "output_root", ""), default_output_root())
         model_name = Path(props.model_rel).name or "model"
@@ -2698,37 +3133,7 @@ class LEVEL5_G4PORT_OT_generate_texture_pngs(Operator):
         return {"FINISHED"}
 
 
-class LEVEL5_G4PORT_OT_initialize_expression_pool(Operator):
-    bl_idname = "level5_g4_port.initialize_expression_pool"
-    bl_label = "Initialize 4x2 Expression Pool"
 
-    def execute(self, context):
-        pool = settings(context).expression_pool
-        pool.clear()
-        for _ in range(FACE_ATLAS_SLOTS):
-            pool.add()
-        self.report({"INFO"}, "Expression pool initialized with 8 slots (4x2)")
-        return {"FINISHED"}
-
-
-class LEVEL5_G4PORT_OT_build_expression_atlas(Operator):
-    bl_idname = "level5_g4_port.build_expression_atlas"
-    bl_label = "Build 4x2 Expression Atlas"
-    bl_description = "Build the shared eye/mouth texture from 8 expression images"
-
-    def execute(self, context):
-        prefs = addon_preferences()
-        props = settings(context)
-        package_root = resolve_file(getattr(prefs, "output_root", ""), default_output_root())
-        model_name = Path(props.model_rel).name or "model"
-        log_path = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir()) / "atlas_uv_trace.log"
-        try:
-            output_path = build_expression_pool_atlas(props, package_root / "texture_sources" / model_name, log_path)
-        except Exception as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        self.report({"INFO"}, f"Built 4x2 expression atlas: {output_path.name}")
-        return {"FINISHED"}
 
 
 class LEVEL5_G4PORT_OT_use_existing_expression_atlas(Operator):
@@ -2737,7 +3142,7 @@ class LEVEL5_G4PORT_OT_use_existing_expression_atlas(Operator):
     bl_description = "Use the selected prepared facial atlas without rebuilding it"
 
     def execute(self, context):
-        props = settings(context)
+        props = ensure_scene_defaults(context)
         texture_name = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
         entry = texture_entry(props, texture_name)
         source = Path(bpy.path.abspath(entry.replacement_path)) if entry is not None and entry.replacement_path else None
@@ -2775,7 +3180,10 @@ class LEVEL5_G4PORT_OT_detect_vertex_groups(Operator):
     selected_only: BoolProperty(name="Selected Only", default=False)
 
     def execute(self, context):
-        count = detect_joint_aliases(settings(context), self.selected_only)
+        props = settings(context)
+        count = detect_joint_aliases(props, self.selected_only)
+        # Auto-configure UV handling after detecting vertices
+        auto_configure_uv_handling(props)
         self.report({"INFO"}, f"Detected {count} new vertex group(s)")
         return {"FINISHED"}
 
@@ -2852,26 +3260,16 @@ class LEVEL5_G4PORT_OT_analyze(Operator):
         return {"FINISHED"}
 
 
-class EXPORT_OT_level5_g4_port(Operator, ExportHelper):
+class EXPORT_OT_level5_g4_port(Operator):
     bl_idname = "export_scene.level5_g4_port"
     bl_label = "Export Level-5 G4 Port"
     bl_options = {"REGISTER"}
 
-    filename_ext = ""
-    filepath: StringProperty(subtype="DIR_PATH")
-    waiting_for_output_path: BoolProperty(options={"HIDDEN", "SKIP_SAVE"}, default=False)
-
     def execute(self, context):
-        if not self.waiting_for_output_path:
-            prefs = addon_preferences()
-            if not self.filepath:
-                self.filepath = getattr(prefs, "output_root", "") or default_output_root()
-            self.waiting_for_output_path = True
-            context.window_manager.fileselect_add(self)
-            return {"RUNNING_MODAL"}
+        ensure_scene_defaults(context)
         try:
             sync_assignment_table(context)
-            report, report_path = run_port(context, self.filepath)
+            report, report_path = run_port(context)
         except Exception as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
@@ -2879,56 +3277,145 @@ class EXPORT_OT_level5_g4_port(Operator, ExportHelper):
         vertices = validation.get("vertices_checked", report.get("vertices", "?"))
         indices = validation.get("indices_checked", report.get("indices", "?"))
         self.report({"INFO"}, f"G4 port exported: {vertices} vertices, {indices} indices. {report_path}")
-        settings(context).show_export = False
         return {"FINISHED"}
 
     def invoke(self, context, event):
-        self.waiting_for_output_path = False
-        self.filepath = ""
+        ensure_scene_defaults(context)
         return context.window_manager.invoke_props_dialog(self, width=760)
 
     def draw(self, context):
-        props = settings(context)
-        layout = self.layout
-        draw_original_and_mapping(layout, context, include_actions=True)
-        layout.separator()
-        draw_export_settings(layout, props, self)
+        draw_port_workflow(self.layout, context, include_actions=False)
 
 
-def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
-    props = settings(context)
+def draw_collapsible_header(layout, props, property_name: str, label: str, icon: str) -> bool:
+    expanded = bool(getattr(props, property_name))
     row = layout.row(align=True)
     row.prop(
         props,
-        "show_original",
-        icon="TRIA_DOWN" if props.show_original else "TRIA_RIGHT",
+        property_name,
+        text=label,
+        icon="TRIA_DOWN" if expanded else "TRIA_RIGHT",
         emboss=False,
     )
-    if props.show_original:
-        box = layout.box()
+    return expanded
+
+
+def draw_original_section(layout, context, props: G4PortSceneSettings) -> None:
+    if not draw_collapsible_header(layout, props, "show_original", "1. Original model template", "FILE_FOLDER"):
+        return
+
+    box = layout.box()
+    box.operator(LEVEL5_G4PORT_OT_load_original_model.bl_idname, icon="FILE_FOLDER")
+    if props.original_model:
+        box.prop(props, "original_model", text="Loaded")
+        box.label(text=props.model_rel, icon="FILE")
     else:
-        box = None
-    if box is not None:
-        box.label(text="1. Original model template", icon="FILE_FOLDER")
-        box.operator(LEVEL5_G4PORT_OT_load_original_model.bl_idname, icon="FILE_FOLDER")
-        if props.original_model:
-            box.prop(props, "original_model", text="Loaded")
-            box.label(text=props.model_rel, icon="FILE")
-        else:
-            box.label(text="Required before Analyze or Export", icon="ERROR")
-        if props.texture_names:
-            box.label(text=f"{len(split_csv(props.texture_names))} G4TX texture(s)", icon="TEXTURE")
+        box.label(text="Required before Analyze or Export", icon="ERROR")
+    if props.texture_names:
+        box.label(text=f"{len(split_csv(props.texture_names))} G4TX texture(s)", icon="TEXTURE")
 
-    row = layout.row(align=True)
-    row.prop(
+
+def draw_rigging_subsection(layout, props: G4PortSceneSettings) -> None:
+    if not draw_collapsible_header(layout, props, "show_rigging", "2a. Rigging", "ARMATURE_DATA"):
+        return
+
+    box = layout.box()
+    row = box.row(align=True)
+    row.operator(LEVEL5_G4PORT_OT_detect_vertex_groups.bl_idname, icon="GROUP_VERTEX")
+    row.operator(LEVEL5_G4PORT_OT_auto_map_joints.bl_idname, icon="BONE_DATA")
+    row = box.row()
+    row.template_list(
+        "LEVEL5_G4PORT_UL_joint_aliases",
+        "",
         props,
-        "show_mapping",
-        icon="TRIA_DOWN" if props.show_mapping else "TRIA_RIGHT",
-        emboss=False,
+        "joint_aliases",
+        props,
+        "active_joint_alias",
+        rows=5,
     )
-    if props.show_mapping:
-        box = layout.box()
-        box.label(text="Select target mesh:", icon="OUTLINER_OB_MESH")
+    col = row.column(align=True)
+    col.operator(LEVEL5_G4PORT_OT_add_joint_alias.bl_idname, text="", icon="ADD")
+    col.operator(LEVEL5_G4PORT_OT_remove_joint_alias.bl_idname, text="", icon="REMOVE")
+    if props.joint_aliases and 0 <= props.active_joint_alias < len(props.joint_aliases):
+        alias = props.joint_aliases[props.active_joint_alias]
+        edit = box.box()
+        edit.prop(alias, "source_group")
+        edit.prop(alias, "target_joint")
+    unresolved = sum(1 for alias in props.joint_aliases if alias.source_group and not alias.target_joint)
+    if unresolved:
+        box.label(text=f"{unresolved} unmapped group(s)", icon="ERROR")
+    box.prop(props, "strict_skinning")
+
+
+def draw_record_settings_subsection(layout, props: G4PortSceneSettings) -> None:
+    if not draw_collapsible_header(
+        layout,
+        props,
+        "show_record_settings",
+        "2b. Advanced mesh settings",
+        "MODIFIER_DATA",
+    ):
+        return
+
+    row = layout.row()
+    row.template_list(
+        "LEVEL5_G4PORT_UL_records",
+        "",
+        props,
+        "records",
+        props,
+        "active_record",
+        rows=5,
+    )
+    col = row.column(align=True)
+    col.operator(LEVEL5_G4PORT_OT_add_record.bl_idname, text="", icon="ADD")
+    col.operator(LEVEL5_G4PORT_OT_remove_record.bl_idname, text="", icon="REMOVE")
+    if not props.records or not 0 <= props.active_record < len(props.records):
+        return
+
+    record = props.records[props.active_record]
+    box = layout.box()
+    if record.original_index >= 0:
+        box.label(text=f"Original mesh #{record.original_index}", icon="MESH_DATA")
+    box.prop(record, "output_name")
+    box.prop(record, "material_name")
+    box.prop(record, "match_names")
+    row = box.row(align=True)
+    row.prop(record, "uv_flip_x")
+    row.prop(record, "uv_flip_y")
+    row = box.row(align=True)
+    row.prop(record, "uv_scale_u")
+    row.prop(record, "uv_scale_v")
+    row = box.row(align=True)
+    row.prop(record, "uv_offset_u")
+    row.prop(record, "uv_offset_v")
+    box.prop(record, "rigid_joint")
+    box.prop(record, "auto_palette")
+    box.prop(record, "secondary_weight_scale")
+    box.prop(record, "weight_anchor_joint")
+    box.prop(record, "texture_key")
+    box.operator(
+        LEVEL5_G4PORT_OT_use_active_texture.bl_idname,
+        text="Use Active Image as Atlas Source",
+        icon="TEXTURE",
+    )
+    box.prop(record, "fallback_degenerate")
+    box.prop(record, "force_layout_material")
+    if record.force_layout_material:
+        row = box.row(align=True)
+        row.prop(record, "layout_index")
+        row.prop(record, "material_index")
+
+
+def draw_mapping_section(layout, context, props: G4PortSceneSettings) -> None:
+    if not draw_collapsible_header(layout, props, "show_mapping", "2. Mesh correspondence", "OUTLINER_OB_MESH"):
+        return
+
+    box = layout.box()
+    if not props.records:
+        box.label(text="Load the original model first to create native target records", icon="INFO")
+    else:
+        box.label(text="Assign each Blender mesh to its native G4MD record", icon="OUTLINER_OB_MESH")
         for obj in mesh_objects(False):
             row = box.row(align=True)
             row.label(text=obj.name, icon="MESH_DATA")
@@ -2938,149 +3425,18 @@ def draw_original_and_mapping(layout, context, include_actions: bool) -> None:
         row.operator(LEVEL5_G4PORT_OT_assign_selected.bl_idname, icon="RESTRICT_SELECT_OFF")
         row.operator(LEVEL5_G4PORT_OT_guess_assignments.bl_idname, icon="VIEWZOOM")
 
-    row = layout.row(align=True)
-    row.prop(
-        props,
-        "show_rigging",
-        icon="TRIA_DOWN" if props.show_rigging else "TRIA_RIGHT",
-        emboss=False,
-    )
-    if props.show_rigging:
-        box = layout.box()
-        row = box.row(align=True)
-        row.operator(LEVEL5_G4PORT_OT_detect_vertex_groups.bl_idname, icon="GROUP_VERTEX")
-        row.operator(LEVEL5_G4PORT_OT_auto_map_joints.bl_idname, icon="BONE_DATA")
-        row = box.row()
-        row.template_list(
-            "LEVEL5_G4PORT_UL_joint_aliases",
-            "",
-            props,
-            "joint_aliases",
-            props,
-            "active_joint_alias",
-            rows=5,
-        )
-        col = row.column(align=True)
-        col.operator(LEVEL5_G4PORT_OT_add_joint_alias.bl_idname, text="", icon="ADD")
-        col.operator(LEVEL5_G4PORT_OT_remove_joint_alias.bl_idname, text="", icon="REMOVE")
-        if props.joint_aliases and 0 <= props.active_joint_alias < len(props.joint_aliases):
-            alias = props.joint_aliases[props.active_joint_alias]
-            edit = box.box()
-            edit.prop(alias, "source_group")
-            edit.prop(alias, "target_joint")
-        unresolved = sum(1 for alias in props.joint_aliases if alias.source_group and not alias.target_joint)
-        if unresolved:
-            box.label(text=f"{unresolved} unmapped group(s)", icon="ERROR")
-        box.prop(props, "strict_skinning")
-
-    row = layout.row(align=True)
-    row.prop(
-        props,
-        "show_record_settings",
-        icon="TRIA_DOWN" if props.show_record_settings else "TRIA_RIGHT",
-        emboss=False,
-    )
-    if props.show_record_settings:
-        row = layout.row()
-        row.template_list(
-            "LEVEL5_G4PORT_UL_records",
-            "",
-            props,
-            "records",
-            props,
-            "active_record",
-            rows=5,
-        )
-        col = row.column(align=True)
-        col.operator(LEVEL5_G4PORT_OT_add_record.bl_idname, text="", icon="ADD")
-        col.operator(LEVEL5_G4PORT_OT_remove_record.bl_idname, text="", icon="REMOVE")
-        if props.records and 0 <= props.active_record < len(props.records):
-            record = props.records[props.active_record]
-            box = layout.box()
-            if record.original_index >= 0:
-                box.label(text=f"Original mesh #{record.original_index}", icon="MESH_DATA")
-            box.prop(record, "output_name")
-            box.prop(record, "material_name")
-            box.prop(record, "match_names")
-            row = box.row(align=True)
-            row.prop(record, "uv_flip_x")
-            row.prop(record, "uv_flip_y")
-            row = box.row(align=True)
-            row.prop(record, "uv_scale_u")
-            row.prop(record, "uv_scale_v")
-            row = box.row(align=True)
-            row.prop(record, "uv_offset_u")
-            row.prop(record, "uv_offset_v")
-            box.prop(record, "rigid_joint")
-            box.prop(record, "auto_palette")
-            box.prop(record, "secondary_weight_scale")
-            box.prop(record, "weight_anchor_joint")
-            box.prop(record, "texture_key")
-            box.operator(LEVEL5_G4PORT_OT_use_active_texture.bl_idname, text="Use Active Image as Atlas Source", icon="TEXTURE")
-            box.prop(record, "fallback_degenerate")
-            box.prop(record, "force_layout_material")
-            if record.force_layout_material:
-                row = box.row(align=True)
-                row.prop(record, "layout_index")
-                row.prop(record, "material_index")
-
-    row = layout.row(align=True)
-    row.prop(
-        props,
-        "show_textures",
-        icon="TRIA_DOWN" if props.show_textures else "TRIA_RIGHT",
-        emboss=False,
-    )
-    if props.show_textures:
-        box = layout.box()
-        box.label(text="3. Prepare and review atlas", icon="TEXTURE")
-        box.prop(props, "texture_platform")
-        for status in atlas_status_rows(props):
-            row = box.row(align=True)
-            icon = {"ready": "CHECKMARK", "manual": "CHECKMARK", "stale": "FILE_REFRESH", "warning": "ERROR"}.get(status["state"], "INFO")
-            row.label(text=status["name"], icon=icon)
-            row.label(text=status["message"])
-            if status["repeated"]:
-                box.label(text=f"UVs adjusted for: {', '.join(status['repeated'])}", icon="UV")
-        box.prop(props, "texture_source_dir")
-        if props.texture_entries:
-            for entry in props.texture_entries:
-                row = box.row(align=True)
-                row.label(text=entry.texture_name, icon="TEXTURE")
-                row.prop(entry, "replacement_path", text="")
-        else:
-            box.label(text="Load an original model to list its G4TX textures", icon="INFO")
-        face_key = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
-        if face_key:
-            expression_box = box.box()
-            expression_box.label(text=f"Expression pool for {face_key} (4x2)", icon="SEQ_CHROMA_SCOPE")
-            expression_box.label(text="eye_10 and mouth_10 keep the native atlas unless a 4x2 source is explicitly accepted", icon="INFO")
-            face_entry = texture_entry(props, face_key)
-            if face_entry is not None:
-                expression_box.prop(face_entry, "replacement_path", text="Existing 4x2 Atlas")
-            row = expression_box.row(align=True)
-            row.operator(LEVEL5_G4PORT_OT_use_existing_expression_atlas.bl_idname, icon="CHECKMARK")
-            row.operator(LEVEL5_G4PORT_OT_initialize_expression_pool.bl_idname, icon="ADD")
-            row.operator(LEVEL5_G4PORT_OT_build_expression_atlas.bl_idname, icon="IMAGE_DATA")
-            for index, item in enumerate(props.expression_pool):
-                expression_box.prop(item, "image_path", text=f"Cell {index % FACE_ATLAS_COLUMNS + 1}, row {index // FACE_ATLAS_COLUMNS + 1} (top first)")
-        box.prop(props, "generate_png_set_on_export")
-        box.prop(props, "use_source_uv_transforms")
-        box.prop(props, "auto_pack_source_uvs")
-        box.prop(props, "replace_special_textures")
-        row = box.row(align=True)
-        row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
-        row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
-
-    if include_actions:
-        row = layout.row(align=True)
-        row.operator(LEVEL5_G4PORT_OT_analyze.bl_idname, icon="VIEWZOOM")
+    # Rigging and record editing are children of mesh correspondence.  Keeping
+    # them inside this section gives the sidebar and export dialog the same
+    # dependency hierarchy instead of presenting five unrelated top-level panels.
+    nested = box.column(align=False)
+    nested.separator()
+    draw_rigging_subsection(nested, props)
+    draw_record_settings_subsection(nested, props)
 
 
 def draw_texture_replacements(layout, props: G4PortSceneSettings) -> None:
     box = layout.box()
     box.label(text="G4TX Texture Replacements", icon="TEXTURE")
-    box.prop(props, "texture_platform")
     if props.texture_entries:
         for entry in props.texture_entries:
             row = box.row(align=True)
@@ -3089,36 +3445,110 @@ def draw_texture_replacements(layout, props: G4PortSceneSettings) -> None:
     else:
         box.label(text="Load an original model to list its G4TX textures", icon="INFO")
     box.label(text="Empty paths preserve the original texture", icon="CHECKMARK")
-    box.prop(props, "replace_special_textures")
 
 
-def draw_export_settings(layout, props: G4PortSceneSettings, operator=None) -> None:
-    row = layout.row(align=True)
-    row.prop(
-        props,
-        "show_export",
-        icon="TRIA_DOWN" if props.show_export else "TRIA_RIGHT",
-        emboss=False,
-    )
-    if not props.show_export:
+def draw_textures_section(layout, context, props: G4PortSceneSettings) -> None:
+    if not draw_collapsible_header(layout, props, "show_textures", "3. Textures", "TEXTURE"):
         return
+
     box = layout.box()
     box.prop(props, "texture_mode")
-    if props.texture_mode == "custom":
-        statuses = atlas_status_rows(props)
-        unresolved = [row for row in statuses if row["state"] in {"native", "stale", "warning"}]
-        if unresolved:
-            box.label(text=f"{len(unresolved)} texture(s) will keep their native G4TX payload", icon="INFO")
-        draw_texture_replacements(layout, props)
+    box.prop(props, "texture_platform")
+
+    if props.texture_mode != "custom":
+        if props.texture_mode == "native":
+            box.label(text="The original G4TX archive will be copied unchanged", icon="CHECKMARK")
+        else:
+            box.label(text="The G4TX already present in the output package will be preserved", icon="CHECKMARK")
+        return
+
+    box.label(text="Prepare and review atlas", icon="TEXTURE")
+    for status in atlas_status_rows(props):
+        row = box.row(align=True)
+        icon = {
+            "ready": "CHECKMARK",
+            "manual": "CHECKMARK",
+            "stale": "FILE_REFRESH",
+            "warning": "ERROR",
+        }.get(status["state"], "INFO")
+        row.label(text=status["name"], icon=icon)
+        row.label(text=status["message"])
+        if status["repeated"]:
+            box.label(text=f"UVs adjusted for: {', '.join(status['repeated'])}", icon="UV")
+
+    box.prop(props, "texture_source_dir")
+    draw_texture_replacements(box, props)
+
+    face_key = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
+    if face_key:
+        expression_box = box.box()
+        expression_box.label(text=f"Expression pool for {face_key} (4x2)", icon="SEQ_CHROMA_SCOPE")
+        expression_box.label(
+            text="eye_10 and mouth_10 keep the native atlas unless a 4x2 source is explicitly accepted",
+            icon="INFO",
+        )
+        face_entry = texture_entry(props, face_key)
+        if face_entry is not None:
+            expression_box.prop(face_entry, "replacement_path", text="Existing 4x2 Atlas")
+        row = expression_box.row(align=True)
+        row.operator(LEVEL5_G4PORT_OT_use_existing_expression_atlas.bl_idname, icon="CHECKMARK")
+        expression_box.label(text="Set 8 cell images below (4x2):", icon="INFO")
+        if len(props.expression_pool) < FACE_ATLAS_SLOTS:
+            expression_box.label(text="Expression pool migration is pending; reopen the exporter once", icon="INFO")
+        for index, item in enumerate(props.expression_pool):
+            if index >= FACE_ATLAS_SLOTS:
+                break
+            expression_box.prop(
+                item,
+                "image_path",
+                text=f"Cell {index % FACE_ATLAS_COLUMNS + 1}, row {index // FACE_ATLAS_COLUMNS + 1} (top first)",
+            )
+
+    box.prop(props, "generate_png_set_on_export")
+    box.prop(props, "use_source_uv_transforms")
+    box.prop(props, "auto_pack_source_uvs")
+    box.prop(props, "replace_special_textures")
+    row = box.row(align=True)
+    row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
+    row.operator(LEVEL5_G4PORT_OT_reset_object_uv_tiles.bl_idname, icon="FILE_REFRESH")
+
+
+def draw_export_settings(layout, props: G4PortSceneSettings) -> None:
+    if not draw_collapsible_header(layout, props, "show_export", "4. Export", "EXPORT"):
+        return
+
+    prefs = addon_preferences()
+    box = layout.box()
+    box.prop(prefs, "output_root", text="Package Folder")
     box.prop(props, "selected_only")
-    box.prop(props, "apply_modifiers")
-    box.prop(props, "bake_current_pose")
-    box.prop(props, "correct_arm_bind")
-    if props.correct_arm_bind:
-        box.prop_search(props, "arm_bind_target_rig", bpy.data, "objects")
-    box.prop(props, "stabilize_finger_weights")
     box.prop(props, "align_forward_to_y")
     box.prop(props, "preserve_native_roundtrip")
+
+    if not props.original_model:
+        box.label(text="Original model is still required", icon="ERROR")
+    elif not props.records:
+        box.label(text="No native mesh records are loaded", icon="ERROR")
+    else:
+        assigned = sum(
+            1
+            for obj in mesh_objects(False)
+            if getattr(obj.level5_g4_port, "target_record", "__none__") not in {"", "__none__"}
+        )
+        box.label(text=f"{assigned} mesh object(s) currently assigned", icon="CHECKMARK" if assigned else "INFO")
+
+
+def draw_port_workflow(layout, context, include_actions: bool) -> None:
+    """Render the one canonical G4 Port workflow in both entry points."""
+    props = settings(context)
+    draw_original_section(layout, context, props)
+    draw_mapping_section(layout, context, props)
+    draw_textures_section(layout, context, props)
+    draw_export_settings(layout, props)
+
+    if include_actions:
+        row = layout.row(align=True)
+        row.operator(LEVEL5_G4PORT_OT_analyze.bl_idname, icon="VIEWZOOM")
+        row.operator(EXPORT_OT_level5_g4_port.bl_idname, icon="EXPORT")
 
 
 class LEVEL5_G4PORT_PT_panel(Panel):
@@ -3129,14 +3559,7 @@ class LEVEL5_G4PORT_PT_panel(Panel):
     bl_category = "Level-5"
 
     def draw(self, context):
-        layout = self.layout
-        draw_original_and_mapping(layout, context, include_actions=False)
-        props = settings(context)
-        draw_export_settings(layout, props)
-
-        row = layout.row(align=True)
-        row.operator(LEVEL5_G4PORT_OT_analyze.bl_idname, icon="VIEWZOOM")
-        row.operator(EXPORT_OT_level5_g4_port.bl_idname, icon="EXPORT")
+        draw_port_workflow(self.layout, context, include_actions=True)
 
 
 def menu_func_export(self, context):
@@ -3164,8 +3587,6 @@ classes.extend([
     LEVEL5_G4PORT_OT_guess_assignments,
     LEVEL5_G4PORT_OT_use_active_texture,
     LEVEL5_G4PORT_OT_generate_texture_pngs,
-    LEVEL5_G4PORT_OT_initialize_expression_pool,
-    LEVEL5_G4PORT_OT_build_expression_atlas,
     LEVEL5_G4PORT_OT_use_existing_expression_atlas,
     LEVEL5_G4PORT_OT_reset_object_uv_tiles,
     LEVEL5_G4PORT_OT_detect_vertex_groups,
@@ -3183,11 +3604,16 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Object.level5_g4_port = bpy.props.PointerProperty(type=G4PortObjectSettings)
     bpy.types.Scene.level5_g4_port = bpy.props.PointerProperty(type=G4PortSceneSettings)
+    initialize_g4_port_scene_defaults()
+    if initialize_g4_port_scene_defaults not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(initialize_g4_port_scene_defaults)
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 
 def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
+    if initialize_g4_port_scene_defaults in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(initialize_g4_port_scene_defaults)
     del bpy.types.Scene.level5_g4_port
     del bpy.types.Object.level5_g4_port
     for cls in reversed(classes):

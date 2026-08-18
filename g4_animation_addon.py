@@ -30,7 +30,6 @@ try:
         event_light_parameters, load_event_actor_models, load_event_actor_points,
         load_event_actor_point_assignments, point_assignment_for_actor,
     )
-    from .g4_p3lip import read_p3lip
 except ImportError:
     from g4_model_probe import g4sk_entries_from_candidate
     from g4pk_extract_g4mt import select_g4mt_entry
@@ -42,7 +41,6 @@ except ImportError:
         event_light_parameters, load_event_actor_models, load_event_actor_points,
         load_event_actor_point_assignments, point_assignment_for_actor,
     )
-    from g4_p3lip import read_p3lip
 
 
 ADDON_ID = __name__
@@ -1873,42 +1871,7 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
     return results
 
 
-def discover_event_p3lip(directory: Path, prefs) -> list[Path]:
-    for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
-        for language in ("ja", "en"):
-            sound_root = data_root / "common" / "sound" / language
-            paths = sorted(sound_root.glob(f"{directory.name}_*.p3lip"))
-            if paths:
-                return paths
-    return []
 
-
-def import_event_p3lip_controllers(
-    paths: list[Path], cut_starts: dict[str, int]
-) -> list[object]:
-    if not paths:
-        return []
-    collection = bpy.data.collections.new("Level-5 P3 Lip Sync")
-    bpy.context.scene.collection.children.link(collection)
-    cursors: dict[str, float] = {}
-    controllers = []
-    for path in paths:
-        suffix = path.stem.rsplit("_", 2)
-        cut = f"c{int(suffix[-2]):04d}" if len(suffix) >= 3 and suffix[-2].isdigit() else ""
-        start = cursors.get(cut, float(cut_starts.get(cut, 1)))
-        controller = bpy.data.objects.new(path.stem, None)
-        collection.objects.link(controller)
-        controller.empty_display_type = "CIRCLE"
-        controller.empty_display_size = 0.08
-        controller.hide_render = True
-        action, _, duration = create_p3lip_action(controller, path, start)
-        controller.animation_data.action = action
-        controller["g4_p3lip_cut"] = cut
-        cursors[cut] = start + duration * (
-            bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
-        ) + 1.0
-        controllers.append(controller)
-    return controllers
 
 
 def decode_event_effect_motions(directory: Path, prefs, temporary_directory: Path) -> dict[str, dict]:
@@ -3231,7 +3194,6 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         try:
             actor_models = resolve_event_actor_models(directory, prefs)
             effect_candidates = discover_event_effects(directory, prefs) if self.import_effects else []
-            p3lip_paths = discover_event_p3lip(directory, prefs)
         except Exception as exc:
             event_log.append(f"FATAL before timeline setup: {traceback.format_exc()}")
             write_event_import_log(event_log)
@@ -3239,7 +3201,6 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             return {"CANCELLED"}
         event_log.append(f"effects_enabled={self.import_effects}")
         event_log.append(f"effect_candidates={len(effect_candidates)}")
-        event_log.append(f"p3lip_candidates={len(p3lip_paths)}")
         write_event_import_log(event_log)
         cut_frames = {}
         camera_object = None
@@ -3257,6 +3218,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 )
                 event_log.append(f"effect_motion_cuts={len(effect_motions)}")
                 write_event_import_log(event_log)
+                p3lip_controllers = []
                 for actor, actor_packages in sorted(packages.items()):
                     actor_parts = character_parts.get(actor) or {}
                     if actor_parts.get("skip"):
@@ -3303,7 +3265,6 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 effect_roots = import_event_effect_models(effect_candidates, effect_motions, cut_starts)
                 event_log.append(f"effect_roots={len(effect_roots)}")
                 write_event_import_log(event_log)
-                p3lip_controllers = import_event_p3lip_controllers(p3lip_paths, cut_starts)
                 if camera_paths:
                     camera_object, _ = import_event_camera(
                         camera_paths[0],
@@ -3418,78 +3379,10 @@ class IMPORT_OT_level5_g4cm(Operator, ImportHelper):
         return {"FINISHED"}
 
 
-def p3lip_weight(packed_viseme: int) -> float:
-    """Decode the normalized articulation envelope stored above the viseme byte."""
-    envelope = (packed_viseme >> 16) & 0xFFFF
-    neutral = 0x2CCC
-    maximum = 0x6666
-    return max(0.0, min(1.0, (envelope - neutral) / (maximum - neutral)))
 
 
-def create_p3lip_action(target, path: Path, frame_start: float = 1.0):
-    sequence = read_p3lip(path)
-    target["g4_lip_viseme"] = 0
-    target["g4_lip_weight"] = 0.0
-    target["g4_p3lip_source"] = str(path)
-    target.animation_data_create()
-    previous_action = target.animation_data.action
-    action = bpy.data.actions.new(f"{path.stem} Lip Sync")
-    action.use_fake_user = True
-    action["g4_p3lip_source"] = str(path)
-    action["g4_p3lip_duration"] = sequence.duration
-    target.animation_data.action = action
-    fps = bpy.context.scene.render.fps / bpy.context.scene.render.fps_base
-    keyed = 0
-    for key in sequence.keys:
-        viseme = key.packed_viseme & 0xFF
-        if viseme in {0xFE, 0xFF}:
-            viseme = 0
-            weight = 0.0
-        else:
-            weight = p3lip_weight(key.packed_viseme)
-        frame = frame_start + key.time * fps
-        target["g4_lip_viseme"] = viseme
-        target["g4_lip_weight"] = weight
-        target.keyframe_insert('["g4_lip_viseme"]', frame=frame, group="P3 Lip Sync")
-        target.keyframe_insert('["g4_lip_weight"]', frame=frame, group="P3 Lip Sync")
-        keyed += 1
-    for curve in action.fcurves:
-        for point in curve.keyframe_points:
-            point.interpolation = "CONSTANT" if "viseme" in curve.data_path else "LINEAR"
-    target.animation_data.action = previous_action
-    return action, keyed, sequence.duration
 
 
-class IMPORT_OT_level5_p3lip(Operator, ImportHelper):
-    bl_idname = "import_scene.level5_p3lip"
-    bl_label = "Import Level-5 P3 Lip Sync"
-    bl_options = {"REGISTER", "UNDO"}
-
-    filename_ext = ".p3lip"
-    filter_glob: StringProperty(default="*.p3lip", options={"HIDDEN"})
-
-    def execute(self, context):
-        path = Path(self.filepath)
-        target = context.active_object
-        if target is None:
-            target = bpy.data.objects.new(f"{path.stem} Lip Sync", None)
-            context.collection.objects.link(target)
-            target.empty_display_type = "CIRCLE"
-            target.empty_display_size = 0.25
-        try:
-            action, keyed, duration = create_p3lip_action(
-                target, path, float(context.scene.frame_current)
-            )
-        except (OSError, ValueError, struct.error) as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        target.animation_data.action = action
-        context.scene.frame_end = max(
-            context.scene.frame_end,
-            int(context.scene.frame_current + duration * context.scene.render.fps),
-        )
-        self.report({"INFO"}, f"Imported {keyed} P3LIP keys on {target.name}")
-        return {"FINISHED"}
 
 
 class EXPORT_OT_level5_g4_fbx(Operator, ExportHelper):
@@ -3556,7 +3449,6 @@ class EXPORT_OT_level5_g4_fbx(Operator, ExportHelper):
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_level5_g4mt.bl_idname, text="Level-5 G4 Animation (.g4mt/.g4pk)")
     self.layout.operator(IMPORT_OT_level5_g4cm.bl_idname, text="Level-5 G4 Camera (.g4cm)")
-    self.layout.operator(IMPORT_OT_level5_p3lip.bl_idname, text="Level-5 P3 Lip Sync (.p3lip)")
     self.layout.operator(IMPORT_OT_level5_g4_event_folder.bl_idname, text="Level-5 G4 Event Folder")
 
 
@@ -3570,7 +3462,6 @@ classes = [
     IMPORT_OT_level5_g4mt_pick_shoes,
     IMPORT_OT_level5_g4mt,
     IMPORT_OT_level5_g4cm,
-    IMPORT_OT_level5_p3lip,
     G4EventCharacterPart,
     IMPORT_OT_level5_g4_event_parts,
     IMPORT_OT_level5_g4_event_folder,
@@ -3603,17 +3494,7 @@ if hasattr(bpy.types, "FileHandler"):
 
     classes.append(G4CM_FH_import)
 
-    class P3LIP_FH_import(bpy.types.FileHandler):
-        bl_idname = "P3LIP_FH_import"
-        bl_label = "Level-5 P3 Lip Sync"
-        bl_import_operator = IMPORT_OT_level5_p3lip.bl_idname
-        bl_file_extensions = ".p3lip"
 
-        @classmethod
-        def poll_drop(cls, context):
-            return context.area is not None and context.area.type in {"VIEW_3D", "OUTLINER", "FILE_BROWSER"}
-
-    classes.append(P3LIP_FH_import)
 
 
 def register():
