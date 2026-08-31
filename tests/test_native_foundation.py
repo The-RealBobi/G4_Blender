@@ -11,6 +11,7 @@ from formats.evidence import discover_format_evidence
 from formats.g4ma import build_g4ma_effect_bindings
 from formats.g4mt import G4MTAnimationBank, G4MTChannel, G4MTHeader, G4MTTarget, G4MTTargetInfo, crc32b
 from shading.character_profile import characterize_current_toon_shader
+from shading.character_textures import character_texture_base_key, character_texture_role
 from shading.map_surfaces import MapSurfaceKind, classify_map_surface
 
 
@@ -56,6 +57,13 @@ class NativeFoundationTests(unittest.TestCase):
         self.assertEqual(grass.kind, MapSurfaceKind.GRASS)
         self.assertEqual(character.family, "character_toon")
         self.assertTrue(character.supports_dxt5nm)
+
+    def test_character_texture_contract_keeps_optional_toon_ramp_separate(self):
+        self.assertEqual(character_texture_role("c06030110_20sp"), "specular")
+        self.assertEqual(character_texture_role("c06030110_20spm"), "specular_mask")
+        self.assertEqual(character_texture_role("c06030110_20dp"), "ramp")
+        self.assertEqual(character_texture_role("c06030110_20_ramp.dds"), "ramp")
+        self.assertEqual(character_texture_base_key("c06030110_20dp"), "c06030110_20")
 
     def test_real_g4ma_fixture_is_parsed_when_dump_is_available(self):
         root = Path(os.environ.get("G4_DUMP_ROOT", "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_712/._work/raw"))

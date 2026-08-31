@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Iterable
 from xml.sax.saxutils import escape
 
+try:
+    from .shading.character_textures import character_texture_base_key, character_texture_role
+except ImportError:
+    from shading.character_textures import character_texture_base_key, character_texture_role
+
 
 ASCII_RE = re.compile(rb"[A-Za-z0-9_]{3,}(?:_LOD[0-9])?M?")
 OBJBIN_G4TX_RE = re.compile(
@@ -3088,56 +3093,20 @@ def material_name_for_mesh(
 
 
 def texture_usage_from_name(name: str) -> str:
-    lower = name.lower()
-    if "cubemap" in lower or re.search(r"(?:^|_)cm\d+_tex$", lower):
-        return "environment"
-    if lower.endswith("_a.1"):
-        return "transparent_base"
-    if lower.endswith(".a"):
-        return "alpha_red"
-    if lower.endswith("msk") or lower.endswith("_mask"):
-        return "mask"
-    if lower.endswith("nml") or lower.endswith("_normal"):
-        return "normal"
-    if lower.endswith("_re.2") or lower.endswith("_n.2") or lower.endswith("_nm.2"):
-        return "normal"
-    if lower.endswith(".2") and not lower.endswith(("line.2", "sp.2", "oc.2")):
-        return "normal_or_packed"
-    if lower.endswith(".1") and (
-        lower.endswith("_re.1") or lower.endswith("_n.1") or lower.endswith("_nm.1") or "_normal" in lower
-    ):
+    role = character_texture_role(name)
+    if role == "normal" and name.casefold().endswith(".2") and name.casefold().endswith(("line.2", "sp.2", "oc.2")):
         return "base"
-    if lower.endswith(".2") or lower.endswith("_n") or lower.endswith("_nm") or "_normal" in lower:
-        return "normal"
-    if lower.endswith("spm"):
-        return "specular_mask"
-    if lower.endswith("sp"):
-        return "specular"
-    if lower.endswith("oc"):
-        return "occlusion"
-    if lower.endswith("line"):
-        return "line"
-    return "base"
+    if role == "normal" and name.casefold().endswith(".2"):
+        return "normal_or_packed"
+    return role
 
 
 def strip_texture_variant(name: str) -> str:
-    lower = name.lower()
-    usage = texture_usage_from_name(lower)
-    if usage == "transparent_base" and lower.endswith("_a.1"):
-        return lower[:-2]
-    if usage in {"normal", "normal_or_packed"} and lower.endswith(".2"):
-        return lower[:-2]
-    if usage == "normal" and lower.endswith("nml"):
-        return re.sub(r"_?nml$", "", lower)
-    if usage == "alpha_red" and lower.endswith(".a"):
-        return lower[:-2]
-    if usage == "mask":
-        return re.sub(r"(?:_?msk|_mask)$", "", lower)
-    return re.sub(r"\.(?:\d+|[A-Za-z])$", "", lower)
+    return character_texture_base_key(name)
 
 
 def texture_key(name: str) -> str:
-    return strip_texture_variant(name).strip("_").lower()
+    return character_texture_base_key(name).strip("_").lower()
 
 
 def texture_keys_for_name(name: str) -> list[str]:

@@ -72,11 +72,16 @@ if __package__:
     from . import g4_port_addon
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from .shading.character_profile import annotate_current_toon_material
+    from .shading.character_textures import character_texture_base_key, character_texture_role
     from .shading.map_surfaces import classify_map_surface
     from .shading.map_nodes import apply_map_surface_nodes
 else:
     import g4_port_addon
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
+    from shading.character_profile import annotate_current_toon_material
+    from shading.character_textures import character_texture_base_key, character_texture_role
+    from shading.map_surfaces import classify_map_surface
+    from shading.map_nodes import apply_map_surface_nodes
 
 if __package__:
     from . import g4_animation_addon
@@ -1624,13 +1629,52 @@ def apply_level5_toon_shader(
     links.new(shadow_primary.outputs["Color"], shadow_mix.inputs[1])
     links.new(shadow_secondary.outputs["Color"], shadow_mix.inputs[2])
 
+    # Some Character materials carry a fifth toon-control image.  Its short
+    # native name is commonly ``dp``; treat it as an optional horizontal
+    # colour ramp and leave the existing dual ramp authoritative when it is
+    # absent.  This keeps ordinary four-map materials in the same shading
+    # path while allowing the authored palette to survive.
+    ramp_path = first_variant_path(variants, "ramp")
+    ramp_color = shadow_mix.outputs["Color"]
+    if ramp_path is not None:
+        ramp_image = load_image(ramp_path)
+        if ramp_image is not None:
+            try:
+                ramp_image.colorspace_settings.name = "sRGB"
+            except (AttributeError, TypeError):
+                pass
+            ramp_texture = nodes.new("ShaderNodeTexImage")
+            ramp_texture.name = "G4 Toon Ramp"
+            ramp_texture.label = ramp_path.name
+            ramp_texture.image = ramp_image
+            ramp_texture.interpolation = "Linear"
+            ramp_texture.extension = "EXTEND"
+            ramp_texture.location = (20, 40)
+            ramp_coordinates = nodes.new("ShaderNodeCombineXYZ")
+            ramp_coordinates.name = "G4 Toon Ramp Coordinates"
+            ramp_coordinates.location = (-160, 40)
+            ramp_coordinates.inputs["Y"].default_value = 0.5
+            ramp_coordinates.inputs["Z"].default_value = 0.0
+            links.new(toon_factor, ramp_coordinates.inputs["X"])
+            links.new(ramp_coordinates.outputs["Vector"], ramp_texture.inputs["Vector"])
+            ramp_composite = nodes.new("ShaderNodeMixRGB")
+            ramp_composite.name = "G4 Authored Toon Ramp"
+            ramp_composite.blend_type = "MULTIPLY"
+            ramp_composite.inputs[0].default_value = 1.0
+            ramp_composite.location = (450, 80)
+            links.new(shadow_mix.outputs["Color"], ramp_composite.inputs[1])
+            links.new(ramp_texture.outputs["Color"], ramp_composite.inputs[2])
+            ramp_color = ramp_composite.outputs["Color"]
+        elif debug is not None:
+            debug.append(f"[toon] {material.name}: failed toon ramp {ramp_path.name}")
+
     lit = nodes.new("ShaderNodeMixRGB")
     lit.name = "G4 Cel Diffuse"
     lit.blend_type = "MULTIPLY"
     lit.inputs[0].default_value = 1.0
     lit.location = (60, 250)
     links.new(base_color, lit.inputs[1])
-    links.new(shadow_mix.outputs["Color"], lit.inputs[2])
+    links.new(ramp_color, lit.inputs[2])
     color_output = lit.outputs["Color"]
 
     if occlusion_channels is not None:
@@ -1936,13 +1980,15 @@ def apply_level5_toon_shader(
     material["g4_normal_texture"] = str(normal_path) if normal_path is not None else ""
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
+    material["g4_toon_ramp_texture"] = str(ramp_path) if ramp_path is not None else ""
     annotate_current_toon_material(material, variants)
     if debug is not None:
         debug.append(
             f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
             f"line={line_path and line_path.name} sp={specular_path and specular_path.name} "
             f"spm={specular_mask_path and specular_mask_path.name} "
-            f"nrm={normal_path and normal_path.name} line_map={line_informative}"
+            f"nrm={normal_path and normal_path.name} ramp={ramp_path and ramp_path.name} "
+            f"line_map={line_informative}"
         )
     return True
 
@@ -2177,6 +2223,7 @@ CHARACTER_TEXTURE_NODE_SLOTS = (
     ("Recolor Mask", "G4 Recolor Mask", "mask"),
     ("Normal", "G4 Normal", "normal"),
     ("Occlusion", "G4 Occlusion", "occlusion"),
+    ("Toon Ramp", "G4 Toon Ramp", "ramp"),
     ("Line Parameter", "G4 Line Parameter", "line"),
     ("Specular Mask", "G4 Specular Mask", "specular_mask"),
     ("Specular Shape", "G4 Specular Shape", "specular"),
@@ -4394,6 +4441,8 @@ def set_character_texture_node_image(material, node_name: str, role: str, path: 
     elif role == "line":
         material["g4_line_texture"] = str(path)
         material["g4_line_informative"] = max(image.size) > 8
+    elif role == "ramp":
+        material["g4_toon_ramp_texture"] = str(path)
     return True
 
 

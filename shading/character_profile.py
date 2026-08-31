@@ -31,6 +31,7 @@ class CharacterShaderProfile:
                 ShaderParameter("base_color", "color", native_source="G4TX"),
                 ShaderParameter("normal_dxt5nm", "normal", native_source="G4TX"),
                 ShaderParameter("mask_rgb", "color", native_source="G4TX"),
+                ShaderParameter("toon_ramp", "color", native_source="G4TX dp/ramp (optional)"),
                 ShaderParameter("rim", "float", native_source="shader variant"),
                 ShaderParameter("specular", "float", native_source="shader variant"),
             ),
