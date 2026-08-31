@@ -12,7 +12,9 @@ from formats.g4ma import build_g4ma_effect_bindings
 from formats.g4mt import G4MTAnimationBank, G4MTChannel, G4MTHeader, G4MTTarget, G4MTTargetInfo, crc32b
 from shading.character_profile import characterize_current_toon_shader
 from shading.character_textures import (
+    CHARACTER_RAMP_BANDS,
     character_data_roots,
+    character_ramp_band_uv,
     character_shader_texture_containers,
     character_texture_base_key,
     character_texture_role,
@@ -82,6 +84,12 @@ class NativeFoundationTests(unittest.TestCase):
         self.assertEqual(character_texture_base_key("c06030110_20dp"), "c06030110_20")
         self.assertEqual(character_texture_role("chrGrd_01.dds"), "ramp")
         self.assertTrue(is_global_character_ramp_name("chrGrd_01.dds"))
+
+    def test_character_ramp_candidates_use_lower_pale_and_lilac_bands(self):
+        self.assertEqual(CHARACTER_RAMP_BANDS["main"], (240, 255))
+        self.assertEqual(CHARACTER_RAMP_BANDS["occlusion_depth"], (224, 231))
+        self.assertAlmostEqual(character_ramp_band_uv("main"), 0.03125)
+        self.assertAlmostEqual(character_ramp_band_uv("occlusion_depth"), 0.109375)
 
     def test_shared_character_shader_container_accepts_raw_parent(self):
         with tempfile.TemporaryDirectory() as temporary:
