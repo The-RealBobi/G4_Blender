@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 3, 1),
+    "version": (1, 3, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -75,6 +75,7 @@ if __package__:
     from .shading.character_textures import (
         character_texture_base_key,
         character_texture_role,
+        character_ramp_band_uv,
         is_global_character_ramp_name,
     )
     from .shading.map_surfaces import classify_map_surface
@@ -86,6 +87,7 @@ else:
     from shading.character_textures import (
         character_texture_base_key,
         character_texture_role,
+        character_ramp_band_uv,
         is_global_character_ramp_name,
     )
     from shading.map_surfaces import classify_map_surface
@@ -1665,10 +1667,12 @@ def apply_level5_toon_shader(
             ramp_coordinates = nodes.new("ShaderNodeCombineXYZ")
             ramp_coordinates.name = "G4 Toon Ramp Coordinates"
             ramp_coordinates.location = (-160, 40)
-            # chrGrd_01 is a padded 2D container; its authored colour strip
-            # occupies the lower V band after DDS orientation is read by
-            # Blender. Sampling the centre returns the neutral padding.
-            ramp_coordinates.inputs["Y"].default_value = 0.125
+            # chrGrd_01 is a padded 2D container. The measured lilac band is
+            # the conservative candidate for dark _oc/depth marks; the lower
+            # pale band is the neutral main/highlight candidate.
+            ramp_coordinates.inputs["Y"].default_value = character_ramp_band_uv(
+                "occlusion_depth", ramp_image.size[1]
+            )
             ramp_coordinates.inputs["Z"].default_value = 0.0
             links.new(toon_factor, ramp_coordinates.inputs["X"])
             links.new(ramp_coordinates.outputs["Vector"], ramp_texture.inputs["Vector"])
@@ -1739,6 +1743,63 @@ def apply_level5_toon_shader(
     links.new(color_output, colored_light.inputs[1])
     links.new(light_tint.outputs["Color"], colored_light.inputs[2])
     color_output = colored_light.outputs["Color"]
+
+    ramp_depth_strength = None
+    ramp_depth_mask = None
+    if ramp_texture is not None and occlusion_channels is not None:
+        # The native _oc fixtures use R/G as a duplicated depth signal. Use
+        # the red channel only, invert it, and keep the result as an explicit
+        # approximation: no native binding currently proves that chrGrd_01
+        # itself is sampled here.
+        ramp_depth_invert = nodes.new("ShaderNodeMath")
+        ramp_depth_invert.name = "G4 Occlusion Ramp Depth Invert"
+        ramp_depth_invert.operation = "SUBTRACT"
+        ramp_depth_invert.inputs[0].default_value = 1.0
+        ramp_depth_invert.location = (920, 680)
+        links.new(occlusion_channels.outputs["Red"], ramp_depth_invert.inputs[1])
+
+        ramp_depth_mask = nodes.new("ShaderNodeValToRGB")
+        ramp_depth_mask.name = "G4 Occlusion Ramp Depth Mask"
+        ramp_depth_mask.label = "Approximate dark _oc depth marks"
+        ramp_depth_mask.color_ramp.interpolation = "CONSTANT"
+        ramp_depth_mask.color_ramp.elements[0].position = 0.42
+        ramp_depth_mask.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
+        ramp_depth_mask.color_ramp.elements[1].position = 0.58
+        ramp_depth_mask.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
+        ramp_depth_mask.location = (1100, 680)
+        links.new(ramp_depth_invert.outputs[0], ramp_depth_mask.inputs["Fac"])
+
+        ramp_depth_strength = nodes.new("ShaderNodeValue")
+        ramp_depth_strength.name = "G4 Occlusion Ramp Depth Strength"
+        ramp_depth_strength.label = "Approximate lilac depth mix"
+        ramp_depth_strength.outputs[0].default_value = 0.28
+        ramp_depth_strength.location = (1100, 820)
+
+        ramp_depth_factor = nodes.new("ShaderNodeMath")
+        ramp_depth_factor.name = "G4 Occlusion Ramp Depth Factor"
+        ramp_depth_factor.operation = "MULTIPLY"
+        ramp_depth_factor.location = (1280, 720)
+        links.new(ramp_depth_mask.outputs["Color"], ramp_depth_factor.inputs[0])
+        links.new(ramp_depth_strength.outputs[0], ramp_depth_factor.inputs[1])
+
+        ramp_depth_tint = nodes.new("ShaderNodeMixRGB")
+        ramp_depth_tint.name = "G4 Occlusion Ramp Depth Tint"
+        ramp_depth_tint.label = "chrGrd_01 lilac candidate on dark _oc"
+        ramp_depth_tint.blend_type = "MULTIPLY"
+        ramp_depth_tint.inputs[0].default_value = 1.0
+        ramp_depth_tint.location = (1460, 420)
+        links.new(color_output, ramp_depth_tint.inputs[1])
+        links.new(ramp_texture.outputs["Color"], ramp_depth_tint.inputs[2])
+
+        ramp_depth_composite = nodes.new("ShaderNodeMixRGB")
+        ramp_depth_composite.name = "G4 Occlusion Ramp Depth Composite"
+        ramp_depth_composite.label = "Approximate _oc depth tint"
+        ramp_depth_composite.blend_type = "MIX"
+        ramp_depth_composite.location = (1640, 420)
+        links.new(ramp_depth_factor.outputs[0], ramp_depth_composite.inputs[0])
+        links.new(color_output, ramp_depth_composite.inputs[1])
+        links.new(ramp_depth_tint.outputs["Color"], ramp_depth_composite.inputs[2])
+        color_output = ramp_depth_composite.outputs["Color"]
 
     line_path = first_variant_path(variants, "line")
     line_informative = False
@@ -1966,7 +2027,7 @@ def apply_level5_toon_shader(
 
         ramp_sample_preview = nodes.new("ShaderNodeMixRGB")
         ramp_sample_preview.name = "G4 Toon Ramp Sample Preview"
-        ramp_sample_preview.label = "Sampled by Toon light"
+        ramp_sample_preview.label = "Diagnostic sample by Toon light"
         ramp_sample_preview.blend_type = "MIX"
         ramp_sample_preview.inputs[0].default_value = 0.0
         ramp_sample_preview.location = (700, 1040)
@@ -1975,7 +2036,7 @@ def apply_level5_toon_shader(
 
         ramp_full_preview = nodes.new("ShaderNodeMixRGB")
         ramp_full_preview.name = "G4 Toon Ramp Full Composite"
-        ramp_full_preview.label = "Full image on model UVs"
+        ramp_full_preview.label = "Diagnostic image on model UVs"
         ramp_full_preview.blend_type = "MIX"
         ramp_full_preview.inputs[0].default_value = 0.0
         ramp_full_preview.location = (880, 1040)
@@ -2028,6 +2089,11 @@ def apply_level5_toon_shader(
         else "diagnostic_only_unverified_material_texture"
         if ramp_path is not None
         else "scene_gradient_pending"
+    )
+    material["g4_toon_ramp_main_band"] = "rows 240-255: neutral pale main/highlight candidate"
+    material["g4_toon_ramp_depth_band"] = "rows 224-231: lilac candidate selected by dark _oc"
+    material["g4_toon_ramp_depth_mapping"] = (
+        "approximate_occlusion_depth" if ramp_depth_strength is not None else "unavailable"
     )
     material["g4_toon_scene_gradient"] = "in_texGrd: texture2dms scene framebuffer; binding pending"
     annotate_current_toon_material(material, variants)
@@ -4713,16 +4779,21 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
             box.label(text=f"{image.name}  {image.size[0]} x {image.size[1]}")
             binding = context.material.get("g4_toon_ramp_binding", "")
             if binding == "diagnostic_only_global_g4tx":
-                box.label(text="chrGrd_01: shared G4TX diagnostic, not body-part mapping", icon="INFO")
+                box.label(text="chrGrd_01: shared G4TX with conservative band candidates", icon="INFO")
             elif binding == "diagnostic_only_unverified_material_texture":
                 box.label(text="Optional fifth map: binding not proven by native shader", icon="INFO")
             else:
                 box.label(text="Native in_texGrd is a scene gradient; resource still pending", icon="INFO")
             box.label(text="X = light response; V = gradation row", icon="INFO")
-            box.label(text="No fixed skin, hair or clothing band has been proven", icon="INFO")
+            box.label(text="Pale lower band = main/highlight candidate", icon="INFO")
+            box.label(text="Lilac band = dark _oc depth candidate", icon="INFO")
             box.template_ID(ramp, "image", open="image.open")
             if ramp_coordinates is not None:
-                box.prop(ramp_coordinates.inputs["Y"], "default_value", text="Ramp V")
+                box.prop(ramp_coordinates.inputs["Y"], "default_value", text="Depth Ramp V")
+            depth_strength = nodes.get("G4 Occlusion Ramp Depth Strength")
+            if depth_strength is not None:
+                box.prop(depth_strength.outputs[0], "default_value", text="Depth Ramp Mix")
+                box.label(text="Approximate: dark _oc areas receive the lilac band", icon="INFO")
             if ramp_sample_preview is not None and ramp_full_preview is not None:
                 box.label(text="Inspect affected zones")
                 row = box.row(align=True)
