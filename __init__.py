@@ -71,6 +71,9 @@ def suspended_global_undo(context):
 if __package__:
     from . import g4_port_addon
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
+    from .shading.character_profile import annotate_current_toon_material
+    from .shading.map_surfaces import classify_map_surface
+    from .shading.map_nodes import apply_map_surface_nodes
 else:
     import g4_port_addon
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
