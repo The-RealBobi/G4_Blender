@@ -31,13 +31,16 @@ class CharacterShaderProfile:
                 ShaderParameter("base_color", "color", native_source="G4TX"),
                 ShaderParameter("normal_dxt5nm", "normal", native_source="G4TX"),
                 ShaderParameter("mask_rgb", "color", native_source="G4TX"),
-                ShaderParameter("toon_ramp", "color", native_source="G4TX dp/ramp (optional)"),
+                ShaderParameter("toon_ramp", "color", native_source="G4TX dp/ramp (optional, diagnostic until bound)"),
+                ShaderParameter("scene_gradient", "texture", native_source="DXBC in_texGrd texture2dms scene framebuffer", supported=False),
+                ShaderParameter("scene_gradient_params", "vector", native_source="light_data.cfg.bin u_charaGrTParam", supported=False),
                 ShaderParameter("rim", "float", native_source="shader variant"),
                 ShaderParameter("specular", "float", native_source="shader variant"),
             ),
             notes=(
                 "Preserve the existing apply_level5_toon_shader node graph.",
                 "ShaderToRGB requires EEVEE; other engines receive a marked fallback.",
+                "chrGrd_01 is exposed for inspection; native chr_toon uses a scene gradient input whose binding is not reconstructed here.",
             ),
         )
 
