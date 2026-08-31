@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 0, 23),
+    "version": (1, 3, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1647,6 +1647,7 @@ def apply_level5_toon_shader(
     # absent.  This keeps ordinary four-map materials in the same shading
     # path while allowing the authored palette to survive.
     ramp_path = first_variant_path(variants, "ramp")
+    ramp_texture = None
     ramp_color = shadow_mix.outputs["Color"]
     if ramp_path is not None:
         ramp_image = load_image(ramp_path)
@@ -1957,6 +1958,40 @@ def apply_level5_toon_shader(
     links.new(wet_diffuse.outputs["Color"], wet_add.inputs[1])
     links.new(wet_glossy_ramp.outputs["Color"], wet_add.inputs[2])
     color_output = wet_add.outputs["Color"]
+
+    if ramp_texture is not None:
+        ramp_uv_preview = nodes.new("ShaderNodeTexCoord")
+        ramp_uv_preview.name = "G4 Toon Ramp UV Preview"
+        ramp_uv_preview.label = "Full chrGrd_01 image"
+        ramp_uv_preview.location = (300, 1040)
+        ramp_full_texture = nodes.new("ShaderNodeTexImage")
+        ramp_full_texture.name = "G4 Toon Ramp Full Preview"
+        ramp_full_texture.label = "Full chrGrd_01 image"
+        ramp_full_texture.image = ramp_texture.image
+        ramp_full_texture.interpolation = "Linear"
+        ramp_full_texture.extension = "EXTEND"
+        ramp_full_texture.location = (500, 1040)
+        links.new(ramp_uv_preview.outputs["UV"], ramp_full_texture.inputs["Vector"])
+
+        ramp_sample_preview = nodes.new("ShaderNodeMixRGB")
+        ramp_sample_preview.name = "G4 Toon Ramp Sample Preview"
+        ramp_sample_preview.label = "Sampled by Toon light"
+        ramp_sample_preview.blend_type = "MIX"
+        ramp_sample_preview.inputs[0].default_value = 0.0
+        ramp_sample_preview.location = (700, 1040)
+        links.new(color_output, ramp_sample_preview.inputs[1])
+        links.new(ramp_texture.outputs["Color"], ramp_sample_preview.inputs[2])
+
+        ramp_full_preview = nodes.new("ShaderNodeMixRGB")
+        ramp_full_preview.name = "G4 Toon Ramp Full Composite"
+        ramp_full_preview.label = "Full image on model UVs"
+        ramp_full_preview.blend_type = "MIX"
+        ramp_full_preview.inputs[0].default_value = 0.0
+        ramp_full_preview.location = (880, 1040)
+        links.new(ramp_sample_preview.outputs["Color"], ramp_full_preview.inputs[1])
+        links.new(ramp_full_texture.outputs["Color"], ramp_full_preview.inputs[2])
+        color_output = ramp_full_preview.outputs["Color"]
+        material["g4_toon_ramp_preview"] = "NORMAL"
 
     emission = nodes.new("ShaderNodeEmission")
     emission.location = (820, 180)
@@ -4573,6 +4608,56 @@ class OBJECT_PT_level5_character_textures(bpy.types.Panel):
                 box.label(text="No editable texture nodes found", icon="INFO")
 
 
+def set_toon_ramp_preview(material, mode: str) -> bool:
+    """Switch the optional Character ramp diagnostics without rebuilding nodes."""
+    if material is None or material.node_tree is None:
+        return False
+    nodes = material.node_tree.nodes
+    sample_preview = nodes.get("G4 Toon Ramp Sample Preview")
+    full_preview = nodes.get("G4 Toon Ramp Full Composite")
+    if sample_preview is None or full_preview is None:
+        return False
+    if mode == "SAMPLED":
+        sample_preview.inputs[0].default_value = 1.0
+        full_preview.inputs[0].default_value = 0.0
+    elif mode == "FULL":
+        sample_preview.inputs[0].default_value = 0.0
+        full_preview.inputs[0].default_value = 1.0
+    else:
+        sample_preview.inputs[0].default_value = 0.0
+        full_preview.inputs[0].default_value = 0.0
+        mode = "NORMAL"
+    material["g4_toon_ramp_preview"] = mode
+    return True
+
+
+class MATERIAL_OT_level5_toon_ramp_preview(Operator):
+    bl_idname = "material.level5_toon_ramp_preview"
+    bl_label = "Set Toon Ramp Preview"
+    bl_description = "Show the normal material, the light-sampled ramp, or the full ramp image"
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=(
+            ("NORMAL", "Normal", "Use the regular Character material"),
+            ("SAMPLED", "Sampled", "Show the ramp colour selected by Toon lighting"),
+            ("FULL", "Full Texture", "Show the complete ramp image through the model UVs"),
+        ),
+        default="NORMAL",
+        options={"HIDDEN"},
+    )
+
+    def execute(self, context):
+        material = getattr(context, "material", None) or getattr(
+            getattr(context, "object", None), "active_material", None
+        )
+        if not set_toon_ramp_preview(material, self.mode):
+            self.report({"ERROR"}, "This material has no Character ramp diagnostics")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 class MATERIAL_PT_level5_character(bpy.types.Panel):
     bl_label = "Level-5 Character"
     bl_idname = "MATERIAL_PT_level5_character"
@@ -4605,12 +4690,38 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
         dual_toon = nodes.get("G4 Dual Toon Ramp")
         if dual_toon is not None:
             box.prop(dual_toon.inputs[0], "default_value", text="Secondary Shadow")
+        shadow_primary = nodes.get("G4 Shadow Color 0")
+        if shadow_primary is not None:
+            box.prop(shadow_primary.color_ramp.elements[1], "position", text="Shadow Band 0")
+        shadow_secondary = nodes.get("G4 Shadow Color 1")
+        if shadow_secondary is not None:
+            box.prop(shadow_secondary.color_ramp.elements[1], "position", text="Shadow Band 1")
         highlight = nodes.get("G4 Highlight")
         if highlight is not None:
             box.prop(highlight.inputs[2], "default_value", text="Highlight Color")
         underlight = nodes.get("G4 Under Light")
         if underlight is not None:
             box.prop(underlight.inputs[2], "default_value", text="Under-light Color")
+
+        ramp = nodes.get("G4 Toon Ramp")
+        ramp_coordinates = nodes.get("G4 Toon Ramp Coordinates")
+        ramp_sample_preview = nodes.get("G4 Toon Ramp Sample Preview")
+        ramp_full_preview = nodes.get("G4 Toon Ramp Full Composite")
+        if ramp is not None and ramp.image is not None:
+            box = layout.box()
+            box.label(text="Toon Ramp", icon="IMAGE_DATA")
+            image = ramp.image
+            box.label(text=f"{image.name}  {image.size[0]} x {image.size[1]}")
+            box.template_ID(ramp, "image", open="image.open")
+            if ramp_coordinates is not None:
+                box.prop(ramp_coordinates.inputs["Y"], "default_value", text="Ramp V")
+            if ramp_sample_preview is not None and ramp_full_preview is not None:
+                box.label(text="Inspect affected zones")
+                row = box.row(align=True)
+                for mode, label in (("NORMAL", "Normal"), ("SAMPLED", "Sampled"), ("FULL", "Full")):
+                    operator = row.operator(MATERIAL_OT_level5_toon_ramp_preview.bl_idname, text=label)
+                    operator.mode = mode
+                box.label(text="Sampled uses Toon light; Full uses model UVs", icon="INFO")
 
         box = layout.box()
         box.label(text="Surface", icon="MATERIAL")
@@ -4650,6 +4761,7 @@ classes = [
     OBJECT_PT_level5_mask_recolor,
     OBJECT_OT_level5_load_character_g4tx,
     OBJECT_PT_level5_character_textures,
+    MATERIAL_OT_level5_toon_ramp_preview,
     MATERIAL_PT_level5_character,
 ]
 
