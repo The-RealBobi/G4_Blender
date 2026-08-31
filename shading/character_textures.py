@@ -8,29 +8,6 @@ from pathlib import Path
 
 GLOBAL_CHARACTER_RAMP_NAMES = frozenset({"chrgrd", "chrgrd_01"})
 
-# Measured from the native 512x256 ``chrGrd_01`` in the Victory Road dump.
-# The texture is sampled with Blender's V=0 at the lower edge, so these are
-# UV-space candidates rather than raw top-down image coordinates.
-CHARACTER_RAMP_BANDS = {
-    "main": (240, 255),
-    "occlusion_depth": (224, 231),
-}
-
-
-def character_ramp_band_uv(band: str, image_height: int = 256) -> float:
-    """Return the normalized V centre for a measured ``chrGrd_01`` band."""
-
-    if image_height <= 0:
-        raise ValueError("image_height must be positive")
-    try:
-        start, end = CHARACTER_RAMP_BANDS[band]
-    except KeyError as exc:
-        raise ValueError(f"unknown Character ramp band: {band}") from exc
-    # Scale the measured row position if a compatible container has a
-    # different height, then address the centre of the texel band.
-    centre_ratio = ((start + end + 1) * 0.5) / 256.0
-    return max(0.0, min(1.0, 1.0 - centre_ratio))
-
 
 def character_data_roots(raw_root: str | Path) -> list[Path]:
     """Return data roots for either a dump's ``raw`` folder or ``raw/data``."""
@@ -95,9 +72,8 @@ def is_global_character_ramp_name(name: str | Path) -> bool:
 def character_texture_role(name: str | Path) -> str:
     """Return the role encoded by a Character texture name.
 
-    ``dp`` is kept as a ramp alias because older Character material tables use
-    that short suffix for the fifth toon-control texture.  It is optional:
-    most extracted Character containers do not carry it.
+    Ramp detection remains a compatibility contract for imported texture
+    inventories, but the legacy Character material does not consume it.
     """
 
     stem = _texture_stem(name)
@@ -161,10 +137,8 @@ def _texture_stem(name: str | Path) -> str:
 
 
 __all__ = [
-    "CHARACTER_RAMP_BANDS",
     "GLOBAL_CHARACTER_RAMP_NAMES",
     "character_data_roots",
-    "character_ramp_band_uv",
     "character_shader_texture_containers",
     "character_texture_base_key",
     "character_texture_role",

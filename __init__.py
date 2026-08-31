@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 3, 2),
+    "version": (1, 3, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -75,8 +75,6 @@ if __package__:
     from .shading.character_textures import (
         character_texture_base_key,
         character_texture_role,
-        character_ramp_band_uv,
-        is_global_character_ramp_name,
     )
     from .shading.map_surfaces import classify_map_surface
     from .shading.map_nodes import apply_map_surface_nodes
@@ -87,8 +85,6 @@ else:
     from shading.character_textures import (
         character_texture_base_key,
         character_texture_role,
-        character_ramp_band_uv,
-        is_global_character_ramp_name,
     )
     from shading.map_surfaces import classify_map_surface
     from shading.map_nodes import apply_map_surface_nodes
@@ -1294,8 +1290,6 @@ def build_texture_index(paths: list[Path]) -> dict[str, dict[str, Path]]:
     for texture in paths:
         for key in texture_base_keys(texture):
             by_key.setdefault(key, {})[texture_role(texture)] = texture
-        if texture_role(texture) == "ramp" and is_global_character_ramp_name(texture):
-            by_key.setdefault("__character_shader__", {})["ramp"] = texture
     return by_key
 
 
@@ -1320,8 +1314,6 @@ def material_variants_from_index(material_name: str, base_path: Path, by_key: di
     variants: dict[str, Path] = {}
     for key in material_variant_keys(material_name, base_path):
         variants.update(by_key.get(key, {}))
-    if "ramp" not in variants:
-        variants.update(by_key.get("__character_shader__", {}))
     return variants
 
 
@@ -1643,49 +1635,13 @@ def apply_level5_toon_shader(
     links.new(shadow_primary.outputs["Color"], shadow_mix.inputs[1])
     links.new(shadow_secondary.outputs["Color"], shadow_mix.inputs[2])
 
-    # Some Character containers expose a fifth image such as ``dp`` or the
-    # shared ``chrGrd_01``.  Keep it visible for inspection, but do not feed it
-    # into the material output by name alone: the native chr_toon shaders bind
-    # ``in_texGrd`` as a multisampled scene resource, not as a G4TX albedo map.
-    ramp_path = first_variant_path(variants, "ramp")
-    ramp_texture = None
-    ramp_color = shadow_mix.outputs["Color"]
-    if ramp_path is not None:
-        ramp_image = load_image(ramp_path)
-        if ramp_image is not None:
-            try:
-                ramp_image.colorspace_settings.name = "sRGB"
-            except (AttributeError, TypeError):
-                pass
-            ramp_texture = nodes.new("ShaderNodeTexImage")
-            ramp_texture.name = "G4 Toon Ramp"
-            ramp_texture.label = f"Diagnostic only: {ramp_path.name}"
-            ramp_texture.image = ramp_image
-            ramp_texture.interpolation = "Linear"
-            ramp_texture.extension = "EXTEND"
-            ramp_texture.location = (20, 40)
-            ramp_coordinates = nodes.new("ShaderNodeCombineXYZ")
-            ramp_coordinates.name = "G4 Toon Ramp Coordinates"
-            ramp_coordinates.location = (-160, 40)
-            # chrGrd_01 is a padded 2D container. The measured lilac band is
-            # the conservative candidate for dark _oc/depth marks; the lower
-            # pale band is the neutral main/highlight candidate.
-            ramp_coordinates.inputs["Y"].default_value = character_ramp_band_uv(
-                "occlusion_depth", ramp_image.size[1]
-            )
-            ramp_coordinates.inputs["Z"].default_value = 0.0
-            links.new(toon_factor, ramp_coordinates.inputs["X"])
-            links.new(ramp_coordinates.outputs["Vector"], ramp_texture.inputs["Vector"])
-        elif debug is not None:
-            debug.append(f"[toon] {material.name}: failed toon ramp {ramp_path.name}")
-
     lit = nodes.new("ShaderNodeMixRGB")
     lit.name = "G4 Cel Diffuse"
     lit.blend_type = "MULTIPLY"
     lit.inputs[0].default_value = 1.0
     lit.location = (60, 250)
     links.new(base_color, lit.inputs[1])
-    links.new(ramp_color, lit.inputs[2])
+    links.new(shadow_mix.outputs["Color"], lit.inputs[2])
     color_output = lit.outputs["Color"]
 
     if occlusion_channels is not None:
@@ -1743,63 +1699,6 @@ def apply_level5_toon_shader(
     links.new(color_output, colored_light.inputs[1])
     links.new(light_tint.outputs["Color"], colored_light.inputs[2])
     color_output = colored_light.outputs["Color"]
-
-    ramp_depth_strength = None
-    ramp_depth_mask = None
-    if ramp_texture is not None and occlusion_channels is not None:
-        # The native _oc fixtures use R/G as a duplicated depth signal. Use
-        # the red channel only, invert it, and keep the result as an explicit
-        # approximation: no native binding currently proves that chrGrd_01
-        # itself is sampled here.
-        ramp_depth_invert = nodes.new("ShaderNodeMath")
-        ramp_depth_invert.name = "G4 Occlusion Ramp Depth Invert"
-        ramp_depth_invert.operation = "SUBTRACT"
-        ramp_depth_invert.inputs[0].default_value = 1.0
-        ramp_depth_invert.location = (920, 680)
-        links.new(occlusion_channels.outputs["Red"], ramp_depth_invert.inputs[1])
-
-        ramp_depth_mask = nodes.new("ShaderNodeValToRGB")
-        ramp_depth_mask.name = "G4 Occlusion Ramp Depth Mask"
-        ramp_depth_mask.label = "Approximate dark _oc depth marks"
-        ramp_depth_mask.color_ramp.interpolation = "CONSTANT"
-        ramp_depth_mask.color_ramp.elements[0].position = 0.42
-        ramp_depth_mask.color_ramp.elements[0].color = (0.0, 0.0, 0.0, 1.0)
-        ramp_depth_mask.color_ramp.elements[1].position = 0.58
-        ramp_depth_mask.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
-        ramp_depth_mask.location = (1100, 680)
-        links.new(ramp_depth_invert.outputs[0], ramp_depth_mask.inputs["Fac"])
-
-        ramp_depth_strength = nodes.new("ShaderNodeValue")
-        ramp_depth_strength.name = "G4 Occlusion Ramp Depth Strength"
-        ramp_depth_strength.label = "Approximate lilac depth mix"
-        ramp_depth_strength.outputs[0].default_value = 0.28
-        ramp_depth_strength.location = (1100, 820)
-
-        ramp_depth_factor = nodes.new("ShaderNodeMath")
-        ramp_depth_factor.name = "G4 Occlusion Ramp Depth Factor"
-        ramp_depth_factor.operation = "MULTIPLY"
-        ramp_depth_factor.location = (1280, 720)
-        links.new(ramp_depth_mask.outputs["Color"], ramp_depth_factor.inputs[0])
-        links.new(ramp_depth_strength.outputs[0], ramp_depth_factor.inputs[1])
-
-        ramp_depth_tint = nodes.new("ShaderNodeMixRGB")
-        ramp_depth_tint.name = "G4 Occlusion Ramp Depth Tint"
-        ramp_depth_tint.label = "chrGrd_01 lilac candidate on dark _oc"
-        ramp_depth_tint.blend_type = "MULTIPLY"
-        ramp_depth_tint.inputs[0].default_value = 1.0
-        ramp_depth_tint.location = (1460, 420)
-        links.new(color_output, ramp_depth_tint.inputs[1])
-        links.new(ramp_texture.outputs["Color"], ramp_depth_tint.inputs[2])
-
-        ramp_depth_composite = nodes.new("ShaderNodeMixRGB")
-        ramp_depth_composite.name = "G4 Occlusion Ramp Depth Composite"
-        ramp_depth_composite.label = "Approximate _oc depth tint"
-        ramp_depth_composite.blend_type = "MIX"
-        ramp_depth_composite.location = (1640, 420)
-        links.new(ramp_depth_factor.outputs[0], ramp_depth_composite.inputs[0])
-        links.new(color_output, ramp_depth_composite.inputs[1])
-        links.new(ramp_depth_tint.outputs["Color"], ramp_depth_composite.inputs[2])
-        color_output = ramp_depth_composite.outputs["Color"]
 
     line_path = first_variant_path(variants, "line")
     line_informative = False
@@ -2011,40 +1910,6 @@ def apply_level5_toon_shader(
     links.new(wet_glossy_ramp.outputs["Color"], wet_add.inputs[2])
     color_output = wet_add.outputs["Color"]
 
-    if ramp_texture is not None:
-        ramp_uv_preview = nodes.new("ShaderNodeTexCoord")
-        ramp_uv_preview.name = "G4 Toon Ramp UV Preview"
-        ramp_uv_preview.label = "Full chrGrd_01 image"
-        ramp_uv_preview.location = (300, 1040)
-        ramp_full_texture = nodes.new("ShaderNodeTexImage")
-        ramp_full_texture.name = "G4 Toon Ramp Full Preview"
-        ramp_full_texture.label = "Full chrGrd_01 image"
-        ramp_full_texture.image = ramp_texture.image
-        ramp_full_texture.interpolation = "Linear"
-        ramp_full_texture.extension = "EXTEND"
-        ramp_full_texture.location = (500, 1040)
-        links.new(ramp_uv_preview.outputs["UV"], ramp_full_texture.inputs["Vector"])
-
-        ramp_sample_preview = nodes.new("ShaderNodeMixRGB")
-        ramp_sample_preview.name = "G4 Toon Ramp Sample Preview"
-        ramp_sample_preview.label = "Diagnostic sample by Toon light"
-        ramp_sample_preview.blend_type = "MIX"
-        ramp_sample_preview.inputs[0].default_value = 0.0
-        ramp_sample_preview.location = (700, 1040)
-        links.new(color_output, ramp_sample_preview.inputs[1])
-        links.new(ramp_texture.outputs["Color"], ramp_sample_preview.inputs[2])
-
-        ramp_full_preview = nodes.new("ShaderNodeMixRGB")
-        ramp_full_preview.name = "G4 Toon Ramp Full Composite"
-        ramp_full_preview.label = "Diagnostic image on model UVs"
-        ramp_full_preview.blend_type = "MIX"
-        ramp_full_preview.inputs[0].default_value = 0.0
-        ramp_full_preview.location = (880, 1040)
-        links.new(ramp_sample_preview.outputs["Color"], ramp_full_preview.inputs[1])
-        links.new(ramp_full_texture.outputs["Color"], ramp_full_preview.inputs[2])
-        color_output = ramp_full_preview.outputs["Color"]
-        material["g4_toon_ramp_preview"] = "NORMAL"
-
     emission = nodes.new("ShaderNodeEmission")
     emission.location = (820, 180)
     emission.inputs["Strength"].default_value = 1.0
@@ -2082,19 +1947,6 @@ def apply_level5_toon_shader(
     material["g4_normal_texture"] = str(normal_path) if normal_path is not None else ""
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
-    material["g4_toon_ramp_texture"] = str(ramp_path) if ramp_path is not None else ""
-    material["g4_toon_ramp_binding"] = (
-        "diagnostic_only_global_g4tx"
-        if ramp_path is not None and is_global_character_ramp_name(ramp_path)
-        else "diagnostic_only_unverified_material_texture"
-        if ramp_path is not None
-        else "scene_gradient_pending"
-    )
-    material["g4_toon_ramp_main_band"] = "rows 240-255: neutral pale main/highlight candidate"
-    material["g4_toon_ramp_depth_band"] = "rows 224-231: lilac candidate selected by dark _oc"
-    material["g4_toon_ramp_depth_mapping"] = (
-        "approximate_occlusion_depth" if ramp_depth_strength is not None else "unavailable"
-    )
     material["g4_toon_scene_gradient"] = "in_texGrd: texture2dms scene framebuffer; binding pending"
     annotate_current_toon_material(material, variants)
     if debug is not None:
@@ -4558,8 +4410,6 @@ def set_character_texture_node_image(material, node_name: str, role: str, path: 
     elif role == "line":
         material["g4_line_texture"] = str(path)
         material["g4_line_informative"] = max(image.size) > 8
-    elif role == "ramp":
-        material["g4_toon_ramp_texture"] = str(path)
     return True
 
 
@@ -4673,56 +4523,6 @@ class OBJECT_PT_level5_character_textures(bpy.types.Panel):
                 box.label(text="No editable texture nodes found", icon="INFO")
 
 
-def set_toon_ramp_preview(material, mode: str) -> bool:
-    """Switch the optional Character ramp diagnostics without rebuilding nodes."""
-    if material is None or material.node_tree is None:
-        return False
-    nodes = material.node_tree.nodes
-    sample_preview = nodes.get("G4 Toon Ramp Sample Preview")
-    full_preview = nodes.get("G4 Toon Ramp Full Composite")
-    if sample_preview is None or full_preview is None:
-        return False
-    if mode == "SAMPLED":
-        sample_preview.inputs[0].default_value = 1.0
-        full_preview.inputs[0].default_value = 0.0
-    elif mode == "FULL":
-        sample_preview.inputs[0].default_value = 0.0
-        full_preview.inputs[0].default_value = 1.0
-    else:
-        sample_preview.inputs[0].default_value = 0.0
-        full_preview.inputs[0].default_value = 0.0
-        mode = "NORMAL"
-    material["g4_toon_ramp_preview"] = mode
-    return True
-
-
-class MATERIAL_OT_level5_toon_ramp_preview(Operator):
-    bl_idname = "material.level5_toon_ramp_preview"
-    bl_label = "Set Toon Ramp Preview"
-    bl_description = "Show the normal material, the light-sampled ramp, or the full ramp image"
-    bl_options = {"REGISTER", "UNDO"}
-
-    mode: EnumProperty(
-        name="Mode",
-        items=(
-            ("NORMAL", "Normal", "Use the regular Character material"),
-            ("SAMPLED", "Sampled", "Show the ramp colour selected by Toon lighting"),
-            ("FULL", "Full Texture", "Show the complete ramp image through the model UVs"),
-        ),
-        default="NORMAL",
-        options={"HIDDEN"},
-    )
-
-    def execute(self, context):
-        material = getattr(context, "material", None) or getattr(
-            getattr(context, "object", None), "active_material", None
-        )
-        if not set_toon_ramp_preview(material, self.mode):
-            self.report({"ERROR"}, "This material has no Character ramp diagnostics")
-            return {"CANCELLED"}
-        return {"FINISHED"}
-
-
 class MATERIAL_PT_level5_character(bpy.types.Panel):
     bl_label = "Level-5 Character"
     bl_idname = "MATERIAL_PT_level5_character"
@@ -4768,40 +4568,6 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
         if underlight is not None:
             box.prop(underlight.inputs[2], "default_value", text="Under-light Color")
 
-        ramp = nodes.get("G4 Toon Ramp")
-        ramp_coordinates = nodes.get("G4 Toon Ramp Coordinates")
-        ramp_sample_preview = nodes.get("G4 Toon Ramp Sample Preview")
-        ramp_full_preview = nodes.get("G4 Toon Ramp Full Composite")
-        if ramp is not None and ramp.image is not None:
-            box = layout.box()
-            box.label(text="Toon Ramp Diagnostic", icon="IMAGE_DATA")
-            image = ramp.image
-            box.label(text=f"{image.name}  {image.size[0]} x {image.size[1]}")
-            binding = context.material.get("g4_toon_ramp_binding", "")
-            if binding == "diagnostic_only_global_g4tx":
-                box.label(text="chrGrd_01: shared G4TX with conservative band candidates", icon="INFO")
-            elif binding == "diagnostic_only_unverified_material_texture":
-                box.label(text="Optional fifth map: binding not proven by native shader", icon="INFO")
-            else:
-                box.label(text="Native in_texGrd is a scene gradient; resource still pending", icon="INFO")
-            box.label(text="X = light response; V = gradation row", icon="INFO")
-            box.label(text="Pale lower band = main/highlight candidate", icon="INFO")
-            box.label(text="Lilac band = dark _oc depth candidate", icon="INFO")
-            box.template_ID(ramp, "image", open="image.open")
-            if ramp_coordinates is not None:
-                box.prop(ramp_coordinates.inputs["Y"], "default_value", text="Depth Ramp V")
-            depth_strength = nodes.get("G4 Occlusion Ramp Depth Strength")
-            if depth_strength is not None:
-                box.prop(depth_strength.outputs[0], "default_value", text="Depth Ramp Mix")
-                box.label(text="Approximate: dark _oc areas receive the lilac band", icon="INFO")
-            if ramp_sample_preview is not None and ramp_full_preview is not None:
-                box.label(text="Inspect affected zones")
-                row = box.row(align=True)
-                for mode, label in (("NORMAL", "Normal"), ("SAMPLED", "Sampled"), ("FULL", "Full")):
-                    operator = row.operator(MATERIAL_OT_level5_toon_ramp_preview.bl_idname, text=label)
-                    operator.mode = mode
-                box.label(text="These views diagnose the image; they do not assign it to skin, hair or clothes", icon="INFO")
-
         box = layout.box()
         box.label(text="Surface", icon="MATERIAL")
         normal = nodes.get("G4 Surface Normal")
@@ -4840,7 +4606,6 @@ classes = [
     OBJECT_PT_level5_mask_recolor,
     OBJECT_OT_level5_load_character_g4tx,
     OBJECT_PT_level5_character_textures,
-    MATERIAL_OT_level5_toon_ramp_preview,
     MATERIAL_PT_level5_character,
 ]
 
