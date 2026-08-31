@@ -1665,7 +1665,10 @@ def apply_level5_toon_shader(
             ramp_coordinates = nodes.new("ShaderNodeCombineXYZ")
             ramp_coordinates.name = "G4 Toon Ramp Coordinates"
             ramp_coordinates.location = (-160, 40)
-            ramp_coordinates.inputs["Y"].default_value = 0.5
+            # chrGrd_01 is a padded 2D container; its authored colour strip
+            # occupies the lower V band after DDS orientation is read by
+            # Blender. Sampling the centre returns the neutral padding.
+            ramp_coordinates.inputs["Y"].default_value = 0.125
             ramp_coordinates.inputs["Z"].default_value = 0.0
             links.new(toon_factor, ramp_coordinates.inputs["X"])
             links.new(ramp_coordinates.outputs["Vector"], ramp_texture.inputs["Vector"])
