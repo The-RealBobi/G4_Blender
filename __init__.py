@@ -1233,11 +1233,17 @@ def map_surface_kind(material_name: str, diffuse_path: Path | None = None) -> st
         return "grass"
     if "water" in text:
         return "water"
+    if "map_pbr" in text or "map/" in text:
+        return "map_pbr"
     return None
 
 
 def configure_victory_road_map_surface(material, principled, diffuse_path: Path, variants: dict, debug: list[str] | None = None) -> None:
     kind = map_surface_kind(material.name, diffuse_path)
+    profile = classify_map_surface(material.name, diffuse_path)
+    material["g4_map_surface_profile"] = profile.kind.value
+    material["g4_map_surface_fidelity"] = profile.fidelity.value
+    material["g4_map_surface_evidence"] = ";".join(profile.evidence_names)
     if kind is None:
         return
     material["g4_map_shader"] = kind
@@ -1261,6 +1267,9 @@ def configure_victory_road_map_surface(material, principled, diffuse_path: Path,
         if roughness is not None:
             roughness.default_value = 0.78
         material["g4_victory_road_terrain_mix"] = True
+    elif kind == "map_pbr":
+        material["g4_victory_road_map_pbr"] = True
+    apply_map_surface_nodes(material, principled, profile)
     if debug is not None:
         debug.append(f"[map-surface] {material.name}: configured {kind} surface")
 
@@ -1927,6 +1936,7 @@ def apply_level5_toon_shader(
     material["g4_normal_texture"] = str(normal_path) if normal_path is not None else ""
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
+    annotate_current_toon_material(material, variants)
     if debug is not None:
         debug.append(
             f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
