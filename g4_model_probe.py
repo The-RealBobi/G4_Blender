@@ -14,9 +14,9 @@ from typing import Iterable
 from xml.sax.saxutils import escape
 
 try:
-    from .shading.character_textures import character_texture_base_key, character_texture_role
+    from .shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
 except ImportError:
-    from shading.character_textures import character_texture_base_key, character_texture_role
+    from shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
 
 
 ASCII_RE = re.compile(rb"[A-Za-z0-9_]{3,}(?:_LOD[0-9])?M?")
@@ -211,8 +211,47 @@ def infer_raw_data_root(path: Path) -> Path | None:
     return None
 
 
+def normalize_configured_raw_data_root(configured: str | Path, model_path: Path | None = None) -> Path:
+    """Accept a dump's raw parent while retaining the actual data directory."""
+
+    root = Path(configured).expanduser()
+    candidates = character_data_roots(root)
+    if model_path is not None:
+        resolved_model = model_path.expanduser().resolve()
+        for candidate in candidates:
+            try:
+                resolved_model.relative_to(candidate)
+            except ValueError:
+                continue
+            return candidate
+        inferred = infer_raw_data_root(resolved_model)
+        if inferred is not None:
+            try:
+                inferred.relative_to(root.resolve())
+            except ValueError:
+                pass
+            else:
+                return inferred
+    if candidates:
+        return candidates[0]
+    return root
+
+
 def configure_raw_data_root_from_path(path: Path) -> None:
     global RAW_DATA_ROOT, CHARA_MODEL_XML, CHARA_MODEL_MAPS, CHARA_PARTS_JSON, CHARA_PARTS_DATA, UNIFORM_FAMILY_LOOKUP, UNIFORM_TEXTURE_LOOKUP, UNIFORM_FAMILY_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CACHE, UNIFORM_CRC_SKELETON_CANDIDATES
+    # Reimported ports live under dist/data, while their shared G4SK catalog
+    # belongs to the explicitly configured game dump.  Do not discard that
+    # authoritative root merely because the model itself has a data-shaped path.
+    configured = os.environ.get("LEVEL5_G4_RAW_ROOT", "")
+    if configured:
+        configured_root = normalize_configured_raw_data_root(configured, path)
+        if configured_root.is_dir():
+            try:
+                if RAW_DATA_ROOT.resolve() != configured_root.resolve():
+                    RAW_DATA_ROOT = configured_root
+            except OSError:
+                RAW_DATA_ROOT = configured_root
+            return
     inferred = infer_raw_data_root(path)
     if inferred is None:
         return
@@ -2398,6 +2437,19 @@ def find_shared_texture_containers_for_materials(path: Path, material_names: Ite
         seen.add(candidate)
         unique.append(candidate)
     return unique
+
+
+def find_character_shader_texture_containers(path: Path) -> list[Path]:
+    """Resolve the shared Character shader textures when a raw dump is available."""
+
+    for data_root in character_data_roots(RAW_DATA_ROOT):
+        try:
+            relative = path.relative_to(data_root)
+        except ValueError:
+            continue
+        if len(relative.parts) >= 2 and relative.parts[1].casefold() in {"chr", "chr_face"}:
+            return character_shader_texture_containers(RAW_DATA_ROOT)
+    return []
 
 
 def extract_g4tx(path: Path, out_dir: Path) -> list[Path]:
@@ -4760,6 +4812,7 @@ def remap_separated_shoe_palette(
 
 
 def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path:
+    configure_raw_data_root_from_path(path)
     md_data, g4mg, _ = read_model_buffers(path)
     md_info = parse_g4md(md_data, g4mg)
     source_data = path.read_bytes()
@@ -4810,6 +4863,11 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         texture_containers.extend(
             candidate
             for candidate in find_shared_texture_containers_for_materials(path, md_info.get("material_names", []))
+            if candidate not in texture_containers
+        )
+        texture_containers.extend(
+            candidate
+            for candidate in find_character_shader_texture_containers(path)
             if candidate not in texture_containers
         )
         if texture_containers:
