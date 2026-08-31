@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,15 @@ class DataRootInferenceTests(unittest.TestCase):
             )
         finally:
             probe.RAW_DATA_ROOT = old_root
+
+    def test_raw_parent_is_normalized_to_data_for_shader_lookup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw = Path(temporary) / "raw"
+            data = raw / "data"
+            model = data / "common" / "chr" / "c06030110.g4md"
+            model.parent.mkdir(parents=True)
+            data.joinpath("dx11", "chr", "shader", "texture").mkdir(parents=True)
+            self.assertEqual(probe.normalize_configured_raw_data_root(raw, model), data.resolve())
 
     def test_configured_steamapps_common_is_refined_to_versioned_data_root(self):
         old_root = probe.RAW_DATA_ROOT

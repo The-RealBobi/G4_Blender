@@ -11,7 +11,13 @@ from formats.evidence import discover_format_evidence
 from formats.g4ma import build_g4ma_effect_bindings
 from formats.g4mt import G4MTAnimationBank, G4MTChannel, G4MTHeader, G4MTTarget, G4MTTargetInfo, crc32b
 from shading.character_profile import characterize_current_toon_shader
-from shading.character_textures import character_texture_base_key, character_texture_role
+from shading.character_textures import (
+    character_data_roots,
+    character_shader_texture_containers,
+    character_texture_base_key,
+    character_texture_role,
+    is_global_character_ramp_name,
+)
 from shading.map_surfaces import MapSurfaceKind, classify_map_surface
 
 
@@ -64,6 +70,17 @@ class NativeFoundationTests(unittest.TestCase):
         self.assertEqual(character_texture_role("c06030110_20dp"), "ramp")
         self.assertEqual(character_texture_role("c06030110_20_ramp.dds"), "ramp")
         self.assertEqual(character_texture_base_key("c06030110_20dp"), "c06030110_20")
+        self.assertEqual(character_texture_role("chrGrd_01.dds"), "ramp")
+        self.assertTrue(is_global_character_ramp_name("chrGrd_01.dds"))
+
+    def test_shared_character_shader_container_accepts_raw_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            raw = Path(temporary) / "raw"
+            container = raw / "data" / "dx11" / "chr" / "shader" / "texture" / "chr_tex.g4tx"
+            container.parent.mkdir(parents=True)
+            container.write_bytes(b"G4TX")
+            self.assertEqual(character_data_roots(raw), [(raw / "data").resolve()])
+            self.assertEqual(character_shader_texture_containers(raw), [container.resolve()])
 
     def test_real_g4ma_fixture_is_parsed_when_dump_is_available(self):
         root = Path(os.environ.get("G4_DUMP_ROOT", "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_712/._work/raw"))

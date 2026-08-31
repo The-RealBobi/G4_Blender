@@ -72,14 +72,22 @@ if __package__:
     from . import g4_port_addon
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from .shading.character_profile import annotate_current_toon_material
-    from .shading.character_textures import character_texture_base_key, character_texture_role
+    from .shading.character_textures import (
+        character_texture_base_key,
+        character_texture_role,
+        is_global_character_ramp_name,
+    )
     from .shading.map_surfaces import classify_map_surface
     from .shading.map_nodes import apply_map_surface_nodes
 else:
     import g4_port_addon
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from shading.character_profile import annotate_current_toon_material
-    from shading.character_textures import character_texture_base_key, character_texture_role
+    from shading.character_textures import (
+        character_texture_base_key,
+        character_texture_role,
+        is_global_character_ramp_name,
+    )
     from shading.map_surfaces import classify_map_surface
     from shading.map_nodes import apply_map_surface_nodes
 
@@ -1284,6 +1292,8 @@ def build_texture_index(paths: list[Path]) -> dict[str, dict[str, Path]]:
     for texture in paths:
         for key in texture_base_keys(texture):
             by_key.setdefault(key, {})[texture_role(texture)] = texture
+        if texture_role(texture) == "ramp" and is_global_character_ramp_name(texture):
+            by_key.setdefault("__character_shader__", {})["ramp"] = texture
     return by_key
 
 
@@ -1308,6 +1318,8 @@ def material_variants_from_index(material_name: str, base_path: Path, by_key: di
     variants: dict[str, Path] = {}
     for key in material_variant_keys(material_name, base_path):
         variants.update(by_key.get(key, {}))
+    if "ramp" not in variants:
+        variants.update(by_key.get("__character_shader__", {}))
     return variants
 
 
@@ -2028,6 +2040,8 @@ def apply_material_texture_variants(
         fallback_variants = {}
         for key in material_variant_keys(material_name, diffuse_path):
             fallback_variants.update(by_key.get(key, {}))
+        if "ramp" not in fallback_variants:
+            fallback_variants.update(by_key.get("__character_shader__", {}))
         variants = variants_from_report(summary, material_name, diffuse_path, fallback_variants)
         if material is None:
             if debug is not None:
