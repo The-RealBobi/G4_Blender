@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 3, 0),
+    "version": (1, 3, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1641,11 +1641,10 @@ def apply_level5_toon_shader(
     links.new(shadow_primary.outputs["Color"], shadow_mix.inputs[1])
     links.new(shadow_secondary.outputs["Color"], shadow_mix.inputs[2])
 
-    # Some Character materials carry a fifth toon-control image.  Its short
-    # native name is commonly ``dp``; treat it as an optional horizontal
-    # colour ramp and leave the existing dual ramp authoritative when it is
-    # absent.  This keeps ordinary four-map materials in the same shading
-    # path while allowing the authored palette to survive.
+    # Some Character containers expose a fifth image such as ``dp`` or the
+    # shared ``chrGrd_01``.  Keep it visible for inspection, but do not feed it
+    # into the material output by name alone: the native chr_toon shaders bind
+    # ``in_texGrd`` as a multisampled scene resource, not as a G4TX albedo map.
     ramp_path = first_variant_path(variants, "ramp")
     ramp_texture = None
     ramp_color = shadow_mix.outputs["Color"]
@@ -1658,7 +1657,7 @@ def apply_level5_toon_shader(
                 pass
             ramp_texture = nodes.new("ShaderNodeTexImage")
             ramp_texture.name = "G4 Toon Ramp"
-            ramp_texture.label = ramp_path.name
+            ramp_texture.label = f"Diagnostic only: {ramp_path.name}"
             ramp_texture.image = ramp_image
             ramp_texture.interpolation = "Linear"
             ramp_texture.extension = "EXTEND"
@@ -1673,14 +1672,6 @@ def apply_level5_toon_shader(
             ramp_coordinates.inputs["Z"].default_value = 0.0
             links.new(toon_factor, ramp_coordinates.inputs["X"])
             links.new(ramp_coordinates.outputs["Vector"], ramp_texture.inputs["Vector"])
-            ramp_composite = nodes.new("ShaderNodeMixRGB")
-            ramp_composite.name = "G4 Authored Toon Ramp"
-            ramp_composite.blend_type = "MULTIPLY"
-            ramp_composite.inputs[0].default_value = 1.0
-            ramp_composite.location = (450, 80)
-            links.new(shadow_mix.outputs["Color"], ramp_composite.inputs[1])
-            links.new(ramp_texture.outputs["Color"], ramp_composite.inputs[2])
-            ramp_color = ramp_composite.outputs["Color"]
         elif debug is not None:
             debug.append(f"[toon] {material.name}: failed toon ramp {ramp_path.name}")
 
@@ -2031,6 +2022,14 @@ def apply_level5_toon_shader(
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
     material["g4_toon_ramp_texture"] = str(ramp_path) if ramp_path is not None else ""
+    material["g4_toon_ramp_binding"] = (
+        "diagnostic_only_global_g4tx"
+        if ramp_path is not None and is_global_character_ramp_name(ramp_path)
+        else "diagnostic_only_unverified_material_texture"
+        if ramp_path is not None
+        else "scene_gradient_pending"
+    )
+    material["g4_toon_scene_gradient"] = "in_texGrd: texture2dms scene framebuffer; binding pending"
     annotate_current_toon_material(material, variants)
     if debug is not None:
         debug.append(
@@ -4709,9 +4708,18 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
         ramp_full_preview = nodes.get("G4 Toon Ramp Full Composite")
         if ramp is not None and ramp.image is not None:
             box = layout.box()
-            box.label(text="Toon Ramp", icon="IMAGE_DATA")
+            box.label(text="Toon Ramp Diagnostic", icon="IMAGE_DATA")
             image = ramp.image
             box.label(text=f"{image.name}  {image.size[0]} x {image.size[1]}")
+            binding = context.material.get("g4_toon_ramp_binding", "")
+            if binding == "diagnostic_only_global_g4tx":
+                box.label(text="chrGrd_01: shared G4TX diagnostic, not body-part mapping", icon="INFO")
+            elif binding == "diagnostic_only_unverified_material_texture":
+                box.label(text="Optional fifth map: binding not proven by native shader", icon="INFO")
+            else:
+                box.label(text="Native in_texGrd is a scene gradient; resource still pending", icon="INFO")
+            box.label(text="X = light response; V = gradation row", icon="INFO")
+            box.label(text="No fixed skin, hair or clothing band has been proven", icon="INFO")
             box.template_ID(ramp, "image", open="image.open")
             if ramp_coordinates is not None:
                 box.prop(ramp_coordinates.inputs["Y"], "default_value", text="Ramp V")
@@ -4721,7 +4729,7 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
                 for mode, label in (("NORMAL", "Normal"), ("SAMPLED", "Sampled"), ("FULL", "Full")):
                     operator = row.operator(MATERIAL_OT_level5_toon_ramp_preview.bl_idname, text=label)
                     operator.mode = mode
-                box.label(text="Sampled uses Toon light; Full uses model UVs", icon="INFO")
+                box.label(text="These views diagnose the image; they do not assign it to skin, hair or clothes", icon="INFO")
 
         box = layout.box()
         box.label(text="Surface", icon="MATERIAL")

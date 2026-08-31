@@ -64,6 +64,16 @@ class NativeFoundationTests(unittest.TestCase):
         self.assertEqual(character.family, "character_toon")
         self.assertTrue(character.supports_dxt5nm)
 
+    def test_character_profile_separates_material_ramp_from_scene_gradient(self):
+        contract = characterize_current_toon_shader().as_contract()
+        ramp = contract.parameter("toon_ramp")
+        gradient = contract.parameter("scene_gradient")
+        self.assertIsNotNone(ramp)
+        self.assertIsNotNone(gradient)
+        self.assertIn("diagnostic", ramp.native_source)
+        self.assertEqual(gradient.native_source, "DXBC in_texGrd texture2dms scene framebuffer")
+        self.assertFalse(gradient.supported)
+
     def test_character_texture_contract_keeps_optional_toon_ramp_separate(self):
         self.assertEqual(character_texture_role("c06030110_20sp"), "specular")
         self.assertEqual(character_texture_role("c06030110_20spm"), "specular_mask")
