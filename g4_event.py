@@ -9,6 +9,11 @@ import struct
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+try:
+    from .formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+except ImportError:
+    from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+
 
 EVENT_ACTOR_COMMAND = 896822880
 EVENT_ATTACH_POINT_COMMAND = -1563297470
@@ -81,27 +86,109 @@ def event_command_entries_from_binary(path: Path) -> list[dict]:
     ]
 
 
-def event_light_parameters(path: Path) -> dict[str, list[float]]:
+def _event_light_value_rows(path: Path) -> list[list[object]]:
     if path.suffix.lower() == ".json":
-        entries = [
+        return [
             [value.get("Value") for value in entry.get("Values") or ()]
             for entry in json.loads(path.read_text(encoding="utf-8")).get("Entries") or ()
         ]
-    elif path.suffix.lower() == ".xml":
-        entries = [
+    if path.suffix.lower() == ".xml":
+        return [
             [value.get("Value") for value in entry.get("Values") or ()]
             for entry in entries_from_xml(path)
         ]
-    else:
-        entries = raw_cfg_entries(path)
-    result = {}
+
+    document = parse_cfgbin_file(path)
+    if not isinstance(document, CfgBinDocument):
+        return []
+    return [[value.value for value in entry.values] for entry in document.entries]
+
+
+def event_light_parameter_entries(path: Path) -> list[tuple[str, list[float]]]:
+    """Read every named character-light parameter without merging duplicates."""
+
+    entries = _event_light_value_rows(path)
+    result = []
     for values in entries:
         if not values or not isinstance(values[0], str):
             continue
         numeric = [float(value) for value in values[1:] if isinstance(value, (int, float))]
         if values[0].startswith("chara") and numeric:
-            result[values[0]] = numeric
+            result.append((values[0], numeric))
     return result
+
+
+def event_light_parameters(path: Path) -> dict[str, list[float]]:
+    """Return the legacy merged view used by material animation."""
+
+    result = {}
+    for name, numeric in event_light_parameter_entries(path):
+        result[name] = numeric
+    return result
+
+
+_EVENT_LIGHT_COMPONENTS = {
+    "charalightdir": ("direction", 3),
+    "charahighlightcolor": ("color", 4),
+    "charalightcolor": ("color", 4),
+    "charalightenergy": ("energy", 1),
+}
+_EVENT_LIGHT_NAME_RE = re.compile(r"^(.*?)(?:[_\-\[\(]?(\d+)[\]\)]?)?$", re.IGNORECASE)
+
+
+def event_light_slots(entries: list[tuple[str, list[float]]]) -> list[dict[str, list[float]]]:
+    """Expand repeated or indexed CFGBIN light parameters into stable light slots."""
+
+    slots: dict[int, dict[str, list[float]]] = {}
+    occurrences: dict[str, int] = {}
+    for name, values in entries:
+        match = _EVENT_LIGHT_NAME_RE.fullmatch(name.casefold())
+        if match is None:
+            continue
+        base = match.group(1).rstrip("_-[(")
+        component = _EVENT_LIGHT_COMPONENTS.get(base)
+        if component is None:
+            continue
+        field, width = component
+        suffix = match.group(2)
+        if suffix is None:
+            start_index = occurrences.get(base, 0)
+            occurrences[base] = start_index + 1
+        else:
+            start_index = int(suffix)
+
+        chunks = [values[index : index + width] for index in range(0, len(values), width)]
+        if not chunks:
+            continue
+        for offset, chunk in enumerate(chunks):
+            if len(chunk) < width:
+                if field == "color" and len(chunk) >= 3:
+                    pass
+                else:
+                    continue
+            slot = slots.setdefault(start_index + offset, {})
+            slot[field] = chunk
+
+    return [slots[index] for index in sorted(slots)]
+
+
+def event_light_config_references(path: Path) -> list[tuple[str, str, str]]:
+    """Read the event light manifest as (kind, cut, relative resource path)."""
+
+    document = parse_cfgbin_file(path)
+    if not isinstance(document, CfgBinDocument):
+        return []
+    references = []
+    for entry in document.entries:
+        if entry.name not in {"EV_LI_MAP_LIGHT", "EV_LI_CHARA_LIGHT"}:
+            continue
+        values = [value.value for value in entry.values]
+        if len(values) < 3 or not all(isinstance(value, str) for value in values[:3]):
+            continue
+        kind, cut, resource = values[:3]
+        if re.fullmatch(r"c\d+", cut, re.IGNORECASE) and resource:
+            references.append((kind, cut.lower(), resource))
+    return references
 
 
 def actor_models_from_entries(entries: list[dict]) -> dict[str, str]:

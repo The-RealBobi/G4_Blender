@@ -1,8 +1,13 @@
 # Level-5 G4 Blender Tools
 
-Blender add-on for importing Level-5 G4 assets and porting edited geometry back to conservative native packages. It supports models, characters, maps, animations, cameras, events and textures used by G4-based games.
+Blender add-on for importing Level-5 G4 assets and porting edited geometry back to conservative native packages. It supports models, characters, maps and textures used by G4-based games.
 
 The exporter patches a legally obtained native base instead of rebuilding unknown format tables from scratch. This preserves the original layout, material references, hashes, palettes and texture structure whenever possible.
+
+The current stabilization branch also contains a Blender-free native foundation
+under `formats/`, `shading/` and `effects/`. It records source evidence before
+admitting a format, keeps diagnostics separate from UI code, and treats G4MA
+as a controller for effect-shader parameters as well as material animation.
 
 An untouched model imported from its original G4MD is preserved byte-for-byte on export by default. **Preserve Untouched Native Import** copies its original G4MD, G4MG and G4TX files only when every assigned imported mesh still matches its import snapshot. Moving geometry, changing UVs or assigning a different source mesh automatically falls back to the normal port process.
 
@@ -15,8 +20,8 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 | Models | Import individual assets or folders, create materials, extract textures and assign them automatically. |
 | Characters | Build character rigs, resolve shared skeletons, attach modular body parts and preserve skin weights. |
 | Maps | Reconstruct map placement, transforms and linked instances from world hierarchies. |
-| Animation | Import G4MT motions, G4CM cameras, event folders and facial expressions. |
-| Rendering | Recreate Level-5-style character materials, toon shading, authored recolour masks and outlines. |
+| Rendering | Preserve and extend the existing character Toon shader, with separate map, water, grass and effect profiles. |
+| Effects | Read confirmed G4MA/G4MT/G4CM banks and expose conservative, marked previews for animated material/effect parameters. |
 | Porting | Export edited Blender or DAE geometry to native `G4MD`/`G4MG` pairs and update compatible `G4TX` archives. |
 
 ## Supported formats
@@ -27,10 +32,11 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 | `G4PKM` | Packed model containers |
 | `G4SK` | Skeletons |
 | `G4TX` | Texture archives |
-| `G4MT` | Character animation |
-| `G4CM` | Camera animation |
-| `G4PK` | Animation containers |
 | `NXTCH` | Nintendo Switch texture payloads |
+| `G4MA` | Material and effect parameter animation banks |
+| `G4MT` | Animation-bank directory and clips |
+| `G4CM` | Camera-animation bank structure |
+| `CfgBin` | Confirmed T2B/RDBNP configuration resources |
 
 ## Installation
 
@@ -40,7 +46,9 @@ Install the release ZIP, or package the `G4_Blender` directory as a ZIP while ke
 2. Choose **Install from Disk** and select the ZIP.
 3. Enable **Level-5 G4 Blender Tools**.
 
-The add-on is a single flat package. Its root `__init__.py` is the only entry point; the helper modules and `chara_model_lookup.json` must stay beside it.
+The add-on entry point remains the root `__init__.py`. Native readers and
+profiles live in the small `formats/`, `shading/` and `effects/` packages; the
+helper modules and `chara_model_lookup.json` must remain inside the add-on.
 
 ### Menu entries
 
@@ -48,9 +56,6 @@ The add-on is a single flat package. Its root `__init__.py` is the only entry po
 File > Import > Level-5 G4 Model
 File > Import > Level-5 G4 Model Folder
 File > Import > Attach Level-5 G4 Character Parts
-File > Import > Level-5 G4 Animation
-File > Import > Level-5 G4 Camera
-File > Import > Level-5 G4 Event Folder
 File > Export > Level-5 G4 Port
 View3D > Sidebar > Level-5 > G4 Port
 ```
@@ -61,7 +66,13 @@ View3D > Sidebar > Level-5 > G4 Port
 
 Import a model directly from Blender, drag it into the viewport, or import a folder in batch. The add-on extracts compatible textures, builds materials and assigns them to the mesh. It also imports character and map assets with the appropriate material treatment instead of applying the character shader indiscriminately.
 
-Map assets use the classic material mapping. Character assets receive a Level-5-style Eevee material with hard shadow bands, native normal-map decoding, recolour-mask controls, wetness and outline parameters. Source `COLOR` data is kept as **G4 Outline Parameters**, and the original line texture remains available as **G4 Line Parameter**.
+Map assets use separate terrain, water, grass, cutout and map-PBR profiles.
+Water and grass previews add conservative detail/normal treatment while
+preserving authored texture links. Character assets retain the existing
+Level-5-style Eevee material with hard shadow bands, native normal-map
+decoding, recolour-mask controls, wetness and outline parameters. Source
+`COLOR` data is kept as **G4 Outline Parameters**, and the original line
+texture remains available as **G4 Line Parameter**.
 
 ### Character rigging
 
@@ -77,11 +88,11 @@ Character heads named `cXXXXXXXX` can be combined with separate components:
 | `skXXXXXXXX` | Arms and neck, where available |
 | `g`, `m`, `n` | Gloves, captain armband and nameplate |
 
-Use the character-parts dialog during model or animation import, or select **Attach Level-5 G4 Character Parts** to add components to an existing rig. The importer never guesses a uniform from an ID: cancelling a body or shoes selection simply skips that part. Secondary LOD meshes are discarded so multiple LODs do not deform together.
+Use the character-parts dialog during model import, or select **Attach Level-5 G4 Character Parts** to add components to an existing rig. The importer never guesses a uniform from an ID: cancelling a body or shoes selection simply skips that part. Secondary LOD meshes are discarded so multiple LODs do not deform together.
 
 Many character models reference a shared skeleton rather than embedding one locally. `chara_model_lookup.json` helps locate it, but the add-on still requires a complete legal game dump with the shared skeletons, typically under `data/common/chr/`. Joint names are resolved through the model's CRC32 palette, not by palette order or mesh shape, so modular parts can target the correct bones reliably.
 
-`Apply Bone Orientation` is optional. It improves the visual orientation of imported bones but changes Blender local axes, so it is disabled by default. G4MT animation import preserves the original G4SK axes and replaces a previously reoriented selected rig with an animation-safe one when needed.
+`Apply Bone Orientation` is optional and improves the visual orientation of imported bones in the viewport.
 
 ### Outlines and character parameters
 
@@ -102,22 +113,6 @@ Character meshes also receive a **Level-5 Character Parameters** Geometry Nodes 
 For a complete map, select the world directory itself, such as `w10`, `w11` or `w12`, and enable recursive folder import. The importer reads the world-level `.g4pk` or `.g4pkm` hierarchy, matches scene nodes to model assets, composes transforms, converts G4 Y-up coordinates to Blender Z-up, and uses linked object data for repeated assets.
 
 Auxiliary shadow and culling objects are hidden automatically. Models absent from the render hierarchy still import unchanged; the add-on does not invent placements for them. When present, a matching native half-float DDS cubemap is converted to equirectangular Radiance HDR and used as a restrained world environment.
-
-## Animation and events
-
-### G4MT and G4CM
-
-Import G4MT motions onto a character rig and G4CM camera data into the scene. Animation rigs are aligned to their exact G4SK rest axes before actions are created, avoiding the bone-axis approximation of a Collada-only workflow. The importer retains the source timing, transforms and facial-scale behaviour while reducing only constant or near-linear samples.
-
-### Event folders
-
-**Level-5 G4 Event Folder** imports character animation G4PK files and the event G4CM from a directory. Each cut becomes a named Action and NLA strip, with markers for cut boundaries and one rig per actor. Disjoint source ranges retain their timing; overlapping alternatives are concatenated by cut number so Blender can represent them in one NLA scene.
-
-When available, event configuration files provide actor placement links. The importer applies those placements, hides actors absent from a cut, reads per-cut lighting from `EventMap_fix` resources, and imports matching event effects by default.
-
-Large events produce large Blender files because source transforms are sampled per frame to preserve G4 quaternion interpolation. This is expected. The add-on writes curves in bulk and omits channels with no animation, but memory and disk use still scale with actor count, bone count and duration.
-
-For finished event scenes, use **File > Export > Level-5 G4 Scene (.fbx)**. It exports the scene animation without embedding textures, duplicating NLA strips as takes, exporting every Action or adding leaf bones. Avoid Blender's standard FBX preset for this workflow, as its all-actions mode can duplicate animation across rigs.
 
 ## Porting edited models
 
@@ -157,7 +152,7 @@ Atlas offsets are authored in Blender image space and converted automatically wh
 
 ## Disclaimer
 
-This independent community tool is intended for interoperability, research and modding. It contains no original game models, textures, animations, audio or other playable assets. The included lookup database is derived from game metadata solely to support automatic skeleton resolution and rigging.
+This independent community tool is intended for interoperability, research and modding. It contains no original game models, textures, audio or other playable assets. The included lookup database is derived from game metadata solely to support automatic skeleton resolution and rigging.
 
 Provide your own legally obtained game files. This project is not affiliated with, endorsed by or associated with Level-5.
 

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 3, 3),
+    "version": (1, 4, 7),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -91,12 +92,9 @@ else:
 
 if __package__:
     from . import g4_animation_addon
-else:
-    import g4_animation_addon
-
-if __package__:
     from .g4_model_probe import extract_g4tx, map_scene_placements
 else:
+    import g4_animation_addon
     from g4_model_probe import extract_g4tx, map_scene_placements
 
 g4_port_addon.ADDON_ID = ADDON_ID
@@ -233,9 +231,15 @@ def resolve_probe_script(prefs: "G4ImporterPreferences") -> Path:
     )
 
 
-def exporter_environment(prefs: "G4ImporterPreferences", export_dir: Path) -> dict:
+def exporter_environment(
+    prefs: "G4ImporterPreferences", export_dir: Path, model_path: Path | None = None,
+) -> dict:
     env = os.environ.copy()
     raw_data_root = bpy.path.abspath(getattr(prefs, "raw_data_root", "") or "")
+    if not raw_data_root and model_path is not None:
+        inferred_roots = model_data_roots(model_path, prefs)
+        if inferred_roots:
+            raw_data_root = str(inferred_roots[0])
     if raw_data_root:
         env["LEVEL5_G4_RAW_ROOT"] = raw_data_root
     chara_model_lookup = bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or default_chara_model_lookup())
@@ -309,6 +313,28 @@ class G4ImporterPreferences(AddonPreferences):
         default=False,
         description="Orient bones for display; leave disabled when the rig will receive G4MT animation",
     )
+    decoder_script: StringProperty(
+        name="G4MT Decoder",
+        subtype="FILE_PATH",
+        default=g4_animation_addon.default_decoder_script(),
+        description="Path to bundled or external g4mt_motion.py",
+    )
+    camera_decoder_script: StringProperty(
+        name="G4CM Decoder",
+        subtype="FILE_PATH",
+        default=g4_animation_addon.default_camera_decoder_script(),
+        description="Path to bundled or external g4cm_camera.py",
+    )
+    keep_decode_json: BoolProperty(
+        name="Keep Animation Decode JSON",
+        default=False,
+        description="Keep intermediate G4MT/G4CM JSON files for investigation",
+    )
+    event_character_parts: StringProperty(
+        default="{}",
+        options={"HIDDEN"},
+        description="Persistent body and shoes selections keyed by event actor ID",
+    )
     outline_mode: EnumProperty(
         name="Character Outline",
         items=(
@@ -337,32 +363,10 @@ class G4ImporterPreferences(AddonPreferences):
         precision=2,
         update=outline_mode_changed,
     )
-    decoder_script: StringProperty(
-        name="G4MT Decoder",
-        subtype="FILE_PATH",
-        default=g4_animation_addon.default_decoder_script(),
-        description="Path to bundled or external g4mt_motion.py",
-    )
-    camera_decoder_script: StringProperty(
-        name="G4CM Decoder",
-        subtype="FILE_PATH",
-        default=g4_animation_addon.default_camera_decoder_script(),
-        description="Path to bundled or external g4cm_camera.py",
-    )
-    keep_decode_json: BoolProperty(
-        name="Keep Animation Decode JSON",
-        default=False,
-        description="Keep intermediate G4MT/G4CM JSON files for investigation",
-    )
-    event_character_parts: StringProperty(
-        default="{}",
-        options={"HIDDEN"},
-        description="Persistent body and shoes selections keyed by event actor ID",
-    )
     character_import_parts: StringProperty(
         default="{}",
         options={"HIDDEN"},
-        description="Persistent character-part selections used by model and animation imports",
+        description="Persistent character-part selections used by model imports",
     )
     port_script: StringProperty(
         name="G4 Port Script",
@@ -510,7 +514,7 @@ def run_exporter(model_path: str, prefs: G4ImporterPreferences, target_armature=
         str(export_dir),
         model_path,
     ]
-    env = exporter_environment(prefs, export_dir)
+    env = exporter_environment(prefs, export_dir, Path(model_path))
     skeleton_override_path: Path | None = None
     skeleton_info = armature_skeleton_info(target_armature)
     if skeleton_info is not None:
@@ -615,7 +619,7 @@ def apply_custom_vertex_normals(mesh, flat_normals: list[float], vertex_count: i
     return False
 
 
-def import_native_g4_mesh(native_path: Path, custom_normals: bool = True) -> set[str]:
+def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target_armature=None) -> set[str]:
     payload = json.loads(native_path.read_text(encoding="utf-8"))
     if payload.get("format") != "level5-g4-native-mesh" or payload.get("version") != 1:
         raise RuntimeError(f"Unsupported native G4 mesh payload: {native_path}")
@@ -626,8 +630,10 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True) -> set
     names = skeleton.get("names") or []
     parents = skeleton.get("parent_indices") or []
     bind_matrices = skeleton.get("bind_matrices") or []
-    armature = None
-    if names and bind_matrices:
+    armature = target_armature if target_armature is not None and target_armature.type == "ARMATURE" else None
+    if armature is not None:
+        names = [bone.name for bone in armature.data.bones]
+    elif names and bind_matrices:
         armature_data = bpy.data.armatures.new("skeleton_root")
         armature = bpy.data.objects.new("skeleton_root", armature_data)
         bpy.context.collection.objects.link(armature)
@@ -940,6 +946,45 @@ def make_debug_text(summary: dict, lines: list[str]) -> None:
     text.write("\n".join(lines) + "\n")
 
 
+def append_import_trace(stage: str, **values) -> None:
+    fields = " ".join(f"{name}={value}" for name, value in values.items())
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {stage} {fields}\n"
+    log_dir = Path(bpy.utils.user_resource("CONFIG", path="level5_g4", create=True))
+    log_path = log_dir / "import_trace.log"
+    try:
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        pass
+
+
+def append_import_log(message: str) -> None:
+    """Append a human-readable model import message to the shared trace."""
+    append_import_trace("runtime", message=message.rstrip())
+
+
+def defer_import_call(callback, label: str = "Deferred Blender operation") -> None:
+    """Run a UI callback after Blender returns to its event loop."""
+    append_import_log(f"deferred scheduled: {label}")
+
+    def run():
+        try:
+            append_import_log(f"deferred running: {label}")
+            callback()
+            append_import_log(f"deferred finished: {label}")
+        except Exception:
+            error = f"[{label}]\n{traceback.format_exc()}"
+            text = bpy.data.texts.get("G4 Deferred Call Errors")
+            if text is None:
+                text = bpy.data.texts.new("G4 Deferred Call Errors")
+            text.write(error.rstrip() + "\n\n")
+            append_import_log(error)
+            print(error)
+        return None
+
+    bpy.app.timers.register(run, first_interval=0.01)
+
+
 def write_debug_log(summary: dict, lines: list[str]) -> None:
     dae = Path(summary.get("dae", ""))
     if not dae:
@@ -962,48 +1007,11 @@ def strip_texture_variant(name: str) -> str:
 
 
 def texture_role(path: Path) -> str:
-    stem = path.stem.lower()
-    if "cubemap" in stem or re.search(r"(?:^|_)cm\d+_tex$", stem):
-        return "environment"
-    if stem.endswith("_a.1"):
-        return "transparent_base"
-    if stem.endswith(".a"):
-        return "alpha_red"
-    if stem.endswith("msk") or stem.endswith("_mask"):
-        return "mask"
-    if stem.endswith("nml") or stem.endswith("_normal"):
-        return "normal"
-    if stem.endswith("_re.2") or stem.endswith("_n.2") or stem.endswith("_nm.2"):
-        return "normal"
-    if stem.endswith(".2") or stem.endswith("_n") or stem.endswith("_nm") or "_normal" in stem:
-        return "normal"
-    if stem.endswith("spm"):
-        return "specular_mask"
-    if stem.endswith("sp"):
-        return "specular"
-    if stem.endswith("oc"):
-        return "occlusion"
-    if stem.endswith("line"):
-        return "line"
-    return "base"
+    return character_texture_role(path)
 
 
 def texture_base_key(path: Path) -> str:
-    stem = path.stem.lower()
-    role = texture_role(path)
-    if role == "transparent_base" and stem.endswith("_a.1"):
-        return stem[:-2].strip("_")
-    if role == "normal" and stem.endswith(".2"):
-        return stem[:-2].strip("_")
-    if role == "normal" and stem.endswith("nml"):
-        return re.sub(r"_?nml$", "", stem).strip("_")
-    if role == "alpha_red" and stem.endswith(".a"):
-        return stem[:-2].strip("_")
-    if role == "mask":
-        return re.sub(r"(?:_?msk|_mask)$", "", stem).strip("_")
-    if role in {"specular_mask", "specular", "occlusion", "line"}:
-        return re.sub(r"(?:spm|sp|oc|line)$", "", stem).strip("_")
-    return strip_texture_variant(stem).strip("_")
+    return character_texture_base_key(path)
 
 
 def texture_base_keys(path: Path) -> list[str]:
@@ -1954,7 +1962,7 @@ def apply_level5_toon_shader(
             f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
             f"line={line_path and line_path.name} sp={specular_path and specular_path.name} "
             f"spm={specular_mask_path and specular_mask_path.name} "
-            f"nrm={normal_path and normal_path.name} ramp={ramp_path and ramp_path.name} "
+            f"nrm={normal_path and normal_path.name} "
             f"line_map={line_informative}"
         )
     return True
@@ -1995,8 +2003,6 @@ def apply_material_texture_variants(
         fallback_variants = {}
         for key in material_variant_keys(material_name, diffuse_path):
             fallback_variants.update(by_key.get(key, {}))
-        if "ramp" not in fallback_variants:
-            fallback_variants.update(by_key.get("__character_shader__", {}))
         variants = variants_from_report(summary, material_name, diffuse_path, fallback_variants)
         if material is None:
             if debug is not None:
@@ -2192,7 +2198,6 @@ CHARACTER_TEXTURE_NODE_SLOTS = (
     ("Recolor Mask", "G4 Recolor Mask", "mask"),
     ("Normal", "G4 Normal", "normal"),
     ("Occlusion", "G4 Occlusion", "occlusion"),
-    ("Toon Ramp", "G4 Toon Ramp", "ramp"),
     ("Line Parameter", "G4 Line Parameter", "line"),
     ("Specular Mask", "G4 Specular Mask", "specular_mask"),
     ("Specular Shape", "G4 Specular Shape", "specular"),
@@ -2829,6 +2834,7 @@ def import_g4_model(
     if apply_styling is None:
         apply_styling = is_character_model(path)
     debug = [f"[import] input={path}"]
+    append_import_trace("import.begin", path=path, target=getattr(target_armature, "name", "none"))
     if target_armature is not None and target_armature.type == "ARMATURE":
         debug.append(
             f"[target-armature] name={target_armature.name} "
@@ -2837,6 +2843,12 @@ def import_g4_model(
         )
     images_before = image_paths()
     summary = run_exporter(str(path), prefs, target_armature)
+    append_import_trace(
+        "import.exporter",
+        model=summary.get("resolved_model"),
+        native_mesh=summary.get("native_mesh"),
+        skeleton=summary.get("skeleton_source"),
+    )
     debug.append(f"[exporter] resolved={summary.get('resolved_model')}")
     debug.append(f"[exporter] native_mesh={summary.get('native_mesh')}")
     debug.append(f"[exporter] skeleton_source={summary.get('skeleton_source')}")
@@ -2845,7 +2857,11 @@ def import_g4_model(
     native_value = summary.get("native_mesh")
     native_path = Path(native_value).resolve() if native_value else None
     if native_path is not None and native_path.is_file():
-        imported_names = import_native_g4_mesh(native_path, custom_normals=apply_styling)
+        imported_names = import_native_g4_mesh(
+            native_path,
+            custom_normals=apply_styling,
+            target_armature=target_armature,
+        )
         import_method = "native"
     else:
         dae_path = Path(summary.get("dae", "")).resolve()
@@ -2857,6 +2873,7 @@ def import_g4_model(
     preserve_outline_vertex_parameters(imported_names, debug)
     removed_lods = discard_secondary_lods(imported_names)
     debug.append(f"[geometry] method={import_method} imported_objects={sorted(imported_names)}")
+    append_import_trace("import.geometry", method=import_method, objects=sorted(imported_names))
     debug.append(f"[geometry] secondary_lods_removed={removed_lods}")
     orientation = apply_g4_bone_orientation(
         imported_names,
@@ -2908,6 +2925,7 @@ def import_g4_model(
                     obj["g4_character_skeleton_source"] = skeleton_source
     mark_native_roundtrip_objects(imported_names, path)
     cleanup_generated_files(summary, getattr(prefs, "cleanup_import_cache", True))
+    append_import_trace("import.complete", path=path, objects=sorted(imported_names))
     return summary, imported_names
 
 
@@ -3216,6 +3234,11 @@ def find_character_part(
     return None
 
 
+def is_modular_character_part(path: Path) -> bool:
+    """Whether a standalone import can safely bind to the selected character rig."""
+    return re.fullmatch(r"(?:u|s|sk|g|m|n)\d{6,8}", path.stem, re.IGNORECASE) is not None
+
+
 def attach_part_to_armature(
     path: Path,
     target_armature,
@@ -3223,6 +3246,7 @@ def attach_part_to_armature(
     create_report_text: bool,
     preserve_part_armatures: bool = False,
 ) -> int:
+    append_import_trace("attach.begin", path=path, target=target_armature.name)
     _, imported_names = import_g4_model(
         path,
         prefs,
@@ -3239,6 +3263,7 @@ def attach_part_to_armature(
             continue
         armature_modifiers = [modifier for modifier in obj.modifiers if modifier.type == "ARMATURE"]
         if not armature_modifiers:
+            append_import_trace("attach.invalid_mesh", path=path, mesh=obj.name, reason="missing_armature_modifier")
             raise RuntimeError(f"Character part mesh has no armature modifier: {path}::{obj.name}")
         # The Collada import may create a private skeleton for a part even
         # when a target rig was supplied.  Parts must never retain that
@@ -3258,6 +3283,10 @@ def attach_part_to_armature(
 
     for source_armature in part_armatures:
         bpy.data.objects.remove(source_armature, do_unlink=True)
+    if attached == 0:
+        append_import_trace("attach.failed", path=path, target=target_armature.name, reason="no_meshes")
+        raise RuntimeError(f"No mesh was imported for character part: {path}")
+    append_import_trace("attach.complete", path=path, target=target_armature.name, meshes=attached)
     return attached
 
 
@@ -3378,12 +3407,14 @@ def import_character_parts_for_armature(
     character_part_stem: str = "",
     preserve_part_armatures: bool = False,
 ) -> tuple[int, list[Path]]:
-    body = Path(bpy.path.abspath(body_path)) if body_path else (
+    explicit_body = bool(body_path)
+    explicit_shoes = bool(shoes_path)
+    body = Path(bpy.path.abspath(body_path)) if explicit_body else (
         find_character_part(model_path, "u", prefs, character_part_stem) if automatic else None
     )
-    if body is not None:
+    if body is not None and not explicit_body:
         body = declared_body_variant_for_character(body, model_path, prefs)
-    shoes = Path(bpy.path.abspath(shoes_path)) if shoes_path else (
+    shoes = Path(bpy.path.abspath(shoes_path)) if explicit_shoes else (
         find_character_part(model_path, "s", prefs, character_part_stem) if automatic else None
     )
     accessory = Path(bpy.path.abspath(accessory_path)) if accessory_path else None
@@ -3395,7 +3426,6 @@ def import_character_parts_for_armature(
         accessory,
         *(Path(bpy.path.abspath(value)) for value in (gloves_path, armband_path, nameplate_path) if value),
     ]
-    paths = [declared_body_variant_for_character(path, model_path, prefs) if path is not None else None for path in paths]
     selected = []
     for path in paths:
         if path is None:
@@ -3648,29 +3678,26 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             return {"FINISHED"}
 
         addon_preferences().character_import_parts = json.dumps(values, sort_keys=True)
-
         if self.animation_path:
             settings = json.loads(self.animation_settings_json or "{}")
-            result = bpy.ops.import_scene.level5_g4mt(
+            settings["prompt_for_models"] = False
+            return bpy.ops.import_scene.level5_g4mt(
                 "EXEC_DEFAULT",
                 filepath=self.animation_path,
                 model_path=str(model_path),
                 import_model=True,
                 import_character_parts=True,
-                prompt_for_models=False,
                 **values,
                 **settings,
             )
-        else:
-            result = bpy.ops.import_scene.level5_g4(
-                "EXEC_DEFAULT",
-                filepath=str(model_path),
-                create_report_text=self.create_report_text,
-                import_character_parts=True,
-                character_setup_complete=True,
-                **values,
-            )
-        return result
+        return bpy.ops.import_scene.level5_g4(
+            "EXEC_DEFAULT",
+            filepath=str(model_path),
+            create_report_text=self.create_report_text,
+            import_character_parts=True,
+            character_setup_complete=True,
+            **values,
+        )
 
 
 class IMPORT_OT_level5_g4(Operator, ImportHelper):
@@ -3754,7 +3781,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         else:
             paths = [base_path]
 
-        g4_animation_addon.append_event_file_log(
+        append_import_log(
             f"model batch execute: paths={len(paths)}; character_parts={self.import_character_parts}; "
             f"setup_complete={self.character_setup_complete}; skip_setup={self.skip_character_setup}; "
             f"models={[str(path) for path in paths]}"
@@ -3762,12 +3789,12 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
 
         unsupported = [path for path in paths if path.suffix.lower() not in MODEL_EXTENSIONS]
         if unsupported:
-            g4_animation_addon.append_event_file_log(f"model batch cancelled: unsupported={unsupported}")
+            append_import_log(f"model batch cancelled: unsupported={unsupported}")
             suffixes = ", ".join(sorted({path.suffix or "<none>" for path in unsupported}))
             self.report({"ERROR"}, f"Unsupported G4 model extension: {suffixes}")
             return {"CANCELLED"}
         if not paths:
-            g4_animation_addon.append_event_file_log("model batch cancelled: no supported paths")
+            append_import_log("model batch cancelled: no supported paths")
             self.report({"ERROR"}, "No supported G4 model files selected")
             return {"CANCELLED"}
 
@@ -3779,10 +3806,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         ):
             selected_path = str(paths[0])
             create_report_text = self.create_report_text
-            g4_animation_addon.append_event_file_log(
+            append_import_log(
                 f"model batch opening character setup: model={selected_path}"
             )
-            g4_animation_addon.defer_blender_call(
+            defer_import_call(
                 lambda: bpy.ops.import_scene.level5_g4_character_setup(
                     "INVOKE_DEFAULT",
                     model_path=selected_path,
@@ -3792,9 +3819,12 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
             )
             return {"FINISHED"}
 
-        g4_animation_addon.append_event_file_log("model batch continuing directly to model imports")
+        append_import_log("model batch continuing directly to model imports")
 
         prefs = addon_preferences()
+        selected_rig = context.active_object
+        if selected_rig is None or selected_rig.type != "ARMATURE":
+            selected_rig = None
         imported_total = 0
         part_mesh_total = 0
         imported_parts = []
@@ -3815,10 +3845,18 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         f"Importing model {index}/{total_paths}: {path.name}",
                         redraw=redraw,
                     )
-                    g4_animation_addon.append_event_file_log(
+                    append_import_log(
                         f"model batch importing {index}/{total_paths}: {path}"
                     )
-                    summary, imported_names = import_g4_model(path, prefs, self.create_report_text)
+                    target_armature = selected_rig if is_modular_character_part(path) else None
+                    if target_armature is not None:
+                        append_import_trace("import.selected_rig", path=path, target=target_armature.name)
+                    summary, imported_names = import_g4_model(
+                        path,
+                        prefs,
+                        self.create_report_text,
+                        target_armature=target_armature,
+                    )
                     summaries.append(summary)
                     imported_total += len(imported_names)
                     armatures = imported_armatures(imported_names)
@@ -3853,7 +3891,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         redraw=should_redraw_import_progress(index, total_paths),
                     )
         except Exception as exc:
-            g4_animation_addon.append_event_file_log(
+            append_import_log(
                 f"model batch failed: {exc}\n{traceback.format_exc()}"
             )
             self.report({"ERROR"}, str(exc))
@@ -3880,7 +3918,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         if imported_parts:
             message += f"; parts {len(imported_parts)} ({part_mesh_total} meshes)"
         self.report({"INFO"}, message)
-        g4_animation_addon.append_event_file_log(
+        append_import_log(
             f"model batch complete: models={len(summaries)}; objects={imported_total}"
         )
         return {"FINISHED"}
@@ -4110,18 +4148,18 @@ class IMPORT_OT_level5_g4_folder(Operator):
 
     def execute(self, context):
         directory = Path(bpy.path.abspath(self.directory or ""))
-        g4_animation_addon.append_event_file_log(
+        append_import_log(
             f"model folder batch execute: directory={directory}; recursive={self.recursive}; "
             f"character_parts={self.import_character_parts}"
         )
         if not directory.exists() or not directory.is_dir():
-            g4_animation_addon.append_event_file_log("model folder batch cancelled: directory does not exist")
+            append_import_log("model folder batch cancelled: directory does not exist")
             self.report({"ERROR"}, f"Folder not found: {directory}")
             return {"CANCELLED"}
 
         paths = collect_model_paths_auto(directory, self.recursive)
         if not paths:
-            g4_animation_addon.append_event_file_log("model folder batch cancelled: no models found")
+            append_import_log("model folder batch cancelled: no models found")
             self.report({"ERROR"}, f"No .g4md/.g4pkm models found in {directory}")
             return {"CANCELLED"}
 
@@ -4145,7 +4183,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         redraw=should_redraw_import_progress(index - 1, total_paths),
                     )
                     character_model = is_character_model(path)
-                    g4_animation_addon.append_event_file_log(
+                    append_import_log(
                         f"model folder batch importing {index}/{total_paths}: {path}; character={character_model}"
                     )
                     _, imported_names = import_g4_model(
@@ -4192,7 +4230,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
                         redraw=should_redraw_import_progress(index, total_paths),
                     )
         except Exception as exc:
-            g4_animation_addon.append_event_file_log(
+            append_import_log(
                 f"model folder batch failed: {exc}\n{traceback.format_exc()}"
             )
             self.report({"ERROR"}, str(exc))
@@ -4209,7 +4247,7 @@ class IMPORT_OT_level5_g4_folder(Operator):
         if hidden_total:
             message += f"; hidden {hidden_total} auxiliary map objects"
         self.report({"INFO"}, message)
-        g4_animation_addon.append_event_file_log(
+        append_import_log(
             f"model folder batch complete: models={len(paths)}; referenced={len(referenced_paths)}; objects={imported_total}"
         )
         return {"FINISHED"}
@@ -4252,10 +4290,7 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
     def execute(self, context):
         target = context.active_object
         prefs = addon_preferences()
-        model_source = Path(str(target.get("g4_character_model_source", "")))
         body_model = Path(bpy.path.abspath(self.body_model)) if self.body_model else None
-        if body_model is not None and model_source.is_file():
-            body_model = declared_body_variant_for_character(body_model, model_source, prefs)
         paths = [
             path
             for path in (
@@ -4267,8 +4302,6 @@ class IMPORT_OT_level5_g4_character_parts(Operator):
             )
             if path is not None
         ]
-        if model_source.is_file():
-            paths = [declared_body_variant_for_character(path, model_source, prefs) for path in paths]
         if not paths and not self.attach_ball:
             self.report({"WARNING"}, "No character part selected")
             return {"CANCELLED"}
@@ -4624,9 +4657,24 @@ if hasattr(bpy.types, "FileHandler"):
     classes.append(G4_FH_import)
 
 
+def register_class_replacing_stale(cls) -> None:
+    existing = getattr(bpy.types, cls.__name__, None)
+    if existing is cls:
+        return
+    if existing is not None:
+        try:
+            bpy.utils.unregister_class(existing)
+        except RuntimeError:
+            pass
+    try:
+        bpy.utils.register_class(cls)
+    except ValueError:
+        pass
+
+
 def register():
     for cls in classes:
-        bpy.utils.register_class(cls)
+        register_class_replacing_stale(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     g4_animation_addon.register()
     g4_port_addon.register()
@@ -4637,8 +4685,8 @@ def register():
 def unregister():
     if refresh_level5_outlines_on_load in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(refresh_level5_outlines_on_load)
-    g4_port_addon.unregister()
     g4_animation_addon.unregister()
+    g4_port_addon.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

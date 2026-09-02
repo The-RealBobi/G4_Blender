@@ -2026,28 +2026,6 @@ def resolve_uniform_generic_g4sk(
             if marker in source and used_hashes <= hashes:
                 return skeleton_data, f"{source} via matching uniform ID"
 
-    # Some story uniforms share the body of a neighbouring character model,
-    # so their numeric ID has no matching C-model.  Their G4MD palette still
-    # declares every required joint by CRC32.  Search only face-character
-    # packs and require complete coverage; this avoids spatial guesses and
-    # finds their embedded, dynamic G4SK when one is available.
-    cache_key = str(path)
-    if used_hashes and cache_key in UNIFORM_CRC_SKELETON_CACHE:
-        resolved = UNIFORM_CRC_SKELETON_CACHE[cache_key]
-        if resolved[0] is not None:
-            return resolved
-    if used_hashes:
-        matches: list[tuple[int, str, bytes, str]] = []
-        for skeleton_data, source, hashes, joint_count in uniform_crc_skeleton_candidates():
-            if used_hashes <= hashes:
-                matches.append((joint_count, source, skeleton_data, source))
-        if matches:
-            _, _, skeleton_data, source = min(matches, key=lambda item: (item[0], item[1]))
-            resolved = (skeleton_data, f"{source} via complete G4MD CRC32 palette")
-            UNIFORM_CRC_SKELETON_CACHE[cache_key] = resolved
-            return resolved
-        UNIFORM_CRC_SKELETON_CACHE[cache_key] = (None, None)
-
     if not allow_common_fallback:
         return None, None
     # Uniforms without an exact character skeleton use the common body rig.
@@ -2162,9 +2140,6 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
                 if g4sk_covers_g4md_palette(skeleton_data, palette_path):
                     return skeleton_data, f"{source} via local face variant rig"
 
-    skeleton_data, skeleton_source = resolve_uniform_generic_g4sk(palette_path, allow_common_fallback=False)
-    if skeleton_data is not None:
-        return skeleton_data, skeleton_source
     skeleton_data, skeleton_source = resolve_g4sk_from_chara_model(palette_path)
     if skeleton_data is not None and (
         not is_face_asset or g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path)
@@ -2190,6 +2165,9 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
         skeleton_data, skeleton_source = resolve_unique_face_crc_g4sk(palette_path)
         if skeleton_data is not None:
             return skeleton_data, skeleton_source
+    # A uniform is allowed to use only its declared common rig here.  A
+    # complete CRC32 palette merely proves compatibility, not authorship: many
+    # characters share that small palette but have different bind matrices.
     return resolve_uniform_generic_g4sk(palette_path)
 
 
@@ -4972,8 +4950,10 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         )
         shoe_palette, shoe_palette_remap_count = (
             remap_separated_shoe_palette(
+                md_data,
                 joint_palette,
                 skeleton_info,
+                md_info.get("joint_palette_table", 0),
                 uniform_palette_sources,
             )
             if hash_palette is None and uniform_model and path.stem.lower().startswith("s")
