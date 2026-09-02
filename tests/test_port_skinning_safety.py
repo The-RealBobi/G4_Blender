@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import struct
 import sys
 import tempfile
@@ -14,6 +15,124 @@ SPEC.loader.exec_module(PORT)
 
 
 class PortSkinningSafetyTests(unittest.TestCase):
+    def test_pack_vertex_zero_fills_unused_joint_indices(self):
+        vertex = PORT.Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
+        payload = PORT.pack_vertex(vertex, [(3, 1.0)])
+        self.assertEqual(
+            struct.unpack_from("<8B", payload, 0x34),
+            (3, 0, 0, 0, 0, 0, 0, 0),
+        )
+
+    def test_unique_material_export_clones_native_material_slots(self):
+        template = Path(
+            "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_712/._work/raw/data/"
+            "common/chr/_face/11_VICTORY/c11010060/c11010060.g4md"
+        )
+        if not template.is_file():
+            self.skipTest("requires the local Victory Road dump")
+        raw_root = template.parents[5]
+        meshes = []
+        records = []
+        rules = []
+        for index in range(12):
+            vertex = PORT.Vertex((float(index), 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
+            meshes.append(
+                PORT.Mesh(
+                    f"part_{index}", [vertex, vertex, vertex], [0, 1, 2], 0, "c11010060_20M",
+                    source_record_index=0,
+                )
+            )
+            records.append({
+                "vertex_offset": index * 0x44,
+                "index_offset": index * 6,
+                "vertex_count": 3,
+                "index_count": 3,
+                "vertex_buffer_size": 12 * 3 * 0x44,
+                "index_buffer_size": 12 * 6,
+                "index_base": 12 * 3 * 0x44,
+            })
+            rules.append(PORT.RecordRule(f"part_{index}", "c11010060_20M", [f"part_{index}"]))
+        config = PORT.PortConfig(
+            Path("chr/_face/11_VICTORY/c11010060/c11010060.g4md"),
+            ["c11010060_20M", "c11010060_10M", "c11010060_30M"],
+            rules,
+            {},
+            unique_material_per_mesh=True,
+        )
+        output = PORT.build_base_g4md(meshes, records, raw_root, config)
+        self.assertEqual(struct.unpack_from("<H", output, 0x20)[0], 12)
+        self.assertEqual(struct.unpack_from("<H", output, 0x22)[0], 12)
+        submesh_table = struct.unpack_from("<H", output, 0x04)[0]
+        self.assertEqual(
+            [output[submesh_table + index * 0x50 + 0x43] for index in range(12)],
+            list(range(12)),
+        )
+        material_table = PORT.material_table_offset(output, 12)
+        self.assertEqual(len(output[material_table : material_table + 12 * 0x10]), 12 * 0x10)
+        self.assertEqual(
+            [struct.unpack_from("<H", output, material_table + index * 0x10 + 0x0E)[0] for index in range(12)],
+            [index * 5 for index in range(12)],
+        )
+        name_base = struct.unpack_from("<H", output, 0x0A)[0] * 4
+        name_index_table = name_base + struct.unpack_from("<H", output, 0x80)[0] * 4
+        name_index_end = name_base + struct.unpack_from("<H", output, 0x82)[0] * 4
+        self.assertEqual((name_index_end - name_index_table) // 2, 60)
+        self.assertLessEqual(
+            max(
+                struct.unpack_from("<H", output, material_table + index * 0x10 + 0x0E)[0]
+                for index in range(12)
+            ),
+            (name_index_end - name_index_table) // 2 - 5,
+        )
+        material_name_table = name_base + struct.unpack_from("<H", output, 0x86)[0] * 4
+        names = [
+            PORT.cstr(output, material_name_table + struct.unpack_from("<H", output, material_name_table + index * 2)[0])
+            for index in range(12)
+        ]
+        self.assertEqual(names, [f"c11010060_20M_{index:02d}" for index in range(12)])
+
+    def test_expanded_g4md_moves_the_layout_table_with_submeshes(self):
+        template = Path(
+            "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_712/._work/raw/data/"
+            "common/chr/_face/11_VICTORY/c11010060/c11010060.g4md"
+        )
+        if not template.is_file():
+            self.skipTest("requires the local Victory Road dump")
+        raw_root = template.parents[5]
+        meshes = []
+        records = []
+        rules = []
+        for index in range(10):
+            vertex = PORT.Vertex((float(index), 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
+            meshes.append(PORT.Mesh(f"part_{index}", [vertex] * 3, [0, 1, 2], 0, "c11010060_20M"))
+            records.append({
+                "vertex_offset": index * 0x44,
+                "index_offset": index * 6,
+                "vertex_count": 3,
+                "index_count": 3,
+                "vertex_buffer_size": 10 * 3 * 0x44,
+                "index_buffer_size": 10 * 6,
+                "index_base": 10 * 3 * 0x44,
+            })
+            rules.append(PORT.RecordRule(f"part_{index}", "c11010060_20M", [f"part_{index}"]))
+        config = PORT.PortConfig(
+            Path("chr/_face/11_VICTORY/c11010060/c11010060.g4md"),
+            ["c11010060_20M", "c11010060_10M", "c11010060_30M"],
+            rules,
+            {},
+        )
+        output = PORT.build_base_g4md(meshes, records, raw_root, config)
+        name_base = struct.unpack_from("<H", output, 0x0A)[0] * 4
+        layout_offset = name_base + struct.unpack_from("<H", output, 0x62)[0] * 4
+        expected_layout_offset = struct.unpack_from("<H", output, 0x04)[0] + 10 * 0x50
+        self.assertEqual(layout_offset, expected_layout_offset)
+        self.assertEqual(output[layout_offset : layout_offset + 2], b"\x00\x0b")
+        delta_units = (10 - 3) * 0x50 // 4
+        for field in range(0x62, 0x74, 2):
+            native_value = struct.unpack_from("<H", template.read_bytes(), field)[0]
+            output_value = struct.unpack_from("<H", output, field)[0]
+            self.assertEqual(output_value, native_value + delta_units, hex(field))
+
     def test_native_joint_table_overrides_shared_compact_indices(self):
         md = bytearray(0x100)
         struct.pack_into("<H", md, 0x74, 0x08)
@@ -220,6 +339,55 @@ class PortSkinningSafetyTests(unittest.TestCase):
         packed = PORT.pack_vertex(vertex, fallback_color=(255, 0, 191, 127))
         self.assertEqual(tuple(packed[0x3C:0x40]), (12, 34, 56, 78))
 
+    def test_constant_vertex_color_policy_overrides_transferred_native_colors(self):
+        vertices = [
+            PORT.Vertex(
+                (0.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0),
+                color=(12, 34, 56, 78),
+                color_from_source=True,
+            ),
+            PORT.Vertex(
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0),
+                color=(255, 153, 191, 127),
+            ),
+        ]
+        mesh = PORT.Mesh("custom", vertices, [0, 1, 1], 0, "mat")
+
+        changed = PORT.apply_vertex_color_policy(
+            [mesh], "constant", PORT.STABLE_CUSTOM_VERTEX_COLOR
+        )
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(
+            [vertex.color for vertex in vertices],
+            [PORT.STABLE_CUSTOM_VERTEX_COLOR, PORT.STABLE_CUSTOM_VERTEX_COLOR],
+        )
+        self.assertFalse(any(vertex.color_from_source for vertex in vertices))
+
+    def test_default_custom_config_uses_stable_vertex_color_policy(self):
+        config = PORT.default_config()
+        self.assertEqual(config.vertex_color_mode, "constant")
+        self.assertEqual(config.vertex_color, PORT.STABLE_CUSTOM_VERTEX_COLOR)
+
+    def test_serialized_vertex_color_policy_is_loaded(self):
+        payload = {
+            "model_rel": "chr/test/test",
+            "records": [],
+            "vertex_color_mode": "constant",
+            "vertex_color": [255, 153, 191, 127],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(json.dumps(payload))
+            config = PORT.load_config(path)
+
+        self.assertEqual(config.vertex_color_mode, "constant")
+        self.assertEqual(config.vertex_color, PORT.STABLE_CUSTOM_VERTEX_COLOR)
+
     def test_g4mg_report_identifies_source_and_fallback_vertex_colors(self):
         vertex = PORT.Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
         mesh = PORT.Mesh("native", [vertex, vertex, vertex], [0, 1, 2], 0, "mat")
@@ -276,6 +444,41 @@ class PortSkinningSafetyTests(unittest.TestCase):
         self.assertEqual(generated.vertices[0].color, (255, 0, 191, 127))
         self.assertEqual(generated.vertices[1].color, (1, 2, 3, 4))
 
+    def test_split_chunks_keep_their_source_record_identity(self):
+        vertices = [
+            PORT.Vertex((float(index), 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
+            for index in range(6)
+        ]
+        mesh = PORT.Mesh("body", vertices, list(range(6)), 0, "body", source_record_index=1)
+
+        chunks = PORT.split_mesh_by_vertex_limit(mesh, ["body", "body_1"], max_vertices=3)
+
+        self.assertEqual([len(chunk.vertices) for chunk in chunks], [3, 3])
+        self.assertEqual([chunk.source_record_index for chunk in chunks], [1, 1])
+
+    def test_split_chunk_uses_source_record_for_colors_uv_and_palette(self):
+        vertex = PORT.Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.25, 0.75))
+        mesh = PORT.Mesh("body_1", [vertex, vertex, vertex], [0, 1, 2], 0, "body", source_record_index=1)
+        rules = [PORT.RecordRule("body", "body", ["body"]), PORT.RecordRule("eye", "eye", ["eye"])]
+
+        PORT.transfer_native_vertex_colors(
+            [mesh],
+            [[((0.0, 0.0, 0.0), (255, 0, 191, 127))], [((0.0, 0.0, 0.0), (1, 2, 3, 4))]],
+            [],
+        )
+        payload, records = PORT.build_g4mg(
+            [mesh],
+            record_rules=rules,
+            palettes=[[10], [20]],
+            uv_formats=[14, 18],
+            fallback_colors=[(255, 0, 191, 127), (9, 8, 7, 6)],
+        )
+
+        self.assertEqual(mesh.vertices[0].color, (1, 2, 3, 4))
+        self.assertEqual(records[0]["uv_format_id"], 18)
+        self.assertEqual(records[0]["palette"], [10])
+        self.assertEqual(tuple(payload[0x3C:0x40]), (1, 2, 3, 4))
+
     def test_unmodified_g4tx_is_rebuilt_with_native_payloads(self):
         template = Path(
             "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_702/._work/raw/data/"
@@ -310,6 +513,22 @@ class PortSkinningSafetyTests(unittest.TestCase):
             )
             _, _, output_payloads = PORT.parse_g4tx_payloads(output)
             self.assertEqual(output_payloads["u11010060_10"], payloads["u11010060_10"])
+
+    def test_variant_texture_replacements_use_the_main_model_atlas(self):
+        replacements = {
+            "c11010060_20": "c11010060_20.png",
+            "c11010060_20line": "c11010060_20line.png",
+        }
+        mapped = PORT.variant_texture_replacements(
+            Path("c11010060_02.g4tx"), "c11010060", replacements
+        )
+        self.assertEqual(
+            mapped,
+            {
+                "c11010060_02_20": "c11010060_20.png",
+                "c11010060_02_20line": "c11010060_20line.png",
+            },
+        )
 
 
 if __name__ == "__main__":

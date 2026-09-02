@@ -84,5 +84,5 @@ assert obj.select_get(), "Original mesh selection was not restored"
 assert bpy.context.view_layer.objects.active is obj, "Original active object was not restored"
 assert non_armature_modifier.show_viewport, "Source modifiers were changed by temporary export"
 low_x, high_x = exported_position_x_range(dae_path)
-assert low_x > 1.5 and high_x > 2.5, f"Posed vertices were not baked into the DAE: x=[{low_x}, {high_x}]"
+assert low_x < 0.1 and high_x < 1.1, f"The source's live pose leaked into the DAE: x=[{low_x}, {high_x}]"
 print("POSE_EXPORT_CONTEXT_SMOKE_OK")

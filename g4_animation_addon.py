@@ -21,30 +21,98 @@ from mathutils import Matrix, Quaternion, Vector
 
 try:
     from .g4_model_probe import g4sk_entries_from_candidate
+    from .g4_model_probe import find_skeleton_for_model, parse_g4sk
     from .g4pk_extract_g4mt import select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
     from .g4ma_motion import decode_material_motion
     from .g4cm_camera import decode_camera, parse_g4cm
     from .g4_event import (
-        event_light_parameters, load_event_actor_models, load_event_actor_points,
+        event_light_config_references, event_light_parameter_entries, event_light_slots,
+        load_event_actor_models, load_event_actor_points,
         load_event_actor_point_assignments, point_assignment_for_actor,
     )
 except ImportError:
     from g4_model_probe import g4sk_entries_from_candidate
+    from g4_model_probe import find_skeleton_for_model, parse_g4sk
     from g4pk_extract_g4mt import select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
     from g4ma_motion import decode_material_motion
     from g4cm_camera import decode_camera, parse_g4cm
     from g4_event import (
-        event_light_parameters, load_event_actor_models, load_event_actor_points,
+        event_light_config_references, event_light_parameter_entries, event_light_slots,
+        load_event_actor_models, load_event_actor_points,
         load_event_actor_point_assignments, point_assignment_for_actor,
     )
 
 
 ADDON_ID = __name__
 MODEL_ID_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,3}\d{4,10})(?![A-Za-z0-9])")
+
+
+def action_fcurves(action):
+    """Return F-Curves for both Blender's legacy and layered Action APIs."""
+    legacy = getattr(action, "fcurves", None)
+    if legacy is not None:
+        return tuple(legacy)
+    curves = []
+    for layer in getattr(action, "layers", ()):
+        for strip in getattr(layer, "strips", ()):
+            for channelbag in getattr(strip, "channelbags", ()):
+                curves.extend(channelbag.fcurves)
+    return tuple(curves)
+
+
+def action_fcurve_find(action, data_path: str, index: int):
+    legacy = getattr(action, "fcurves", None)
+    if legacy is not None:
+        return legacy.find(data_path, index=index)
+    return next(
+        (curve for curve in action_fcurves(action) if curve.data_path == data_path and curve.array_index == index),
+        None,
+    )
+
+
+def action_fcurve_remove(action, curve) -> None:
+    legacy = getattr(action, "fcurves", None)
+    if legacy is not None:
+        legacy.remove(curve)
+        return
+    for layer in getattr(action, "layers", ()):
+        for strip in getattr(layer, "strips", ()):
+            for channelbag in getattr(strip, "channelbags", ()):
+                for candidate in tuple(channelbag.fcurves):
+                    if (
+                        candidate.data_path == curve.data_path
+                        and candidate.array_index == curve.array_index
+                    ):
+                        channelbag.fcurves.remove(candidate)
+                        return
+
+
+def action_fcurve_new(action, owner, data_path: str, index: int, group: str = ""):
+    legacy = getattr(action, "fcurves", None)
+    if legacy is not None:
+        return legacy.new(data_path, index=index, action_group=group)
+    if owner is None:
+        raise RuntimeError("Layered Blender Actions require an assigned datablock owner")
+    animation = owner.animation_data_create()
+    previous = animation.action
+    if previous != action:
+        animation.action = action
+    try:
+        return action.fcurve_ensure_for_datablock(
+            owner,
+            data_path,
+            index=index,
+            group_name=group,
+        )
+    finally:
+        if previous != action:
+            animation.action = previous
+
+
 def default_python() -> str:
     for candidate in ("/usr/bin/python3", "/opt/homebrew/bin/python3", sys.executable):
         if candidate and Path(candidate).exists():
@@ -294,6 +362,22 @@ def materialize_skeleton_source(source: str) -> Path | None:
 def resolve_skeleton_path(model_path: Path | None) -> Path | None:
     if model_path is None:
         return None
+    # Keep animation decoding on the same G4SK selected by the native model
+    # importer.  A character package can contain an embedded fallback rig
+    # whose bind transforms do not match the sibling rig used by its mesh
+    # palette; decoding against that fallback stretches skinned descendants.
+    try:
+        skeleton_data, skeleton_source = find_skeleton_for_model(model_path)
+    except (OSError, ValueError, RuntimeError):
+        skeleton_data, skeleton_source = None, None
+    if skeleton_data:
+        cache_root = Path(tempfile.gettempdir()) / "level5_g4sk_blender"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_key = zlib.crc32((str(model_path.resolve()) + str(skeleton_source)).encode("utf-8")) & 0xFFFFFFFF
+        destination = cache_root / f"{cache_key:08x}.g4sk"
+        if not destination.is_file() or destination.read_bytes() != skeleton_data:
+            destination.write_bytes(skeleton_data)
+        return destination
     for candidate in (model_path, model_path.with_suffix(".g4sk"), model_path.with_suffix(".g4pkm")):
         resolved = valid_skeleton_path(candidate)
         if resolved is not None:
@@ -448,55 +532,91 @@ def animate_character_parts(
 def remove_nonroot_translation_curves(action, armature) -> int:
     """Avoid rest-pose translation/scale deltas stretching a substituted skeleton."""
     removed = 0
-    for curve in tuple(action.fcurves):
+    for curve in action_fcurves(action):
         match = re.fullmatch(r'pose\.bones\["(.+)"\]\.(?:location|scale)', curve.data_path)
         if match is None:
             continue
         bone = armature.data.bones.get(match.group(1))
         if bone is None or bone.parent is None:
             continue
-        action.fcurves.remove(curve)
+        action_fcurve_remove(action, curve)
         removed += 1
     return removed
 
 
-def event_root_motion_name(motion: dict) -> str:
+def event_root_motion_name(motion: dict, armature=None) -> str:
     """Return the animated character root used as the event world transform."""
+    tracks = {track.get("target_name"): track for track in motion.get("tracks") or []}
     skeleton = motion.get("skeleton") or {}
     names = skeleton.get("names") or []
     parents = skeleton.get("parents") or []
-    tracks = {track.get("target_name"): track for track in motion.get("tracks") or []}
-    for index, name in enumerate(names):
-        if not re.fullmatch(r"c_c_\d+_0", name or "") or name not in tracks:
-            continue
-        parent_index = parents[index] if index < len(parents) else -1
-        parent_name = names[parent_index] if 0 <= parent_index < len(names) else ""
-        parent_track = tracks.get(parent_name)
-        parent_is_static = True
-        for samples in (parent_track or {}).get("values", {}).values():
-            if samples and any(
-                any(abs(component - samples[0][axis]) > 1e-6 for axis, component in enumerate(sample))
+    if not names and armature is not None:
+        # Event packages often contain hashed targets without an external
+        # skeleton block.  The native imported armature is authoritative for
+        # the target names and parent links in that case.
+        names = [bone.name for bone in armature.data.bones]
+
+    def track_has_motion(track: dict | None) -> bool:
+        for path, samples in (track or {}).get("values", {}).items():
+            if len(samples) < 2:
+                continue
+            first = samples[0]
+            if path == "rotation" and len(first) == 4:
+                if any(
+                    abs(abs(sum(value * reference for value, reference in zip(sample, first))) - 1.0) > 1e-6
+                    for sample in samples[1:]
+                ):
+                    return True
+                continue
+            if any(
+                len(sample) != len(first)
+                or any(abs(float(value) - float(reference)) > 1e-6 for value, reference in zip(sample, first))
                 for sample in samples[1:]
             ):
-                parent_is_static = False
-                break
-        if parent_is_static:
+                return True
+        return False
+
+    for index, name in enumerate(names):
+        track = tracks.get(name)
+        if (
+            not re.fullmatch(r"c_c_\d+_0", name or "")
+            or track is None
+            or not track_has_motion(track)
+        ):
+            continue
+        if parents and index < len(parents):
+            parent_index = parents[index]
+            parent_name = names[parent_index] if 0 <= parent_index < len(names) else ""
+        elif armature is not None:
+            bone = armature.data.bones.get(name)
+            parent_name = bone.parent.name if bone is not None and bone.parent is not None else ""
+        else:
+            parent_name = ""
+        parent_track = tracks.get(parent_name)
+        if not track_has_motion(parent_track):
             return name
     return ""
 
 
-def extract_event_root_motion(action, motion: dict, root_name: str, model_base_matrix: Matrix) -> int:
-    """Move the event's root-bone delta to the armature object exactly once."""
+def extract_event_root_motion(
+    action,
+    motion: dict,
+    root_name: str,
+    model_base_matrix: Matrix,
+    armature=None,
+) -> int:
+    """Apply an event root track to the armature object in absolute event space."""
     if not root_name:
         return 0
     track = next((item for item in motion.get("tracks") or [] if item.get("target_name") == root_name), None)
     rest = motion_rest_matrices(motion).get(root_name)
     frames = motion.get("frames") or []
-    if track is None or rest is None or not frames:
+    root_pose_bone = armature.pose.bones.get(root_name) if armature is not None else None
+    if track is None or (rest is None and root_pose_bone is None) or not frames:
         return 0
-    for curve in tuple(action.fcurves):
-        if curve.data_path.startswith(f'pose.bones["{root_name}"]'):
-            action.fcurves.remove(curve)
+    root_rest = root_pose_bone.bone.matrix_local.copy() if root_pose_bone is not None else rest.copy()
+    if armature is not None:
+        armature.rotation_mode = "QUATERNION"
     locations, rotations, scales = [], [], []
     previous_rotation = None
     for index in range(len(frames)):
@@ -506,10 +626,13 @@ def extract_event_root_motion(action, motion: dict, root_name: str, model_base_m
             "rotation": values["rotation"][index],
             "scale": values["scale"][index],
         })
-        delta = rest.inverted_safe() @ source
-        # The imported model basis is local to the Armature.  Compose it on
-        # the right so the event's world translation is not rotated again.
-        matrix = (SOURCE_TO_BLENDER @ delta @ SOURCE_TO_BLENDER.inverted()) @ model_base_matrix
+        # The event root is an absolute source-space transform.  Keep the
+        # skeleton in its local source basis and move only the armature object
+        # into event space; the regular local bone tracks then compose against
+        # the native bind pose without applying the hierarchy twice.
+        source_to_blender = SOURCE_TO_BLENDER @ source @ SOURCE_TO_BLENDER.inverted()
+        event_root_world = model_base_matrix @ source_to_blender
+        matrix = event_root_world @ root_rest.inverted_safe()
         location, rotation, scale = matrix.decompose()
         if previous_rotation is not None and previous_rotation.dot(rotation) < 0.0:
             rotation.negate()
@@ -525,8 +648,10 @@ def extract_event_root_motion(action, motion: dict, root_name: str, model_base_m
             append_curve_samples(
                 action, cache, data_path, component, "Event Root Motion", reduced_frames,
                 [sample[component] for sample in reduced_samples],
+                owner=armature,
             )
     action["g4_event_root_motion"] = root_name
+    action["g4_event_root_transform"] = "absolute_source_to_armature_object"
     return len(frames)
 
 
@@ -536,6 +661,47 @@ def has_display_oriented_bones(armature) -> bool:
         and armature.type == "ARMATURE"
         and any("g4_rest_rotation_xyzw" in bone for bone in armature.data.bones)
     )
+
+
+def align_armature_to_native_bind(armature, model_path: Path) -> int:
+    """Use the model's G4SK bind matrices as the animation rig rest axes."""
+    try:
+        skeleton_data, _source = find_skeleton_for_model(model_path)
+        skeleton = parse_g4sk(skeleton_data) if skeleton_data else None
+    except (OSError, ValueError, RuntimeError, struct.error):
+        return 0
+    if not skeleton:
+        return 0
+    names = skeleton.get("names") or []
+    matrices = skeleton.get("bind_matrices") or []
+    if not names or not matrices:
+        return 0
+
+    previous_active = bpy.context.view_layer.objects.active
+    previous_mode = bpy.context.object.mode if bpy.context.object is not None else "OBJECT"
+    if previous_mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    applied = 0
+    try:
+        bpy.context.view_layer.objects.active = armature
+        armature.select_set(True)
+        bpy.ops.object.mode_set(mode="EDIT")
+        for name, values in zip(names, matrices):
+            edit_bone = armature.data.edit_bones.get(name)
+            if edit_bone is None or len(values) != 16:
+                continue
+            edit_bone.matrix = Matrix(
+                (values[0:4], values[4:8], values[8:12], values[12:16])
+            )
+            applied += 1
+        bpy.ops.object.mode_set(mode="OBJECT")
+        armature["g4_animation_bind_axes"] = applied
+    finally:
+        if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        if previous_active is not None:
+            bpy.context.view_layer.objects.active = previous_active
+    return applied
 
 
 def import_model_for_animation(
@@ -597,6 +763,7 @@ def import_model_for_animation(
     armature = best_armature(imported, track_bone_names(motion))
     if armature is None:
         raise RuntimeError(f"The imported model contains no usable armature: {model_path}")
+    align_armature_to_native_bind(armature, model_path)
     resolve_track_names_from_armature(motion, armature)
     if align_to_motion_rest:
         align_armature_to_motion_rest(armature, motion)
@@ -729,16 +896,16 @@ def blender_local_rest_matrix(pose_bone) -> Matrix:
     return bone.parent.matrix_local.inverted_safe() @ bone.matrix_local
 
 
-def append_curve_samples(action, cache: dict, data_path: str, index: int, group: str, frames, values) -> None:
+def append_curve_samples(action, cache: dict, data_path: str, index: int, group: str, frames, values, owner=None) -> None:
     if len(values) > 2 and max(values) - min(values) <= 1e-9:
         frames = (frames[0], frames[-1])
         values = (values[0], values[-1])
     key = (data_path, index)
     curve = cache.get(key)
     if curve is None:
-        curve = action.fcurves.find(data_path, index=index)
+        curve = action_fcurve_find(action, data_path, index)
         if curve is None:
-            curve = action.fcurves.new(data_path, index=index, action_group=group)
+            curve = action_fcurve_new(action, owner, data_path, index, group)
         cache[key] = curve
     count = len(frames)
     if not count:
@@ -763,6 +930,7 @@ def append_motion_to_action(
     frame_origin: int,
     curve_cache: dict | None = None,
     progress_callback=None,
+    event_root_name: str | None = None,
 ) -> tuple[int, int]:
     cache = curve_cache if curve_cache is not None else {}
     rest_by_name = motion_rest_matrices(motion)
@@ -784,8 +952,17 @@ def append_motion_to_action(
     keyed_bones = 0
     relative_rest_tracks = 0
     track_count = len(motion["tracks"])
+    if event_root_name is None:
+        event_root_name = event_root_motion_name(motion)
     for track_index, track in enumerate(motion["tracks"], start=1):
         name = track.get("target_name")
+        # Event root tracks are absolute actor transforms.  They are already
+        # applied once to the armature object by extract_event_root_motion;
+        # retaining the same track on the root bone would apply the root twice.
+        if event_root_name and name == event_root_name:
+            if progress_callback is not None:
+                progress_callback(track_index, track_count)
+            continue
         rest = rest_by_name.get(name)
         pose_bones = [armature.pose.bones[name]] if name and name in armature.pose.bones else []
         if not pose_bones:
@@ -858,6 +1035,7 @@ def append_motion_to_action(
                         pose_bone.name,
                         reduced_frames,
                         [sample[component] for sample in reduced_samples],
+                        owner=armature,
                     )
             keyed_bones += 1
         if progress_callback is not None:
@@ -870,12 +1048,17 @@ def create_action(
     motion: dict,
     frame_origin: int | None = None,
     progress_callback=None,
+    event_root_name: str | None = None,
 ) -> tuple[bpy.types.Action, int]:
     clip = motion["clip"]
     action = bpy.data.actions.new(name=clip["name"] or "G4MT Animation")
     action.use_fake_user = True
     armature.animation_data_create()
     clear_pose(armature)
+    # Blender 5.2 creates layered Actions without the legacy action.fcurves
+    # collection. Assign the owner before adding curves so the compatibility
+    # helper can create the correct action slot/channel bag.
+    armature.animation_data.action = action
     source_start = clip["start_frame"] if frame_origin is None else frame_origin
     keyed_bones, relative_rest_tracks = append_motion_to_action(
         armature,
@@ -883,6 +1066,7 @@ def create_action(
         action,
         source_start,
         progress_callback=progress_callback,
+        event_root_name=event_root_name,
     )
     armature.animation_data.action = None
     armature.animation_data.action = action
@@ -991,6 +1175,7 @@ def finish_chained_g4mt_import(
     settings_json: str,
 ):
     settings = json.loads(settings_json or "{}")
+    settings["prompt_for_models"] = False
     return bpy.ops.import_scene.level5_g4mt(
         "EXEC_DEFAULT",
         filepath=animation_path,
@@ -999,7 +1184,6 @@ def finish_chained_g4mt_import(
         shoes_model=shoes_model,
         import_model=True,
         import_character_parts=bool(body_model or shoes_model),
-        prompt_for_models=False,
         **settings,
     )
 
@@ -1505,7 +1689,7 @@ def create_camera_animation(
         camera_data.keyframe_insert("lens", frame=frame, group="Camera Lens")
 
     for action in (transform_action, lens_action):
-        for fcurve in action.fcurves:
+        for fcurve in action_fcurves(action):
             for point in fcurve.keyframe_points:
                 point.interpolation = "LINEAR"
         action["g4cm_source"] = str(path)
@@ -1803,7 +1987,7 @@ def create_effect_g4ma_actions(paths: list[Path], materials_by_crc: dict[int, li
                                 f"g4_g4ma_{track['target_hash']}_{curve['channel_index']}_{component}"
                             )
                             material[property_name] = curve["values"][0][component]
-                            fcurve = action.fcurves.new(data_path=f'["{property_name}"]')
+                            fcurve = action_fcurve_new(action, material, f'["{property_name}"]', 0, "G4MA")
                             for frame, value in zip(motion["frames"], curve["values"]):
                                 point = fcurve.keyframe_points.insert(
                                     frame - start_frame + 1,
@@ -1813,7 +1997,7 @@ def create_effect_g4ma_actions(paths: list[Path], materials_by_crc: dict[int, li
                                 point.interpolation = (
                                     "CONSTANT" if curve["interpolation"] == "STEP" else "LINEAR"
                                 )
-                    if action.fcurves:
+                    if action_fcurves(action):
                         action_names.append(action.name)
                     else:
                         bpy.data.actions.remove(action)
@@ -2095,48 +2279,114 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
     light_directory = directory / f"{directory.name}_light"
     if not light_directory.is_dir():
         return None
-    keyed = []
-    for path in sorted(light_directory.glob("EventMap_fix_c*.cfg.bin")):
-        cut_match = re.search(r"_(c\d+)\.cfg\.bin$", path.name, re.IGNORECASE)
-        cut = cut_match.group(1).lower() if cut_match else None
-        if cut not in cut_starts:
-            continue
+    config_specs = []
+    manifest = light_directory / "light_list.cfg.bin"
+    if manifest.is_file():
         try:
-            parameters = event_light_parameters(path)
+            for kind, cut, resource in event_light_config_references(manifest):
+                resource_name = Path(resource.replace("\\", "/")).name
+                path = light_directory / resource_name
+                if path.is_file() and cut in cut_starts:
+                    config_specs.append((kind, cut, path))
+        except (OSError, ValueError, struct.error):
+            config_specs = []
+    if not config_specs:
+        for path in sorted(light_directory.iterdir(), key=lambda item: item.name.casefold()):
+            cut_match = re.search(
+                r"_(c\d+)\.cfg\.bin(?:\.(?:json|xml))?$", path.name, re.IGNORECASE
+            )
+            if not path.is_file() or not path.name.casefold().startswith("eventmap_fix_"):
+                continue
+            cut = cut_match.group(1).lower() if cut_match else None
+            if cut in cut_starts:
+                config_specs.append(("fix", cut, path))
+    grouped = {}
+    for kind, cut, path in config_specs:
+        try:
+            entries = event_light_parameter_entries(path)
+            slots = event_light_slots(entries)
         except (OSError, ValueError, struct.error):
             continue
-        if parameters:
-            keyed.append((cut, cut_starts[cut], parameters))
+        group = grouped.setdefault(
+            cut, {"frame": cut_starts[cut], "parameters": {}, "lights": []}
+        )
+        for name, values in entries:
+            group["parameters"].setdefault(name, values)
+        for index, slot in enumerate(slots):
+            slot = dict(slot)
+            slot["id"] = f"{kind}:{path.name}:{index}"
+            slot["kind"] = kind
+            slot["source"] = path.name
+            group["lights"].append(slot)
+    keyed = [
+        (cut, item["frame"], item["parameters"], item["lights"])
+        for cut, item in grouped.items()
+        if item["parameters"] or item["lights"]
+    ]
     if not keyed:
         return None
 
     scene = bpy.context.scene
     if scene.world is None:
         scene.world = bpy.data.worlds.new(f"{directory.name} World")
-    light_data = bpy.data.lights.new(f"{directory.name} Character Light", "SUN")
-    light_object = bpy.data.objects.new(light_data.name, light_data)
-    scene.collection.objects.link(light_object)
-    for cut, frame, parameters in keyed:
-        direction = parameters.get("charaLightDir")
-        if direction and len(direction) >= 3:
-            vector = SOURCE_TO_BLENDER.to_3x3() @ Vector(direction[:3])
-            if vector.length_squared > 1e-8:
-                light_object.rotation_euler = vector.normalized().to_track_quat("-Z", "Y").to_euler()
-                light_object.keyframe_insert("rotation_euler", frame=frame)
-        highlight = parameters.get("charaHighLightColor")
-        if highlight and len(highlight) >= 3:
-            light_data.color = tuple(max(0.0, value) for value in highlight[:3])
-            light_data.energy = max(0.0, highlight[3] if len(highlight) > 3 else 1.0)
-            light_data.keyframe_insert("color", frame=frame)
-            light_data.keyframe_insert("energy", frame=frame)
+    light_keys = []
+    for _, _, _, slots in keyed:
+        for slot in slots:
+            key = slot["id"]
+            if key not in light_keys:
+                light_keys.append(key)
+    light_collection = bpy.data.collections.new(f"{directory.name} Event Lights")
+    scene.collection.children.link(light_collection)
+    light_objects = []
+    light_data_blocks = []
+    for index, key in enumerate(light_keys):
+        source = next(
+            slot.get("source", "Character Light")
+            for _, _, _, slots in keyed
+            for slot in slots
+            if slot["id"] == key
+        )
+        light_data = bpy.data.lights.new(
+            f"{directory.name} {Path(str(source)).stem} Light {index + 1:02d}", "SUN"
+        )
+        light_data.use_shadow = True
+        light_object = bpy.data.objects.new(light_data.name, light_data)
+        light_collection.objects.link(light_object)
+        light_objects.append(light_object)
+        light_data_blocks.append(light_data)
+
+    for cut, frame, parameters, slots in keyed:
+        slots_by_id = {slot["id"]: slot for slot in slots}
+        for index, (light_object, light_data) in enumerate(zip(light_objects, light_data_blocks)):
+            slot = slots_by_id.get(light_keys[index])
+            light_object.hide_render = slot is None
+            light_object.keyframe_insert("hide_render", frame=frame)
+            if slot is None:
+                continue
+            direction = slot.get("direction")
+            if direction and len(direction) >= 3:
+                vector = SOURCE_TO_BLENDER.to_3x3() @ Vector(direction[:3])
+                if vector.length_squared > 1e-8:
+                    light_object.rotation_euler = vector.normalized().to_track_quat("-Z", "Y").to_euler()
+                    light_object.keyframe_insert("rotation_euler", frame=frame)
+            color = slot.get("color")
+            if color and len(color) >= 3:
+                light_data.color = tuple(max(0.0, value) for value in color[:3])
+                light_data.energy = max(0.0, color[3] if len(color) > 3 else 1.0)
+            energy = slot.get("energy")
+            if energy:
+                light_data.energy = max(0.0, energy[0])
+            if color or energy:
+                light_data.keyframe_insert("color", frame=frame)
+                light_data.keyframe_insert("energy", frame=frame)
         ambient = parameters.get("charaAmbient")
         if ambient and len(ambient) >= 3:
             scene.world.color = tuple(max(0.0, value) for value in ambient[:3])
             scene.world.keyframe_insert("color", frame=frame)
-    for owner in (light_object, light_data, scene.world):
+    for owner in (*light_objects, *light_data_blocks, scene.world):
         animation = owner.animation_data
         if animation and animation.action:
-            for curve in animation.action.fcurves:
+            for curve in action_fcurves(animation.action):
                 for point in curve.keyframe_points:
                     point.interpolation = "CONSTANT"
 
@@ -2152,7 +2402,7 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         under_rim_width = material.node_tree.nodes.get("G4 Under Rim Width")
         under_rim_strength = material.node_tree.nodes.get("G4 Under Rim Strength")
         keyed_material = False
-        for _, frame, parameters in keyed:
+        for _, frame, parameters, _ in keyed:
             for node, parameter_name in (
                 (highlight_node, "charaHighLightColor"),
                 (underlight_node, "charaUnderRimColor"),
@@ -2208,14 +2458,18 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
             animated_materials += 1
             animation = material.node_tree.animation_data
             if animation and animation.action:
-                for curve in animation.action.fcurves:
+                for curve in action_fcurves(animation.action):
                     for point in curve.keyframe_points:
                         point.interpolation = "CONSTANT"
     scene["g4_event_animated_materials"] = animated_materials
     scene["g4_event_light_parameters"] = json.dumps(
-        {cut: parameters for cut, _, parameters in keyed}, sort_keys=True
+        {cut: parameters for cut, _, parameters, _ in keyed}, sort_keys=True
     )
-    return light_object
+    scene["g4_event_lights"] = json.dumps(
+        {cut: slots for cut, _, _, slots in keyed}, sort_keys=True
+    )
+    scene["g4_event_light_count"] = len(light_keys)
+    return light_objects[0] if light_objects else None
 
 
 def point_global_samples(motion: dict, target_name: str) -> list[Matrix]:
@@ -2271,6 +2525,8 @@ def append_event_placement(
     matrices = point_global_samples(motion, target_name)
     if not matrices:
         return 0
+    armature.animation_data_create()
+    armature.animation_data.action = action
     frames = [1 + frame - motion["clip"]["start_frame"] for frame in motion["frames"]]
     locations = []
     rotations = []
@@ -2303,6 +2559,7 @@ def append_event_placement(
                 "Event Placement",
                 reduced_frames,
                 [sample[component] for sample in reduced_samples],
+                owner=armature,
             )
     action["g4_event_point"] = target_name
     return len(matrices)
@@ -2472,8 +2729,8 @@ def animate_event_face_materials(
             continue
         action = bpy.data.actions.new(f"{actor}_{clip['name']}_{material.name}_Face")
         path_x = f'{mapping.path_from_id()}.inputs["Location"].default_value'
-        curve_x = action.fcurves.new(data_path=path_x, index=0)
-        curve_y = action.fcurves.new(data_path=path_x, index=1)
+        curve_x = action_fcurve_new(action, material.node_tree, path_x, 0, "G4 Face Expressions")
+        curve_y = action_fcurve_new(action, material.node_tree, path_x, 1, "G4 Face Expressions")
         previous = None
         for source_frame, value in zip(motion["frames"], values):
             state = int(round(value[0]))
@@ -2490,7 +2747,7 @@ def animate_event_face_materials(
             for curve, offset in ((curve_x, offset_x), (curve_y, offset_y)):
                 point = curve.keyframe_points.insert(frame, offset, options={"FAST"})
                 point.interpolation = "CONSTANT"
-        if not action.fcurves:
+        if not action_fcurves(action):
             bpy.data.actions.remove(action)
             continue
         tree = material.node_tree
@@ -2588,7 +2845,11 @@ def import_event_actor(
         attach_ball,
         ball_model,
         character_part_stem=character_part_stem,
-        align_to_motion_rest=not (generic_actor and bool(head_model)),
+        # Event G4MT skeletons can carry a motion-local rest pose that differs
+        # from the native bind skeleton in the model package.  Replacing the
+        # native rest bones here breaks the skin bind and stretches the mesh;
+        # the event action retargets onto the imported native rest instead.
+        align_to_motion_rest=False,
     )
     display_actor = actor
     if generic_actor and head_model:
@@ -2602,6 +2863,7 @@ def import_event_actor(
     track = armature.animation_data.nla_tracks.new()
     track.name = "G4 Event Cuts"
     clear_pose(armature)
+    event_root_base_matrix = armature.matrix_basis.copy()
 
     keyed_bones = 0
     cut_frames = []
@@ -2612,7 +2874,30 @@ def import_event_actor(
             motion, entry_name = decode_event_package(package, skeleton_path, temporary_directory)
         resolve_track_names_from_armature(motion, armature)
         clip = motion["clip"]
-        action, keyed = create_action(armature, motion, clip["start_frame"])
+        event_root_name = event_root_motion_name(motion, armature)
+        action, keyed = create_action(
+            armature,
+            motion,
+            clip["start_frame"],
+            event_root_name=event_root_name,
+        )
+        event_root_frames = 0
+        if event_root_name:
+            event_root_frames = extract_event_root_motion(
+                action,
+                motion,
+                event_root_name,
+                event_root_base_matrix,
+                armature,
+            )
+            if event_root_frames:
+                action["g4_event_root_bone"] = event_root_name
+                action["g4_event_root_space"] = "armature_object_absolute"
+                action["g4_event_root_base_matrix"] = [
+                    float(event_root_base_matrix[row][column])
+                    for row in range(4)
+                    for column in range(4)
+                ]
         substituted_generic = generic_actor and bool(head_model)
         if substituted_generic:
             remove_nonroot_translation_curves(action, armature)
@@ -2655,7 +2940,9 @@ def import_event_actor(
         if debug_log is not None:
             debug_log.append(
                 f"{actor}/{cut}: keyed={keyed}; frames={duration}; "
-                f"fcurves={len(action.fcurves)}; face_materials={face_materials}; strip_start={strip_start}"
+                f"fcurves={len(action_fcurves(action))}; event_root={event_root_name or '<none>'}; "
+                f"event_root_frames={event_root_frames}; face_materials={face_materials}; "
+                f"strip_start={strip_start}"
             )
         cut_frames.append((cut, strip_start))
         keyed_bones += keyed
@@ -2705,7 +2992,7 @@ def animate_event_actor_visibility(armature, active_cuts: set[str], cut_starts: 
             obj.keyframe_insert("hide_render", frame=frame)
         animation = obj.animation_data
         if animation and animation.action:
-            for curve in animation.action.fcurves:
+            for curve in action_fcurves(animation.action):
                 if curve.data_path not in {"hide_viewport", "hide_render"}:
                     continue
                 for point in curve.keyframe_points:
