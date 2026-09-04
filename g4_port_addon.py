@@ -2397,6 +2397,13 @@ def auto_configure_uv_handling(props: G4PortSceneSettings) -> None:
     props.auto_pack_source_uvs = True
 
 
+def has_explicit_texture_replacements(props: G4PortSceneSettings) -> bool:
+    """Return whether the user supplied a prepared image that must be preserved."""
+    # The CSV is also rewritten by the exporter and can be stale scene state.
+    # An entry path is the explicit user-owned source-of-truth for this decision.
+    return any(entry.replacement_path and not entry.atlas_signature for entry in props.texture_entries)
+
+
 def source_path_for_object(obj: bpy.types.Object) -> str:
     override = bpy.path.abspath(obj.level5_g4_port.source_texture)
     return override if override and Path(override).is_file() else first_used_material_image(obj)
@@ -3151,8 +3158,10 @@ def enforce_g4_uv_orientation(props: G4PortSceneSettings) -> bool:
 def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     prefs = addon_preferences()
     props = ensure_scene_defaults(context)
-    props.use_source_uv_transforms = True
-    props.auto_pack_source_uvs = True
+    explicit_texture_replacements = props.texture_mode == "custom" and has_explicit_texture_replacements(props)
+    if not explicit_texture_replacements:
+        props.use_source_uv_transforms = True
+        props.auto_pack_source_uvs = True
     repaired_face_keys = normalize_shared_face_record_keys(props)
     if repaired_face_keys:
         port_log(None, f"Repaired shared face texture key on {repaired_face_keys} record(s)")
@@ -3161,7 +3170,8 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     # is true for a single-record uniform too: skipping the atlas in that case
     # copied the template outfit's G4TX and made a successful mesh port appear
     # to have the wrong texture in game.
-    auto_configure_uv_handling(props)
+    if not explicit_texture_replacements:
+        auto_configure_uv_handling(props)
     
     original_model = resolve_file(props.original_model)
     if not original_model.is_file():
@@ -3219,7 +3229,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         # come from an older scene state, so rebuild/reapply the packing on
         # every export that has Auto Pack enabled.  This keeps the PNG and the
         # G4MG UV transforms as one atomic operation.
-        generate_texture_png_set(context, prepared_texture_dir)
+        if explicit_texture_replacements:
+            port_log(None, "Using explicit prepared texture replacements; preserving source UV layout")
+        else:
+            generate_texture_png_set(context, prepared_texture_dir)
 
         # Rebuild the expression pool before serialising configuration or
         # copying customTextures.  Besides writing the 4x2 PNG this reapplies
