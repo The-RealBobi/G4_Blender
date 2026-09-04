@@ -13,8 +13,138 @@ PORT = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = PORT
 SPEC.loader.exec_module(PORT)
 
+PROBE_SOURCE = Path(__file__).parents[1] / "g4_model_probe.py"
+PROBE_SPEC = importlib.util.spec_from_file_location("g4_model_probe_multi_record_test", PROBE_SOURCE)
+PROBE = importlib.util.module_from_spec(PROBE_SPEC)
+sys.modules[PROBE_SPEC.name] = PROBE
+PROBE_SPEC.loader.exec_module(PROBE)
+
 
 class PortSkinningSafetyTests(unittest.TestCase):
+    def test_native_four_record_template_keeps_every_record(self):
+        dump_root = Path(
+            "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_712/._work/raw/data"
+        )
+        relative_models = (Path("chr/_face/11_VICTORY/c11901160/c11901160.g4md"),)
+        available = [path for path in relative_models if (dump_root / "common" / path).is_file()]
+        if not available:
+            self.skipTest("requires native Victory Road models with more than three records")
+
+        for relative_model in available:
+            template = dump_root / "common" / relative_model
+            native_md = template.read_bytes()
+            native_mg = template.with_suffix(".g4mg").read_bytes()
+            native_info = PROBE.parse_g4md(native_md, native_mg)
+            mesh_names = native_info["mesh_names"]
+            material_names = native_info["material_names"]
+            meshes = []
+            rules = []
+            for index, source in enumerate(native_info["records"]):
+                material_index = int(source["material_index"])
+                vertex = PORT.Vertex(
+                    (float(index), 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (0.0, 0.0),
+                )
+                meshes.append(
+                    PORT.Mesh(
+                        mesh_names[index],
+                        [vertex, vertex, vertex],
+                        [0, 1, 2],
+                        material_index,
+                        material_names[material_index],
+                        source_record_index=index,
+                    )
+                )
+                rules.append(
+                    PORT.RecordRule(
+                        mesh_names[index],
+                        material_names[material_index],
+                        [mesh_names[index]],
+                        fallback_degenerate=True,
+                        force_layout_material=(
+                            int(source["layout_index"]),
+                            material_index,
+                        ),
+                    )
+                )
+
+            config = PORT.PortConfig(
+                relative_model,
+                material_names,
+                rules,
+                {},
+            )
+            g4mg, records = PORT.build_g4mg(
+                meshes,
+                record_rules=rules,
+                palettes=PORT.native_record_palettes(native_md),
+                uv_formats=PORT.native_record_uv_formats(native_md),
+            )
+            output = PORT.build_base_g4md(meshes, records, dump_root, config)
+            output_info = PROBE.parse_g4md(output, g4mg)
+
+            self.assertGreater(output_info["mesh_count"], 3, relative_model.as_posix())
+            self.assertEqual(output_info["mesh_count"], native_info["mesh_count"])
+            self.assertEqual(output_info["material_count"], native_info["material_count"])
+            self.assertEqual(output_info["mesh_names"], mesh_names)
+            self.assertEqual(output_info["material_names"], material_names)
+            self.assertEqual(len(output_info["records"]), native_info["mesh_count"])
+            self.assertTrue(
+                all(record["vertex_range_ok"] and record["index_range_ok"] for record in output_info["records"]),
+                relative_model.as_posix(),
+            )
+            self.assertEqual(
+                [record["material_index"] for record in output_info["records"]],
+                [int(record["material_index"]) for record in native_info["records"]],
+            )
+            self.assertEqual(
+                PORT.validate_generated_model(output, g4mg)["records"],
+                native_info["mesh_count"],
+            )
+
+    def test_added_record_inherits_a_valid_native_descriptor(self):
+        template = Path(
+            "/Volumes/BOBI/Proyectos Personales/VictoryRoad/DUMP_712/._work/raw/data/"
+            "common/chr/_face/11_VICTORY/c11010060/c11010060.g4md"
+        )
+        if not template.is_file():
+            self.skipTest("requires the local Victory Road dump")
+        raw_root = template.parents[5]
+        material_name = "c11010060_20M"
+        meshes = []
+        rules = []
+        for index in range(4):
+            vertex = PORT.Vertex(
+                (float(index), 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0),
+            )
+            meshes.append(PORT.Mesh(f"part_{index}", [vertex] * 3, [0, 1, 2], 0, material_name))
+            rules.append(
+                PORT.RecordRule(
+                    f"part_{index}",
+                    material_name,
+                    [f"part_{index}"],
+                    fallback_degenerate=True,
+                    force_layout_material=(0, 0),
+                )
+            )
+        config = PORT.PortConfig(
+            Path("chr/_face/11_VICTORY/c11010060/c11010060.g4md"),
+            ["c11010060_20M", "c11010060_10M", "c11010060_30M"],
+            rules,
+            {},
+        )
+
+        g4mg, records = PORT.build_g4mg(meshes, record_rules=rules)
+        output = PORT.build_base_g4md(meshes, records, raw_root, config)
+
+        self.assertEqual(struct.unpack_from("<H", output, 0x20)[0], 4)
+        self.assertEqual(PORT.validate_generated_model(output, g4mg)["records"], 4)
+        submesh_table = struct.unpack_from("<H", output, 0x04)[0]
+        self.assertEqual(struct.unpack_from("<H", output, submesh_table + 3 * 0x50 + 0x3E)[0], 0x44)
+
     def test_pack_vertex_zero_fills_unused_joint_indices(self):
         vertex = PORT.Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0))
         payload = PORT.pack_vertex(vertex, [(3, 1.0)])

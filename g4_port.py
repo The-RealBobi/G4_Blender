@@ -9,6 +9,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 import zlib
 from dataclasses import dataclass
@@ -1706,7 +1707,17 @@ def configured_record_palettes(
         return used_joints
 
     def expanded_native_palette(index: int, rule: RecordRule, mesh: Mesh) -> list[int]:
-        palette = list(native_palettes[index])
+        # Output records may be added beyond the native table.  They have no
+        # baseline palette.  Seed them from the last valid native palette so a
+        # degenerate record still has a legal joint slot; real influences are
+        # then appended below when auto-palette is enabled.
+        palette = (
+            list(native_palettes[index])
+            if index < len(native_palettes)
+            else list(native_palettes[-1])
+            if native_palettes
+            else [0]
+        )
         used_joints = used_palette_joints(mesh, rule, palette)
         palette.extend(sorted(used_joints.difference(palette)))
         if len(palette) > 0xFF:
@@ -1717,7 +1728,13 @@ def configured_record_palettes(
         mesh = meshes[index]
         source_index = _source_record_index(mesh, index, len(records))
         rule = records[source_index]
-        native_palette = native_palettes[source_index] if source_index < len(native_palettes) else []
+        native_palette = (
+            native_palettes[source_index]
+            if source_index < len(native_palettes)
+            else native_palettes[-1]
+            if native_palettes
+            else [0]
+        )
         if rule.auto_palette:
             palettes.append(expanded_native_palette(source_index, rule, mesh))
             continue
@@ -2507,6 +2524,12 @@ def build_base_g4md(meshes: list[Mesh], records: list[dict], raw_root: Path, con
     for mesh_index, (mesh, record, rule) in enumerate(zip(meshes, records, config.records)):
         off = header_size + mesh_index * 0x50
         source_index = _source_record_index(mesh, mesh_index, native_mesh_count)
+        if mesh_count > native_mesh_count:
+            # A newly added output record has no corresponding native record.
+            # Seed it from the last valid descriptor instead of copying an
+            # empty slice past the native table; the fields below then replace
+            # its ranges and any explicitly configured layout/material data.
+            source_index = min(source_index, native_mesh_count - 1)
         source_off = header_size + source_index * 0x50
         if mesh_count > native_mesh_count:
             md[off : off + 0x50] = native[source_off : source_off + 0x50]
@@ -2709,6 +2732,18 @@ def texture_converter_path() -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
+def _png_dimensions(path: Path) -> tuple[int, int] | None:
+    """Read PNG dimensions without decoding the image."""
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(24)
+    except OSError:
+        return None
+    if header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
+        return None
+    return struct.unpack_from(">II", header, 16)
+
+
 def png_to_dds(path: Path, native_payload: bytes) -> bytes:
     """Encode a PNG in the exact compressed DDS family expected by the template."""
     compression = native_dds_compression(native_payload)
@@ -2725,6 +2760,26 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
             "or set LEVEL5_G4_TEXTURE_CONVERTER to its executable."
         )
     mip_count = max(1, struct.unpack_from("<I", native_payload, 28)[0])
+    native_dimensions = dds_dimensions(native_payload)
+    input_path = path
+    resized_path: Path | None = None
+    if image_dimensions := _png_dimensions(path):
+        if image_dimensions != native_dimensions:
+            try:
+                from PIL import Image
+            except ImportError as exc:
+                raise RuntimeError(
+                    f"PNG replacement {path.name} is {image_dimensions[0]}x{image_dimensions[1]}, "
+                    f"but the native texture is {native_dimensions[0]}x{native_dimensions[1]}; "
+                    "Pillow is required to resize it"
+                ) from exc
+            with Image.open(path) as image:
+                image = image.convert("RGBA").resize(native_dimensions, Image.Resampling.LANCZOS)
+                handle, temporary_name = tempfile.mkstemp(prefix="g4_native_texture_", suffix=".png")
+                os.close(handle)
+                resized_path = Path(temporary_name)
+                image.save(resized_path, format="PNG")
+            input_path = resized_path
     tmp = path.with_suffix(path.suffix + ".port_tmp.dds")
     try:
         if converter.name.casefold() == "texconv":
@@ -2732,7 +2787,7 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
                 str(converter), "-f", f"{compression}_UNORM", "-m", str(mip_count),
                 "-y", "-o", str(tmp.parent), str(path),
             ]
-            output = tmp.parent / f"{path.stem}.DDS"
+            output = tmp.parent / f"{input_path.stem}.DDS"
         else:
             command = [
                 str(converter), f"--compression_format={compression}",
@@ -2740,7 +2795,7 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
                 # transparent texels; ISPC Fastest remains deterministic and
                 # writes the same DX10/BC7 contract as the native archive.
                 "--compression_quality=Fastest", "--alpha_mode=Preserve",
-                f"--max_mipmaps={mip_count}", "--file_format=DDS", f"--output={tmp}", str(path),
+                f"--max_mipmaps={mip_count}", "--file_format=DDS", f"--output={tmp}", str(input_path),
             ]
             output = tmp
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -2753,8 +2808,10 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
         return payload
     finally:
         tmp.unlink(missing_ok=True)
+        if resized_path is not None:
+            resized_path.unlink(missing_ok=True)
         if converter.name.casefold() == "texconv":
-            (tmp.parent / f"{path.stem}.DDS").unlink(missing_ok=True)
+            (tmp.parent / f"{input_path.stem}.DDS").unlink(missing_ok=True)
 
 
 def replacement_texture(path: Path, native_payload: bytes) -> bytes:
