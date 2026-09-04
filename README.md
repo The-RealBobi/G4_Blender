@@ -164,3 +164,21 @@ Provide your own legally obtained game files. This project is not affiliated wit
 * **DaRk_Proaso** — porting testing.
 * **DaniKH** — batch-importing and shading support, rigging testing and bug reporting.
 * **Victory Road España**.
+
+## Animation import (1.5.0)
+
+The G4MT/G4PK importer creates separate Actions for all independent clips in
+its selected bank. Leave **Active Animation** empty to start with the first
+clip longer than two frames, or enter an exact name/index. Disable **Import All
+Animations** to import only that selection. Additive clips still require a
+base animation and are reported as skipped.
+
+Normal imports retain animated root bones. Event root extraction now uses
+the same bone delta and rest basis, preserving the resulting world pose
+instead of converting the coordinate system twice. Existing Actions need to
+be reimported to receive the fix.
+
+Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
+(8 and 24 clips) in Blender 4.5.10 and 5.2, a Gakuen Y bank, and six Victory
+Road event cuts with world-matrix and skinned-vertex comparisons. This does
+not establish native-game equivalence or support for additive blending.
