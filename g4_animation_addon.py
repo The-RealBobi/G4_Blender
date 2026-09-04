@@ -605,7 +605,7 @@ def extract_event_root_motion(
     model_base_matrix: Matrix,
     armature=None,
 ) -> int:
-    """Apply an event root track to the armature object in absolute event space."""
+    """Transfer the root bone delta to the object while preserving its world pose."""
     if not root_name:
         return 0
     track = next((item for item in motion.get("tracks") or [] if item.get("target_name") == root_name), None)
@@ -614,25 +614,35 @@ def extract_event_root_motion(
     root_pose_bone = armature.pose.bones.get(root_name) if armature is not None else None
     if track is None or (rest is None and root_pose_bone is None) or not frames:
         return 0
+    if rest is None:
+        # Without the source rest pose the local-to-object transfer is ambiguous.
+        return 0
     root_rest = root_pose_bone.bone.matrix_local.copy() if root_pose_bone is not None else rest.copy()
+    blender_rest = blender_local_rest_matrix(root_pose_bone) if root_pose_bone is not None else rest
+    basis_correction = rest.inverted_safe() @ blender_rest
+    parent_track = None
+    if root_pose_bone is not None and root_pose_bone.parent is not None:
+        parent_track = next((item for item in motion["tracks"]
+                             if item.get("target_name") == root_pose_bone.parent.name), None)
     if armature is not None:
         armature.rotation_mode = "QUATERNION"
     locations, rotations, scales = [], [], []
     previous_rotation = None
     for index in range(len(frames)):
         values = track["values"]
+        animated_scale = values["scale"][index]
+        if parent_track is not None:
+            animated_scale = [value / parent if abs(parent) > 1e-9 else value
+                              for value, parent in zip(animated_scale, parent_track["values"]["scale"][index])]
         source = source_matrix({
             "translation": values["translation"][index],
             "rotation": values["rotation"][index],
-            "scale": values["scale"][index],
+            "scale": animated_scale,
         })
-        # The event root is an absolute source-space transform.  Keep the
-        # skeleton in its local source basis and move only the armature object
-        # into event space; the regular local bone tracks then compose against
-        # the native bind pose without applying the hierarchy twice.
-        source_to_blender = SOURCE_TO_BLENDER @ source @ SOURCE_TO_BLENDER.inverted()
-        event_root_world = model_base_matrix @ source_to_blender
-        matrix = event_root_world @ root_rest.inverted_safe()
+        delta = basis_correction.inverted_safe() @ (rest.inverted_safe() @ source) @ basis_correction
+        # Conjugate the same local bone delta used by append_motion_to_action.
+        # The object's base already contains the source-to-Blender conversion.
+        matrix = model_base_matrix @ root_rest @ delta @ root_rest.inverted_safe()
         location, rotation, scale = matrix.decompose()
         if previous_rotation is not None and previous_rotation.dot(rotation) < 0.0:
             rotation.negate()
@@ -651,7 +661,7 @@ def extract_event_root_motion(
                 owner=armature,
             )
     action["g4_event_root_motion"] = root_name
-    action["g4_event_root_transform"] = "absolute_source_to_armature_object"
+    action["g4_event_root_transform"] = "local_delta_conjugated_to_armature_object"
     return len(frames)
 
 
@@ -952,13 +962,10 @@ def append_motion_to_action(
     keyed_bones = 0
     relative_rest_tracks = 0
     track_count = len(motion["tracks"])
-    if event_root_name is None:
-        event_root_name = event_root_motion_name(motion)
     for track_index, track in enumerate(motion["tracks"], start=1):
         name = track.get("target_name")
-        # Event root tracks are absolute actor transforms.  They are already
-        # applied once to the armature object by extract_event_root_motion;
-        # retaining the same track on the root bone would apply the root twice.
+        # Only the event importer may explicitly transfer this track to the
+        # object. Normal animation imports must retain the root bone curves.
         if event_root_name and name == event_root_name:
             if progress_callback is not None:
                 progress_callback(track_index, track_count)
@@ -1053,6 +1060,7 @@ def create_action(
     clip = motion["clip"]
     action = bpy.data.actions.new(name=clip["name"] or "G4MT Animation")
     action.use_fake_user = True
+    action.use_frame_range = True
     armature.animation_data_create()
     clear_pose(armature)
     # Blender 5.2 creates layered Actions without the legacy action.fcurves
@@ -1060,6 +1068,8 @@ def create_action(
     # helper can create the correct action slot/channel bag.
     armature.animation_data.action = action
     source_start = clip["start_frame"] if frame_origin is None else frame_origin
+    action.frame_start = 1 + clip["start_frame"] - source_start
+    action.frame_end = action.frame_start + max(0, len(motion["frames"]) - 1)
     keyed_bones, relative_rest_tracks = append_motion_to_action(
         armature,
         motion,
@@ -1080,6 +1090,7 @@ def g4mt_import_settings(operator) -> str:
         {
             "entry": operator.entry,
             "clip": operator.clip,
+            "import_all_clips": operator.import_all_clips,
             "import_camera": operator.import_camera,
             "set_active_camera": operator.set_active_camera,
             "reuse_selected_armature": operator.reuse_selected_armature,
@@ -1325,8 +1336,13 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
     )
     clip: StringProperty(
         name="Clip",
-        default="0",
-        description="Clip index or exact clip name inside the G4MT bank",
+        default="",
+        description="Animation name or index; leave empty to select the first animated clip",
+    )
+    import_all_clips: BoolProperty(
+        name="Import All Animations",
+        default=True,
+        description="Create a separate action for every clip in the selected animation bank",
     )
     import_model: BoolProperty(
         name="Import Matching Model",
@@ -1384,7 +1400,8 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "entry")
-        layout.prop(self, "clip")
+        layout.prop(self, "import_all_clips")
+        layout.prop(self, "clip", text="Active Animation")
         layout.prop(self, "import_model")
         if self.import_model:
             layout.label(text="Model and character cosmetics will be requested after the animation", icon="FILE_FOLDER")
@@ -1473,7 +1490,15 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 )
             if skeleton_hint is None:
                 skeleton_hint = resolve_skeleton_path(skeleton_model_hint)
-            motion, decoded_path = decode_g4mt(g4mt_path, self.clip, prefs, skeleton_hint)
+            clip_selector = self.clip.strip()
+            if not clip_selector:
+                available_clips = parse_g4mt(g4mt_path, skeleton_hint)["clips"]
+                playable = [clip for clip in available_clips if not clip["flags"] & 1]
+                if not playable:
+                    raise RuntimeError("This bank requires a base animation")
+                selected_clip = next((clip for clip in playable if clip["frame_count"] > 2), playable[0])
+                clip_selector = str(selected_clip["index"])
+            motion, decoded_path = decode_g4mt(g4mt_path, clip_selector, prefs, skeleton_hint)
             refresh_progress(15, "Preparing G4 animation rig…")
             if self.import_camera:
                 camera_path = resolve_companion_g4cm(path, getattr(prefs, "raw_data_root", ""))
@@ -1552,12 +1577,53 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 frame_origin,
                 lambda completed, total: update_progress(completed, total),
             )
+            if keyed_bones == 0:
+                bpy.data.actions.remove(action)
+                raise RuntimeError("The animation contains no matching bone tracks")
             part_actions, part_keyed_bones = animate_character_parts(
                 armature,
                 motion,
                 frame_origin,
                 progress_callback=lambda completed, total: update_progress(completed, total, track_count),
             )
+            imported_clip_count = 1
+            if self.import_all_clips:
+                clips = parse_g4mt(g4mt_path, skeleton_hint)["clips"]
+                # Keep the requested clip active after creating the bank actions.
+                part_active = [(part, part.animation_data.action, getattr(part.animation_data, "action_slot", None))
+                               for part in character_part_armatures(armature)]
+                active_slot = getattr(armature.animation_data, "action_slot", None)
+                try:
+                    for clip in clips:
+                        if clip["index"] == motion["clip"]["index"]:
+                            continue
+                        if clip["flags"] & 1:
+                            self.report({"WARNING"}, f"Skipped {clip['name']}: requires a base animation")
+                            continue
+                        refresh_progress(95, f"Importing animation {imported_clip_count + 1}/{len(clips)}")
+                        extra_motion = decode_motion(g4mt_path, str(clip["index"]), skeleton_hint)
+                        resolve_track_names_from_armature(extra_motion, armature)
+                        extra_action, extra_keyed = create_action(armature, extra_motion)
+                        if extra_keyed == 0:
+                            bpy.data.actions.remove(extra_action)
+                            raise RuntimeError(f"Animation {clip['name']} has no matching bone tracks")
+                        extra_action["g4mt_source"] = str(path)
+                        extra_action["g4mt_clip_index"] = clip["index"]
+                        extra_action["g4mt_clip_name"] = clip["name"]
+                        if package_entry_name is not None:
+                            extra_action["g4pk_entry"] = package_entry_name
+                        animate_character_parts(armature, extra_motion, clip["start_frame"])
+                        imported_clip_count += 1
+                finally:
+                    armature.animation_data.action = action
+                    if active_slot is not None:
+                        armature.animation_data.action_slot = active_slot
+                    clear_pose(armature)
+                    for part, part_action, part_slot in part_active:
+                        part.animation_data.action = part_action
+                        if part_slot is not None:
+                            part.animation_data.action_slot = part_slot
+                        clear_pose(part)
             frame_count = len(motion["frames"])
             context.scene.frame_start = 1
             context.scene.frame_end = max(1, max(ends) - frame_origin + 1)
@@ -1624,7 +1690,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
 
         self.report(
             {"INFO"},
-            f"Imported {motion['clip']['name']}: {keyed_bones + part_keyed_bones} bones, {frame_count} actor frames, {part_actions} parts"
+            f"Imported {imported_clip_count} animations; {motion['clip']['name']}: {keyed_bones + part_keyed_bones} bones, {frame_count} actor frames, {part_actions} parts"
             f"{' with matching camera' if camera_object is not None else ''} on {armature.name}",
         )
         return {"FINISHED"}
@@ -2890,9 +2956,13 @@ def import_event_actor(
                 event_root_base_matrix,
                 armature,
             )
+            if not event_root_frames:
+                root_motion = dict(motion, tracks=[item for item in motion["tracks"]
+                                                  if item.get("target_name") == event_root_name])
+                append_motion_to_action(armature, root_motion, action, clip["start_frame"], event_root_name="")
             if event_root_frames:
                 action["g4_event_root_bone"] = event_root_name
-                action["g4_event_root_space"] = "armature_object_absolute"
+                action["g4_event_root_space"] = "armature_object_local_delta"
                 action["g4_event_root_base_matrix"] = [
                     float(event_root_base_matrix[row][column])
                     for row in range(4)
