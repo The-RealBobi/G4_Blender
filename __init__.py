@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 5, 6),
+    "version": (1, 6, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -3514,6 +3514,13 @@ def character_setup_head_changed(operator, _context) -> None:
 
 
 def event_setup_actor_model(directory: Path, actor: str, prefs) -> Path | None:
+    models = g4_animation_addon.resolve_event_actor_models(directory, prefs)
+    manifest_model = models.get(actor, models.get(g4_animation_addon.event_actor_base_id(actor), ""))
+    if manifest_model and re.fullmatch(r"[A-Za-z]{1,3}\d{4,10}", manifest_model):
+        alias_path = directory / f"{manifest_model}_s00_p00_c0000.g4pk"
+        model = g4_animation_addon.resolve_model_path(alias_path, getattr(prefs, "raw_data_root", ""))
+        if model is not None:
+            return model
     packages = g4_animation_addon.collect_event_packages(directory).get(actor) or []
     if not packages:
         return None

@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement and animation skeletons (1.5.6)
+### Event placement and animation skeletons (1.6.0)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -226,3 +226,8 @@ The joint palette resolver prefers a complete named source-skeleton mapping
 when a separated character part exposes more named joints than the partial
 CRC32 palette. This preserves the CRC32 path while avoiding unresolved arm
 weights on compact character rigs.
+
+The event character-parts dialog now starts each actor from the model declared
+by `event_cfg`, including its body, shoes and matching arms. Existing saved
+choices remain available, and changing the head continues to refill the
+modular parts for that head.

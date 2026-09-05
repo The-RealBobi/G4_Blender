@@ -3356,10 +3356,12 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             generic_saved = saved.get(f"__generic_{slot}__") or {}
             if not generic_saved and slot == "s00":
                 generic_saved = saved.get("__generic__") or {}
-            item.head_model = generic_saved.get("head", "")
-            item.body_model = generic_saved.get("body", "")
-            item.shoes_model = generic_saved.get("shoes", "")
-            item.accessory_model = generic_saved.get("accessory", "")
+            event_defaults = event_part_defaults(directory, slot_actors[0], prefs) if slot_actors else {}
+            default_head = event_setup_actor_model(directory, slot_actors[0], prefs) if slot_actors else None
+            item.head_model = generic_saved.get("head") or (str(default_head) if default_head else "")
+            item.body_model = generic_saved.get("body") or event_defaults.get("body", "")
+            item.shoes_model = generic_saved.get("shoes") or event_defaults.get("shoes", "")
+            item.accessory_model = generic_saved.get("accessory") or event_defaults.get("accessory", "")
             item.gloves_model = generic_saved.get("gloves", "")
             item.armband_model = generic_saved.get("armband", "")
             item.nameplate_model = generic_saved.get("nameplate", "")
