@@ -14,7 +14,13 @@ from collections import defaultdict
 from pathlib import Path
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, FloatProperty, StringProperty
+from bpy.props import (
+    BoolProperty,
+    CollectionProperty,
+    FloatProperty,
+    FloatVectorProperty,
+    StringProperty,
+)
 from bpy.types import Operator, PropertyGroup
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Matrix, Quaternion, Vector
@@ -2898,6 +2904,7 @@ def import_event_actor(
     body_model: str = "",
     shoes_model: str = "",
     accessory_model: str = "",
+    skin_color: tuple[float, float, float, float] | None = None,
     gloves_model: str = "",
     armband_model: str = "",
     nameplate_model: str = "",
@@ -2978,6 +2985,16 @@ def import_event_actor(
         # the event action retargets onto the imported native rest instead.
         align_to_motion_rest=False,
     )
+    importer = model_importer_module()
+    apply_skin_color = getattr(importer, "apply_character_skin_mask_color", None) if importer is not None else None
+    resolved_skin_color = (
+        event_skin_color_value(skin_color)
+        if skin_color is not None
+        else event_skin_color_from_head(str(resolved_model), prefs)
+    )
+    if apply_skin_color is not None and resolved_skin_color is not None:
+        apply_skin_color(event_actor_objects(armature), resolved_skin_color)
+        armature["g4_skin_color_rgba"] = "".join(f"{round(channel * 255):02X}" for channel in resolved_skin_color)
     display_actor = actor
     if generic_actor and head_model:
         display_actor = f"{model_path.stem}_{event_actor_slot(actor)}"
@@ -3349,6 +3366,38 @@ def event_part_defaults_from_head(head_model: str, prefs) -> dict[str, str]:
     }
 
 
+def event_skin_color_from_head(head_model: str, prefs) -> tuple[float, float, float, float] | None:
+    importer = model_importer_module()
+    resolver = getattr(importer, "character_skin_color_from_model", None) if importer is not None else None
+    if resolver is None or not head_model:
+        return None
+    path = Path(bpy.path.abspath(head_model))
+    if not path.is_file():
+        return None
+    try:
+        return resolver(path, prefs)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def event_skin_color_value(value, fallback=(1.0, 1.0, 1.0, 1.0)) -> tuple[float, float, float, float]:
+    if isinstance(value, str):
+        text = value.strip().lstrip("#")
+        if len(text) in {6, 8}:
+            try:
+                packed = int(text, 16)
+            except ValueError:
+                packed = None
+            if packed is not None:
+                if len(text) == 6:
+                    packed = (packed << 8) | 0xFF
+                return tuple(((packed >> shift) & 0xFF) / 255.0 for shift in (24, 16, 8, 0))
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        channels = tuple(max(0.0, min(1.0, float(channel))) for channel in value[:4])
+        return channels if len(channels) == 4 else (*channels, 1.0)
+    return fallback
+
+
 def event_accessory_from_body(body_model: str, prefs) -> str:
     importer = model_importer_module()
     find_accessory = getattr(importer, "find_accessory_part_for_body", None) if importer is not None else None
@@ -3363,6 +3412,9 @@ def event_part_head_changed(item, _context) -> None:
     defaults = event_part_defaults_from_head(item.head_model, addon_preferences())
     for key, value in defaults.items():
         setattr(item, f"{key}_model", value)
+    color = event_skin_color_from_head(item.head_model, addon_preferences())
+    if color is not None:
+        item.skin_color = color
 
 
 class G4EventCharacterPart(PropertyGroup):
@@ -3372,6 +3424,14 @@ class G4EventCharacterPart(PropertyGroup):
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
     accessory_model: StringProperty(name="Arms/Neck", subtype="FILE_PATH")
+    skin_color: FloatVectorProperty(
+        name="Skin Mask",
+        subtype="COLOR",
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0),
+    )
     gloves_model: StringProperty(name="Gloves", subtype="FILE_PATH")
     armband_model: StringProperty(name="Captain Armband", subtype="FILE_PATH")
     nameplate_model: StringProperty(name="Nameplate", subtype="FILE_PATH")
@@ -3411,6 +3471,10 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             event_defaults = event_part_defaults(directory, slot_actors[0], prefs) if slot_actors else {}
             default_head = event_setup_actor_model(directory, slot_actors[0], prefs) if slot_actors else None
             item.head_model = generic_saved.get("head") or (str(default_head) if default_head else "")
+            item.skin_color = event_skin_color_value(
+                generic_saved.get("skin_color"),
+                event_skin_color_from_head(item.head_model, prefs) or item.skin_color,
+            )
             generic_overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(slot_actors[0], {}) if slot_actors else {}
             item.body_model = (
                 event_defaults.get("body", "")
@@ -3443,6 +3507,7 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 default_head = resolve_model_path(packages[actor][0], getattr(prefs, "raw_data_root", ""))
                 if default_head is not None:
                     actor_parts["head"] = str(default_head)
+            actor_skin_color = event_skin_color_from_head(actor_parts.get("head", ""), prefs)
             if actor_parts.get("head"):
                 actor_parts.update({
                     key: value
@@ -3459,6 +3524,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 if accessory:
                     actor_parts["accessory"] = accessory
             item.head_model = actor_parts.get("head", "")
+            item.skin_color = event_skin_color_value(
+                actor_parts.get("skin_color"), actor_skin_color or item.skin_color
+            )
             item.body_model = actor_parts.get("body", "")
             item.shoes_model = actor_parts.get("shoes", "")
             item.accessory_model = actor_parts.get("accessory", "")
@@ -3482,6 +3550,7 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             box.prop(item, "body_model")
             box.prop(item, "shoes_model")
             box.prop(item, "accessory_model")
+            box.prop(item, "skin_color")
             box.prop(item, "gloves_model")
             box.prop(item, "armband_model")
             box.prop(item, "nameplate_model")
@@ -3497,6 +3566,7 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 "body": bpy.path.abspath(item.body_model) if item.body_model else "",
                 "shoes": bpy.path.abspath(item.shoes_model) if item.shoes_model else "",
                 "accessory": bpy.path.abspath(item.accessory_model) if item.accessory_model else "",
+                "skin_color": list(item.skin_color),
                 "gloves": bpy.path.abspath(item.gloves_model) if item.gloves_model else "",
                 "armband": bpy.path.abspath(item.armband_model) if item.armband_model else "",
                 "nameplate": bpy.path.abspath(item.nameplate_model) if item.nameplate_model else "",
@@ -3767,6 +3837,11 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             body_model=actor_parts.get("body", ""),
                             shoes_model=actor_parts.get("shoes", ""),
                             accessory_model=actor_parts.get("accessory", ""),
+                            skin_color=event_skin_color_value(
+                                actor_parts.get("skin_color"),
+                                event_skin_color_from_head(actor_parts.get("head", ""), prefs)
+                                or (1.0, 1.0, 1.0, 1.0),
+                            ),
                             gloves_model=actor_parts.get("gloves", ""),
                             armband_model=actor_parts.get("armband", ""),
                             nameplate_model=actor_parts.get("nameplate", ""),

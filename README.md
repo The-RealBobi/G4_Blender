@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement and animation skeletons (1.6.2)
+### Event placement and animation skeletons (1.6.3)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -237,3 +237,17 @@ Profile-specific paths such as `_uniform/u000101/u000102.g4md` remain explicit
 choices. Character event packages that embed their `G4MA` material animation
 now receive the same facial-atlas UV animation even when **Import Effects** is
 disabled; effect meshes remain controlled by that option.
+
+The event character-parts dialog also reads the native character model tables
+used by VictoryTool. It follows `CHARA_BASE_INFO[6]` to
+`CHARA_MODEL_INFO[0]`, reads the packed RGBA skin value from
+`CHARA_MODEL_INFO[16]`, and pre-fills **Skin Mask** for the selected head.
+Event and direct character imports apply that value to the red recolour-mask
+channel on every imported character mesh, while saved manual choices remain
+available. This lookup uses only the selected `data` root and accepts both
+native signed and unsigned integer representations from the CFGBIN reader.
+
+Embedded face `G4MA` tracks are evaluated through the material's facial atlas
+mapping, so the eye and mouth UVs continue to move when effect import is off.
+For example, the `ev20_03500` c116 actor changes its mapping at frames 679 and
+1217, and the resulting facial pose is visible in a Blender render.

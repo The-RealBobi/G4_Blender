@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 6, 2),
+    "version": (1, 6, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -39,6 +39,7 @@ CHARACTER_PART_ACCESSORY_CACHE: dict[Path, dict[str, str]] = {}
 CHARACTER_PART_BODY_VARIANT_CACHE: dict[Path, dict[tuple[str, str], dict[int, str]]] = {}
 CHARACTER_BODY_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
 CHARACTER_BODY_MESH_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
+CHARACTER_SKIN_COLOR_CACHE: dict[tuple[Path, str], tuple[float, float, float, float] | None] = {}
 
 
 def character_part_info_rows(config_path: Path) -> list[tuple[str, list[object]]]:
@@ -2340,6 +2341,33 @@ def set_modifier_input_value(modifier, socket_identifier: str, value) -> bool:
         return False
 
 
+def apply_character_skin_mask_color(objects, color: tuple[float, float, float, float] | None) -> int:
+    """Apply CHARA_MODEL_INFO[16] to the red skin-mask channel."""
+    if color is None:
+        return 0
+    applied = 0
+    for obj in objects:
+        if obj is None or obj.type != "MESH":
+            continue
+        modifier = level5_character_parameter_modifier(obj)
+        group = modifier.node_group if modifier is not None else None
+        if group is None:
+            continue
+        socket = next(
+            (
+                item
+                for item in group.interface.items_tree
+                if getattr(item, "in_out", None) == "INPUT" and item.name == "Mask Red Color"
+            ),
+            None,
+        )
+        if socket is None or not set_modifier_input_value(modifier, socket.identifier, color):
+            continue
+        obj["g4_skin_color_rgba"] = "".join(f"{round(channel * 255):02X}" for channel in color)
+        applied += 1
+    return applied
+
+
 def character_shader_attribute(material, label: str, attribute_name: str, color: bool = False):
     nodes = material.node_tree.nodes
     node_name = f"G4 Control {label}"
@@ -2996,6 +3024,105 @@ def model_data_roots(path: Path, prefs: G4ImporterPreferences) -> list[Path]:
     return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
 
 
+def character_skin_color_from_model(
+    model_path: Path,
+    prefs: G4ImporterPreferences,
+) -> tuple[float, float, float, float] | None:
+    """Resolve CHARA_MODEL_INFO[16] for a selected character model."""
+    path = Path(model_path).resolve()
+    cache_key = (path, str(getattr(prefs, "raw_data_root", "") or ""))
+    if cache_key in CHARACTER_SKIN_COLOR_CACHE:
+        return CHARACTER_SKIN_COLOR_CACHE[cache_key]
+
+    def packed_color(value) -> tuple[float, float, float, float] | None:
+        if not isinstance(value, int):
+            return None
+        packed = value & 0xFFFFFFFF
+        if packed == 0:
+            return None
+        return tuple(((packed >> shift) & 0xFF) / 255.0 for shift in (24, 16, 8, 0))
+
+    def row_values(entry) -> list[object]:
+        return [value.value for value in entry.values]
+
+    def model_relative_key(data_root: Path) -> str:
+        character_root = (data_root / "common" / "chr").resolve()
+        try:
+            return path.relative_to(character_root).as_posix().casefold()
+        except ValueError:
+            return ""
+
+    def model_tables(data_root: Path) -> list[tuple[object, list[object]]]:
+        character_root = data_root / "common" / "gamedata" / "character"
+        tables = []
+        for table_path in sorted(character_root.glob("chara_model_*.cfg.bin")):
+            try:
+                document = parse_cfgbin_file(table_path)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(document, CfgBinDocument):
+                continue
+            tables.extend(
+                (entry, row_values(entry))
+                for entry in document.entries
+                if entry.name == "CHARA_MODEL_INFO" and len(entry.values) > 16
+            )
+        return tables
+
+    resolved = None
+    for data_root in model_data_roots(path, prefs):
+        rows = model_tables(data_root)
+        relative_key = model_relative_key(data_root)
+        for _entry, values in rows:
+            declared = str(values[10] or "").replace("\\", "/").lstrip("/").casefold() if len(values) > 10 else ""
+            if relative_key and declared == relative_key:
+                resolved = packed_color(values[16])
+                if resolved is not None:
+                    break
+        if resolved is not None:
+            break
+
+        stem = path.stem.casefold()
+        for _entry, values in rows:
+            declared = str(values[10] or "").replace("\\", "/").casefold() if len(values) > 10 else ""
+            if declared and Path(declared).stem.casefold() == stem:
+                resolved = packed_color(values[16])
+                if resolved is not None:
+                    break
+        if resolved is not None:
+            break
+
+        base_path = data_root / "common" / "gamedata" / "character"
+        base_rows = []
+        for table_path in sorted(base_path.glob("chara_base_*.cfg.bin")):
+            try:
+                document = parse_cfgbin_file(table_path)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(document, CfgBinDocument):
+                continue
+            base_rows.extend(
+                row_values(entry)
+                for entry in document.entries
+                if entry.name == "CHARA_BASE_INFO" and len(entry.values) > 6
+            )
+        base = next(
+            (values for values in base_rows if str(values[1] or "").casefold() == path.stem.casefold()),
+            None,
+        )
+        if base is not None:
+            model_id = base[6]
+            resolved = next(
+                (packed_color(values[16]) for _entry, values in rows if values[0] == model_id),
+                None,
+            )
+            if resolved is not None:
+                break
+
+    CHARACTER_SKIN_COLOR_CACHE[cache_key] = resolved
+    return resolved
+
+
 def load_model_lookup(prefs: G4ImporterPreferences) -> dict:
     lookup_path = Path(bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or ""))
     if not lookup_path.is_file():
@@ -3494,6 +3621,11 @@ def autofill_character_setup_parts(operator) -> None:
     if not head_path.is_file():
         return
     prefs = addon_preferences()
+    skin_color = globals().get("character_skin_color_from_model")
+    if skin_color is not None:
+        resolved_skin_color = skin_color(head_path, prefs)
+        if resolved_skin_color is not None and hasattr(operator, "skin_color"):
+            operator.skin_color = resolved_skin_color
     body = find_character_part(head_path, "u", prefs)
     if body is not None:
         body = declared_body_variant_for_character(body, head_path, prefs)
@@ -3548,6 +3680,14 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
     body_model: StringProperty(name="Body", subtype="FILE_PATH")
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
     accessory_model: StringProperty(name="Arms/Neck", subtype="FILE_PATH")
+    skin_color: FloatVectorProperty(
+        name="Skin Mask",
+        subtype="COLOR",
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0),
+    )
     gloves_model: StringProperty(name="Gloves", subtype="FILE_PATH")
     armband_model: StringProperty(name="Captain Armband", subtype="FILE_PATH")
     nameplate_model: StringProperty(name="Nameplate", subtype="FILE_PATH")
@@ -3599,6 +3739,10 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             self.nameplate_model = selected.get("nameplate") or self.nameplate_model
             self.attach_ball = bool(selected.get("attach_ball", False))
             self.ball_model = selected.get("ball") or self.ball_model
+            self.skin_color = g4_animation_addon.event_skin_color_value(
+                selected.get("skin_color"),
+                g4_animation_addon.event_skin_color_from_head(self.head_model, prefs) or self.skin_color,
+            )
             return context.window_manager.invoke_props_dialog(self, width=660)
 
         selected_model = Path(bpy.path.abspath(self.model_path))
@@ -3615,6 +3759,9 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             if not getattr(self, key):
                 setattr(self, key, str(saved.get(key) or ""))
         self.attach_ball = bool(saved.get("attach_ball", self.attach_ball))
+        self.skin_color = g4_animation_addon.event_skin_color_value(
+            saved.get("skin_color"), self.skin_color
+        )
         return context.window_manager.invoke_props_dialog(self, width=660)
 
     def draw(self, context):
@@ -3631,6 +3778,7 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
         layout.prop(self, "body_model")
         layout.prop(self, "shoes_model")
         layout.prop(self, "accessory_model")
+        layout.prop(self, "skin_color")
         layout.prop(self, "gloves_model")
         layout.prop(self, "armband_model")
         layout.prop(self, "nameplate_model")
@@ -3680,6 +3828,7 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
                 "nameplate": values["nameplate_model"],
                 "attach_ball": values["attach_ball"],
                 "ball": values["ball_model"],
+                "skin_color": list(self.skin_color),
             }
             next_index = self.event_actor_index + 1
             if next_index < len(actors):
@@ -3720,7 +3869,9 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             )
             return {"FINISHED"}
 
-        addon_preferences().character_import_parts = json.dumps(values, sort_keys=True)
+        addon_preferences().character_import_parts = json.dumps(
+            {**values, "skin_color": list(self.skin_color)}, sort_keys=True
+        )
         if self.animation_path:
             settings = json.loads(self.animation_settings_json or "{}")
             settings["prompt_for_models"] = False
