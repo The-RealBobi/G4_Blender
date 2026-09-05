@@ -3591,6 +3591,8 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         prefs = addon_preferences()
         actors = []
         skipped_actors = {}
+        has_event_point_packages = any(directory.glob(f"{directory.name}_point_s*.g4pk"))
+        point_motions = {}
         event_log = [f"event={directory}", f"actors={','.join(character_actors)}"]
         write_event_import_log(event_log)
         try:
@@ -3604,6 +3606,8 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             return {"CANCELLED"}
         event_log.append(f"effects_enabled={self.import_effects}")
         event_log.append(f"effect_candidates={len(effect_candidates)}")
+        event_log.append(f"point_packages={int(has_event_point_packages)}")
+        event_log.append(f"placement_assignments={len(point_assignments)}")
         write_event_import_log(event_log)
         cut_frames = {}
         camera_object = None
@@ -3700,6 +3704,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             scene["g4_event_effect_candidates"] = json.dumps(effect_candidates, sort_keys=True)
             scene["g4_event_effect_count"] = len(effect_roots)
             scene["g4_event_p3lip_count"] = len(p3lip_controllers)
+            scene["g4_event_point_packages"] = has_event_point_packages
+            scene["g4_event_point_assignment_count"] = len(point_assignments)
+            scene["g4_event_point_motion_count"] = len(point_motions)
+            scene["g4_event_point_placement_enabled"] = bool(point_assignments and point_motions)
             scene["g4_event_import_log"] = "G4 Event Import Log"
             write_event_import_log(event_log)
         except Exception as exc:
@@ -3722,7 +3730,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             message += f", {len(p3lip_controllers)} P3LIP tracks"
         if skipped_actors:
             message += f"; skipped {len(skipped_actors)} unresolved actors"
-        self.report({"WARNING" if skipped_actors else "INFO"}, message)
+        placement_warning = has_event_point_packages and (not point_assignments or not point_motions)
+        if placement_warning:
+            message += "; event point placement data was not fully resolved"
+        self.report({"WARNING" if skipped_actors or placement_warning else "INFO"}, message)
         return {"FINISHED"}
 
 
