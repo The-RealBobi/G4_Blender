@@ -3344,6 +3344,14 @@ def model_importer_module():
     return sys.modules.get(__package__) if __package__ else None
 
 
+def resolve_event_setup_actor_model(directory: Path, actor: str, prefs) -> Path | None:
+    importer = model_importer_module()
+    resolver = getattr(importer, "event_setup_actor_model", None) if importer is not None else None
+    if resolver is None:
+        return None
+    return resolver(directory, actor, prefs)
+
+
 def event_part_defaults_from_head(head_model: str, prefs) -> dict[str, str]:
     """Resolve modular defaults through the model importer's CFG-aware lookup."""
     head_path = Path(bpy.path.abspath(head_model)) if head_model else None
@@ -3469,7 +3477,10 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             if not generic_saved and slot == "s00":
                 generic_saved = saved.get("__generic__") or {}
             event_defaults = event_part_defaults(directory, slot_actors[0], prefs) if slot_actors else {}
-            default_head = event_setup_actor_model(directory, slot_actors[0], prefs) if slot_actors else None
+            default_head = (
+                resolve_event_setup_actor_model(directory, slot_actors[0], prefs)
+                if slot_actors else None
+            )
             item.head_model = generic_saved.get("head") or (str(default_head) if default_head else "")
             item.skin_color = event_skin_color_value(
                 generic_saved.get("skin_color"),

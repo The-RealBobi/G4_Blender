@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement and animation skeletons (1.6.3)
+### Event placement and animation skeletons (1.6.4)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -251,3 +251,10 @@ Embedded face `G4MA` tracks are evaluated through the material's facial atlas
 mapping, so the eye and mouth UVs continue to move when effect import is off.
 For example, the `ev20_03500` c116 actor changes its mapping at frames 679 and
 1217, and the resulting facial pose is visible in a Blender render.
+
+The event-parts dialog now resolves its `event_cfg` model lookup through the
+model importer module in every event batch path. This fixes events such as
+`ev60_00210`, whose generic `c000xxx` actors previously stopped after folder
+selection because the deferred dialog callback referenced an unavailable
+function. Generic actor variants now open the assignment dialog and continue
+through the same data-root and character-part resolution used by named actors.
