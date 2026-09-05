@@ -2401,7 +2401,11 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
     edge2_parameters = {}
     edge_parameters = {}
     edge2_group = bpy.data.node_groups.get("G4 edge2 Preview Geometry")
+    edge2_max_node = edge2_group.nodes.get("G4 edge2 Depth Max") if edge2_group is not None else None
+    edge2_offset_node = edge2_group.nodes.get("G4 edge2 Depth Offset") if edge2_group is not None else None
     edge2_scale_node = edge2_group.nodes.get("G4 edge2 Scale") if edge2_group is not None else None
+    edge2_max_socket = edge2_max_node.inputs[1] if edge2_max_node is not None else None
+    edge2_offset_socket = edge2_offset_node.inputs[1] if edge2_offset_node is not None else None
     edge2_scale_socket = edge2_scale_node.inputs[1] if edge2_scale_node is not None else None
     edge2_material = bpy.data.materials.get("G4 edge2 Preview")
     edge2_color_node = (
@@ -2446,11 +2450,18 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
             edge2_color_socket.keyframe_insert("default_value", frame=frame)
         scale = parameters.get("edge2OutlineScale")
         if edge2_scale_socket is not None and scale:
-            # edge2's vertex shader applies 0.5 * u_edge2Scale * 0.01
-            # before the runtime material/depth terms. Keep the known part
-            # exact and animate it with the EventMap light profile.
-            edge2_scale_socket.default_value = 0.5 * max(0.0, scale[0]) * 0.01
+            # The 0.5 factor is applied after COLOR.b * depth_factor in the
+            # Geometry Nodes graph, matching the native vertex shader.
+            edge2_scale_socket.default_value = max(0.0, scale[0]) * 0.01
             edge2_scale_socket.keyframe_insert("default_value", frame=frame)
+        depth_max = parameters.get("edge2OutlineDepthScaleMax")
+        if edge2_max_socket is not None and depth_max:
+            edge2_max_socket.default_value = depth_max[0]
+            edge2_max_socket.keyframe_insert("default_value", frame=frame)
+        depth_offset = parameters.get("edge2OutlineDepthScaleOffset")
+        if edge2_offset_socket is not None and depth_offset:
+            edge2_offset_socket.default_value = depth_offset[0]
+            edge2_offset_socket.keyframe_insert("default_value", frame=frame)
     if scene.world is None:
         scene.world = bpy.data.worlds.new(f"{directory.name} World")
     light_keys = []

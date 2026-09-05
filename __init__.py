@@ -2686,7 +2686,7 @@ def edge2_preview_material():
 def edge2_preview_node_group():
     material = edge2_preview_material()
     group = bpy.data.node_groups.get(EDGE2_PREVIEW_GROUP_NAME)
-    if group is not None and group.get("g4_edge2_preview_schema") == 2:
+    if group is not None and group.get("g4_edge2_preview_schema") == 3:
         return group
     if group is None:
         group = bpy.data.node_groups.new(EDGE2_PREVIEW_GROUP_NAME, "GeometryNodeTree")
@@ -2706,7 +2706,66 @@ def edge2_preview_node_group():
     input_node = nodes.new("NodeGroupInput")
     output_node = nodes.new("NodeGroupOutput")
     set_position = nodes.new("GeometryNodeSetPosition")
+    set_position.name = "G4 edge2 Camera Offset"
+    camera_transform = nodes.new("GeometryNodeTransform")
+    camera_transform.name = "G4 edge2 To Camera"
+    restore_transform = nodes.new("GeometryNodeTransform")
+    restore_transform.name = "G4 edge2 From Camera"
+    self_object = nodes.new("GeometryNodeSelfObject")
+    self_info = nodes.new("GeometryNodeObjectInfo")
+    self_info.name = "G4 edge2 Model Transform"
+    active_camera = nodes.new("GeometryNodeInputActiveCamera")
+    camera_info = nodes.new("GeometryNodeObjectInfo")
+    camera_info.name = "G4 edge2 Camera Transform"
+    camera_data = nodes.new("GeometryNodeCameraInfo")
+    camera_data.name = "G4 edge2 Camera Data"
+    invert_camera = nodes.new("FunctionNodeInvertMatrix")
+    invert_camera.name = "G4 edge2 Invert Camera"
+    camera_model_matrix = nodes.new("FunctionNodeMatrixMultiply")
+    camera_model_matrix.name = "G4 edge2 Camera Model Matrix"
+    invert_camera_model = nodes.new("FunctionNodeInvertMatrix")
+    invert_camera_model.name = "G4 edge2 Invert Camera Model"
     normal = nodes.new("GeometryNodeInputNormal")
+    position = nodes.new("GeometryNodeInputPosition")
+    depth_z = nodes.new("ShaderNodeSeparateXYZ")
+    depth_abs = nodes.new("ShaderNodeMath")
+    depth_abs.name = "G4 edge2 Absolute View Depth"
+    depth_abs.operation = "ABSOLUTE"
+    depth_max = nodes.new("ShaderNodeMath")
+    depth_max.name = "G4 edge2 Depth Max"
+    depth_max.operation = "MINIMUM"
+    depth_max.inputs[1].default_value = 7.0
+    depth_offset = nodes.new("ShaderNodeMath")
+    depth_offset.name = "G4 edge2 Depth Offset"
+    depth_offset.operation = "ADD"
+    depth_offset.inputs[1].default_value = 0.1
+    positive_max = nodes.new("ShaderNodeMath")
+    positive_max.name = "G4 edge2 Positive Depth Mode"
+    positive_max.operation = "GREATER_THAN"
+    positive_max.inputs[1].default_value = 0.0
+    depth_weighted = nodes.new("ShaderNodeMath")
+    depth_weighted.name = "G4 edge2 Depth Select"
+    depth_weighted.operation = "MULTIPLY"
+    inverse_weight = nodes.new("ShaderNodeMath")
+    inverse_weight.name = "G4 edge2 Depth Fallback Weight"
+    inverse_weight.operation = "SUBTRACT"
+    inverse_weight.inputs[0].default_value = 1.0
+    depth_fallback = nodes.new("ShaderNodeMath")
+    depth_fallback.name = "G4 edge2 Depth Fallback"
+    depth_fallback.operation = "MULTIPLY"
+    depth_fallback.inputs[1].default_value = 1.0
+    depth_select = nodes.new("ShaderNodeMath")
+    depth_select.name = "G4 edge2 Depth Branch"
+    depth_select.operation = "ADD"
+    projection_scale = nodes.new("FunctionNodeSeparateMatrix")
+    projection_scale.name = "G4 edge2 Projection Matrix"
+    projection_max = nodes.new("ShaderNodeMath")
+    projection_max.name = "G4 edge2 Projection Scale"
+    projection_max.operation = "MAXIMUM"
+    projection_max.inputs[1].default_value = 1.0
+    depth_normalize = nodes.new("ShaderNodeMath")
+    depth_normalize.name = "G4 edge2 Depth Normalize"
+    depth_normalize.operation = "DIVIDE"
     named_color = nodes.new("GeometryNodeInputNamedAttribute")
     named_color.data_type = "FLOAT_COLOR"
     named_color.inputs["Name"].default_value = "G4 Outline Parameters"
@@ -2717,14 +2776,10 @@ def edge2_preview_node_group():
     scale.name = "G4 edge2 Scale"
     scale.operation = "MULTIPLY"
     # The native vertex shader applies COLOR.b * cb4[29].w * 0.5 *
-    # u_edge2Scale * 0.01 along the normalized model-space normal. Generic
-    # character-light profiles provide edge2OutlineScale=2.5; event light
-    # profiles can animate this socket (usually to 1.0).  The native shader
-    # reduces its depth branch to exactly 1 when max is positive, which is
-    # the value used by every inspected dump profile (max=7, offset=0.1).
-    # cb4[29].w remains a runtime material input not present in an imported
-    # scene.
-    scale.inputs[1].default_value = 0.5 * 2.5 * 0.01
+    # depth_factor * u_edge2Scale * 0.01 along the normalized model-space
+    # normal.  cb4[29].w remains a runtime material input not present in an
+    # imported scene, so the preview carries the known geometry/light terms.
+    scale.inputs[1].default_value = 2.5 * 0.01
     vector_scale = nodes.new("ShaderNodeVectorMath")
     vector_scale.operation = "SCALE"
     set_material = nodes.new("GeometryNodeSetMaterial")
@@ -2732,21 +2787,59 @@ def edge2_preview_node_group():
     join = nodes.new("GeometryNodeJoinGeometry")
 
     geometry = input_node.outputs[geometry_in.identifier]
-    links.new(geometry, set_position.inputs["Geometry"])
+    links.new(self_object.outputs["Self Object"], self_info.inputs["Object"])
+    links.new(active_camera.outputs["Active Camera"], camera_info.inputs["Object"])
+    links.new(active_camera.outputs["Active Camera"], camera_data.inputs["Camera"])
+    links.new(camera_info.outputs["Transform"], invert_camera.inputs["Matrix"])
+    links.new(invert_camera.outputs["Matrix"], camera_model_matrix.inputs[0])
+    links.new(self_info.outputs["Transform"], camera_model_matrix.inputs[1])
+    links.new(camera_model_matrix.outputs["Matrix"], camera_transform.inputs["Transform"])
+    links.new(camera_model_matrix.outputs["Matrix"], invert_camera_model.inputs["Matrix"])
+    links.new(invert_camera_model.outputs["Matrix"], restore_transform.inputs["Transform"])
+    links.new(geometry, camera_transform.inputs["Geometry"])
+    links.new(camera_transform.outputs["Geometry"], set_position.inputs["Geometry"])
+    links.new(position.outputs["Position"], depth_z.inputs["Vector"])
+    links.new(depth_z.outputs["Z"], depth_abs.inputs[0])
+    links.new(depth_abs.outputs[0], depth_max.inputs[0])
+    links.new(depth_max.outputs[0], depth_offset.inputs[0])
+    links.new(depth_max.outputs[0], positive_max.inputs[0])
+    links.new(positive_max.outputs[0], depth_weighted.inputs[0])
+    links.new(depth_offset.outputs[0], depth_weighted.inputs[1])
+    links.new(positive_max.outputs[0], inverse_weight.inputs[1])
+    links.new(inverse_weight.outputs[0], depth_fallback.inputs[0])
+    links.new(depth_weighted.outputs[0], depth_select.inputs[0])
+    links.new(depth_fallback.outputs[0], depth_select.inputs[1])
+    links.new(camera_data.outputs["Projection Matrix"], projection_scale.inputs[0])
+    # cb1[25].y is the second-row/second-column projection term used by the
+    # native shader.  Separate Matrix exposes columns first in Blender.
+    links.new(projection_scale.outputs["Column 2 Row 2"], projection_max.inputs[0])
+    links.new(depth_select.outputs[0], depth_normalize.inputs[0])
+    links.new(projection_max.outputs[0], depth_normalize.inputs[1])
     links.new(normal.outputs["Normal"], vector_scale.inputs[0])
     links.new(named_color.outputs["Attribute"], blue.inputs[0])
-    links.new(blue.outputs["Value"], scale.inputs[0])
+    half_depth = nodes.new("ShaderNodeMath")
+    half_depth.name = "G4 edge2 Half Depth"
+    half_depth.operation = "MULTIPLY"
+    half_depth.inputs[1].default_value = 0.5
+    blue_depth = nodes.new("ShaderNodeMath")
+    blue_depth.name = "G4 edge2 Color Depth"
+    blue_depth.operation = "MULTIPLY"
+    links.new(blue.outputs["Value"], blue_depth.inputs[0])
+    links.new(depth_normalize.outputs[0], blue_depth.inputs[1])
+    links.new(blue_depth.outputs[0], half_depth.inputs[0])
+    links.new(half_depth.outputs[0], scale.inputs[0])
     links.new(scale.outputs[0], vector_scale.inputs[3])
     links.new(vector_scale.outputs["Vector"], set_position.inputs["Offset"])
     links.new(set_position.outputs["Geometry"], set_material.inputs["Geometry"])
+    links.new(set_material.outputs["Geometry"], restore_transform.inputs["Geometry"])
     links.new(geometry, join.inputs["Geometry"])
-    links.new(set_material.outputs["Geometry"], join.inputs["Geometry"])
+    links.new(restore_transform.outputs["Geometry"], join.inputs["Geometry"])
     links.new(join.outputs["Geometry"], output_node.inputs[geometry_out.identifier])
-    group["g4_edge2_preview_schema"] = 2
+    group["g4_edge2_preview_schema"] = 3
     group["g4_edge2_scale_source"] = "edge2OutlineScale from native light profiles; default 2.5"
     group["g4_edge2_displacement_source"] = (
-        "COLOR.b * cb4[29].w * 0.5 * u_edge2Scale * 0.01 * normal; "
-        "depth branch is 1 for observed positive max profiles"
+        "COLOR.b * cb4[29].w * depth_factor * 0.5 * u_edge2Scale * 0.01 * normal; "
+        "depth_factor=(max>0 ? min(abs(viewDepth), max)+offset : 1) / max(cb1[25].y, 1)"
     )
     return group
 
