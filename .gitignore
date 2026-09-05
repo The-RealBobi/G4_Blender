@@ -184,3 +184,14 @@ cython_debug/
 /exports
 /docs
 /tools
+
+# Local-only project material
+MISSION.md
+/TOOLS/
+/tests/
+
+# Game dumps and machine-specific export data
+/raw/
+/DUMP_*/
+*.dump
+*.dmp
