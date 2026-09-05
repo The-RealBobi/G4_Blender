@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement and animation skeletons (1.5.4)
+### Event placement and animation skeletons (1.5.5)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -203,6 +203,11 @@ data root. Reimport existing events to apply the correction.
 The same direct data-root rule is used by the G4MT skeleton lookup, the model
 importer, animation companions, event resources and character-part metadata.
 No neighboring `raw/data` or `readable/data` directory is added implicitly.
+
+Event character defaults also attach the matching `sk000xxx` arms mesh beside
+the selected `u000xxx` body, including direct event-operator imports that skip
+the character-parts dialog. The mesh is rebound to the actor's animated
+armature and follows the same shared skeleton.
 
 Animation imports now establish the selected model's data root before looking
 up its external G4SK. This keeps models whose skeleton is shared through the

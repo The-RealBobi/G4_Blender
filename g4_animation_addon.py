@@ -3215,6 +3215,27 @@ def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
                 matches = sorted(uniform_root.glob(f"*/{stem}.g4m[dm]"))
                 if matches:
                     result[key] = str(matches[0])
+
+        # Event imports can bypass the parts dialog (saved assignments,
+        # scripts, and direct operator calls).  Those paths still need the
+        # matching sk000xxx arms mesh, which is derived from the selected
+        # body's model family rather than from the event actor id.
+        importer = model_importer_module()
+        find_accessory = getattr(importer, "find_accessory_part_for_body", None) if importer is not None else None
+        if "body" not in result:
+            packages = collect_event_packages(directory).get(actor) or []
+            if packages:
+                head = resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
+                if head is not None:
+                    result.update({
+                        key: value
+                        for key, value in event_part_defaults_from_head(str(head), prefs).items()
+                        if key not in result
+                    })
+        if "accessory" not in result and find_accessory is not None and result.get("body"):
+            accessory = find_accessory(Path(result["body"]), prefs)
+            if accessory is not None:
+                result["accessory"] = str(accessory)
         if result:
             break
     return result
@@ -3628,12 +3649,16 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 write_event_import_log(event_log)
                 p3lip_controllers = []
                 for actor, actor_packages in sorted(packages.items()):
-                    actor_parts = character_parts.get(actor) or {}
+                    actor_parts = dict(character_parts.get(actor) or {})
                     if actor_parts.get("skip"):
                         event_log.append(f"{actor}: skipped by selected generic profile")
                         for _ in actor_packages:
                             progress()
                         continue
+                    defaults = event_part_defaults(directory, actor, prefs)
+                    for key, value in defaults.items():
+                        if not actor_parts.get(key) or key in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                            actor_parts[key] = value
                     actor_base = event_actor_base_id(actor)
                     try:
                         armature, _, actor_cut_frames = import_event_actor(
