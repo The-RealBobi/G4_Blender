@@ -182,3 +182,16 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 (8 and 24 clips) in Blender 4.5.10 and 5.2, a Gakuen Y bank, and six Victory
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
+
+### Event placement (1.5.1)
+
+Event imports now apply per-cut actor attachments from `event_cfg/evt` or
+`event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
+The placement is composed with the actor's animated root, preserving both
+layers. Missing referenced points are reported before creating the actor.
+
+This fixes the clustered actors and distant-camera mismatch in `ev20_03500`.
+Its complete import was checked with 13 actors, 37 actor cuts and 14 camera
+cuts, including renders through the original cameras. Reimport existing
+events to apply the correction; keep their original event_cfg and point
+assets available under the data root.

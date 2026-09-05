@@ -2585,6 +2585,8 @@ def append_event_placement(
     motion: dict | None,
     target_name: str | None,
     model_base_matrix: Matrix | None = None,
+    frame_origin: int | None = None,
+    frame_count: int | None = None,
 ) -> int:
     if motion is None or not target_name:
         return 0
@@ -2593,14 +2595,31 @@ def append_event_placement(
         return 0
     armature.animation_data_create()
     armature.animation_data.action = action
-    frames = [1 + frame - motion["clip"]["start_frame"] for frame in motion["frames"]]
-    locations = []
-    rotations = []
-    scales = []
+    origin = motion["clip"]["start_frame"] if frame_origin is None else frame_origin
+    count = len(motion["frames"]) if frame_count is None else frame_count
+    frames = list(range(1, count + 1))
+    locations, rotations, scales = [], [], []
     previous_rotation = None
-    base_matrix = model_base_matrix or Matrix.Identity(4)
-    for matrix in matrices:
-        matrix = matrix @ base_matrix
+    base_matrix = model_base_matrix if model_base_matrix is not None else armature.matrix_basis.copy()
+    base_location, base_rotation, base_scale = base_matrix.decompose()
+    object_paths = (("location", base_location), ("rotation_quaternion", base_rotation), ("scale", base_scale))
+    curves = {
+        path: [action_fcurve_find(action, path, index) for index in range(len(default))]
+        for path, default in object_paths
+    }
+    for frame in frames:
+        # Point motion is another transform layer, outside the actor's root.
+        # Sample before replacing object curves so extraction is not discarded.
+        values = {
+            path: [curve.evaluate(frame) if curve is not None else default[index]
+                   for index, curve in enumerate(curves[path])]
+            for path, default in object_paths
+        }
+        local = Matrix.LocRotScale(
+            Vector(values["location"]), Quaternion(values["rotation_quaternion"]), Vector(values["scale"])
+        )
+        point_index = max(0, min(len(matrices) - 1, origin + frame - 1 - motion["frames"][0]))
+        matrix = matrices[point_index] @ local
         location, rotation, scale = matrix.decompose()
         if previous_rotation is not None and previous_rotation.dot(rotation) < 0.0:
             rotation.negate()
@@ -2608,6 +2627,10 @@ def append_event_placement(
         locations.append(tuple(location))
         rotations.append(tuple(rotation))
         scales.append(tuple(scale))
+    for path_curves in curves.values():
+        for curve in path_curves:
+            if curve is not None:
+                action_fcurve_remove(action, curve)
     armature.rotation_mode = "QUATERNION"
     cache = {}
     for data_path, samples in (
@@ -2628,7 +2651,7 @@ def append_event_placement(
                 owner=armature,
             )
     action["g4_event_point"] = target_name
-    return len(matrices)
+    return len(frames)
 
 
 def decode_event_package(path: Path, skeleton_path: Path | None, temporary_directory: Path) -> tuple[dict, str]:
@@ -2855,6 +2878,16 @@ def import_event_actor(
     manifest_model: str = "",
     debug_log: list[str] | None = None,
 ) -> tuple[object, int, list[tuple[str, int]]]:
+    package_cuts = {event_cut_name(package) for package in packages}
+    for cut, (point_source, target_name) in (point_assignments or {}).items():
+        if cut not in package_cuts:
+            continue
+        point_motion = (point_motions or {}).get((cut, point_source))
+        if (
+            point_motion is None or not point_motion.get("frames")
+            or target_name not in (point_motion.get("skeleton") or {}).get("names", ())
+        ):
+            raise RuntimeError(f"Missing event placement {cut}/{point_source}/{target_name} for {actor}")
     model_path = None
     if head_model:
         configured_model = Path(bpy.path.abspath(head_model))
@@ -2972,6 +3005,18 @@ def import_event_actor(
         if substituted_generic:
             remove_nonroot_translation_curves(action, armature)
         cut = clip["name"] or event_cut_name(package) or f"cut_{index:03d}"
+        placement_frames = 0
+        assignment = (point_assignments or {}).get(cut)
+        if assignment is not None:
+            point_source, target_name = assignment
+            point_motion = (point_motions or {}).get((cut, point_source))
+            placement_frames = append_event_placement(
+                action, armature, point_motion, target_name, event_root_base_matrix,
+                frame_origin=clip["start_frame"], frame_count=len(motion["frames"]),
+            )
+            if not placement_frames:
+                raise RuntimeError(f"Missing event placement {cut}/{point_source}/{target_name} for {actor}")
+            action["g4_event_point_source"] = point_source
         action.name = f"{actor}_{cut}"
         action["g4mt_source"] = str(package)
         action["g4pk_entry"] = entry_name
@@ -3011,7 +3056,7 @@ def import_event_actor(
             debug_log.append(
                 f"{actor}/{cut}: keyed={keyed}; frames={duration}; "
                 f"fcurves={len(action_fcurves(action))}; event_root={event_root_name or '<none>'}; "
-                f"event_root_frames={event_root_frames}; face_materials={face_materials}; "
+                f"event_root_frames={event_root_frames}; placement_frames={placement_frames}; face_materials={face_materials}; "
                 f"strip_start={strip_start}"
             )
         cut_frames.append((cut, strip_start))
@@ -3550,6 +3595,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         write_event_import_log(event_log)
         try:
             actor_models = resolve_event_actor_models(directory, prefs)
+            point_assignments = resolve_event_actor_point_assignments(directory, prefs)
             effect_candidates = discover_event_effects(directory, prefs) if self.import_effects else []
         except Exception as exc:
             event_log.append(f"FATAL before timeline setup: {traceback.format_exc()}")
@@ -3569,6 +3615,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                     temporary_directory,
                     camera_paths[0] if camera_paths else None,
                 )
+                point_motions = (
+                    decode_event_point_motions(directory, prefs, temporary_directory) if point_assignments else {}
+                )
+                event_log.append(f"placement_cuts={len(point_assignments)}; point_motions={len(point_motions)}")
                 effect_motions = (
                     decode_event_effect_motions(directory, prefs, temporary_directory)
                     if self.import_effects else {}
@@ -3596,6 +3646,11 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             import_character_parts=False,
                             auto_character_parts=False,
                             character_part_stem="",
+                            point_assignments={
+                                cut: assignment for cut in cut_starts
+                                if (assignment := point_assignment_for_actor(point_assignments, cut, actor)) is not None
+                            },
+                            point_motions=point_motions,
                             head_model=actor_parts.get("head", ""),
                             body_model=actor_parts.get("body", ""),
                             shoes_model=actor_parts.get("shoes", ""),
