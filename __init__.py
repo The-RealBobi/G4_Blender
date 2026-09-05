@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 5, 2),
+    "version": (1, 5, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2939,11 +2939,9 @@ def model_data_roots(path: Path, prefs: G4ImporterPreferences) -> list[Path]:
         if parts[index] == "common" and parts[index + 1] in {"chr", "chr_face"}:
             roots.append(Path(*parts[:index]))
             break
-    for parent in path.parents:
-        if parent.name == "data" and parent.parent.name in {"raw", "readable"}:
+    for parent in (path, *path.parents):
+        if parent.name.casefold() == "data" and (parent / "common").is_dir():
             roots.append(parent)
-            work_root = parent.parent.parent
-            roots.extend((work_root / "raw" / "data", work_root / "readable" / "data"))
             break
     return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
 

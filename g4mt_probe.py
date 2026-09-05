@@ -159,8 +159,8 @@ MODEL_ID_RE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,3}\d{6,8})(?![A-Za-z0-9])
 
 
 def raw_data_root(path: Path) -> Path | None:
-    for parent in path.parents:
-        if parent.name == "data" and parent.parent.name in {"raw", "readable"}:
+    for parent in (path, *path.parents):
+        if parent.name.casefold() == "data" and (parent / "common").is_dir():
             return parent
     return None
 
@@ -169,9 +169,7 @@ def candidate_data_roots(path: Path) -> list[Path]:
     inferred = raw_data_root(path)
     if inferred is None:
         return []
-    work_root = inferred.parent.parent
-    roots = [inferred, work_root / "raw" / "data", work_root / "readable" / "data"]
-    return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
+    return [inferred.resolve()]
 
 
 def skeleton_match_score(path: Path, target_hashes: set[int]) -> tuple[int, int, int]:

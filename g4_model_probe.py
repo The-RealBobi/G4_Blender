@@ -92,12 +92,6 @@ def default_chara_parts_json() -> Path | None:
         sorted((RAW_DATA_ROOT / "common" / "gamedata" / "character").glob("chara_parts*.json"))
     )
 
-    if RAW_DATA_ROOT.parts[-2:] == ("raw", "data"):
-        readable_root = RAW_DATA_ROOT.parents[1] / "readable" / "data"
-        candidates.extend(
-            sorted((readable_root / "common" / "gamedata" / "character").glob("chara_parts*.json"))
-        )
-
     seen: set[str] = set()
     for candidate in candidates:
         key = str(candidate)

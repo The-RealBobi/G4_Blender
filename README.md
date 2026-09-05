@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement (1.5.2)
+### Event placement (1.5.3)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -196,6 +196,10 @@ cuts, including renders through the original cameras. If an event contains
 point packages but its event_cfg or point motions cannot be resolved, the
 import now records the placement counts in scene custom properties and shows
 a warning instead of silently leaving actors at their local animation
-positions. Reimport existing events from the data root that contains
-`common/event` and `common/event_cfg`; keep their original event_cfg and
-point assets available under that same data root.
+positions. All companion resources are resolved from the selected data root
+that contains `common`; keep the event_cfg and point assets under that same
+data root. Reimport existing events to apply the correction.
+
+The same direct data-root rule is used by the G4MT skeleton lookup, the model
+importer, animation companions, event resources and character-part metadata.
+No neighboring `raw/data` or `readable/data` directory is added implicitly.

@@ -156,11 +156,6 @@ def candidate_data_roots(g4mt_path: Path, configured_root: str) -> list[Path]:
     inferred = inferred_raw_data_root(g4mt_path)
     if inferred is not None:
         roots.append(inferred)
-        if inferred.parent.name in {"raw", "readable"}:
-            work_root = inferred.parent.parent
-            roots.extend((work_root / "raw" / "data", work_root / "readable" / "data"))
-            if work_root.name == "._work":
-                roots.append(work_root.parent / "data")
     if configured_root:
         roots.append(Path(bpy.path.abspath(configured_root)))
     return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
