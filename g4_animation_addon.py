@@ -2906,7 +2906,7 @@ def import_event_actor(
             return resolve_model_path(alias_path, getattr(prefs, "raw_data_root", ""))
         return None
 
-    if model_path is None and generic_actor:
+    if model_path is None:
         model_path = resolve_manifest()
     if model_path is None:
         model_path = resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
@@ -3204,17 +3204,35 @@ def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
     result = {}
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
         uniform_root = data_root / "common" / "chr" / "_uniform"
+        effective_head = None
+        event_models = resolve_event_actor_models(directory, prefs)
+        manifest_model = event_models.get(actor, event_models.get(actor_id, ""))
+        if manifest_model and re.fullmatch(r"[A-Za-z]{1,3}\d{4,10}", manifest_model):
+            alias_path = directory / f"{manifest_model}_s00_p00_c0000.g4pk"
+            effective_head = resolve_model_path(alias_path, getattr(prefs, "raw_data_root", ""))
+        if effective_head is None:
+            packages = collect_event_packages(directory).get(actor) or []
+            if packages:
+                effective_head = resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
+        if effective_head is not None:
+            result.update(event_part_defaults_from_head(str(effective_head), prefs))
         for key, prefix in (("body", "u"), ("shoes", "s")):
             stem = actor_overrides.get(key, f"{prefix}{match.group(1)}")
             for extension in (".g4pkm", ".g4md"):
                 candidate = uniform_root / stem / f"{stem}{extension}"
                 if candidate.is_file():
-                    result[key] = str(candidate)
+                    if key in actor_overrides:
+                        result[key] = str(candidate)
+                    else:
+                        result.setdefault(key, str(candidate))
                     break
             if key not in result and uniform_root.is_dir():
                 matches = sorted(uniform_root.glob(f"*/{stem}.g4m[dm]"))
                 if matches:
-                    result[key] = str(matches[0])
+                    if key in actor_overrides:
+                        result[key] = str(matches[0])
+                    else:
+                        result.setdefault(key, str(matches[0]))
 
         # Event imports can bypass the parts dialog (saved assignments,
         # scripts, and direct operator calls).  Those paths still need the
@@ -3223,16 +3241,13 @@ def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
         importer = model_importer_module()
         find_accessory = getattr(importer, "find_accessory_part_for_body", None) if importer is not None else None
         if "body" not in result:
-            packages = collect_event_packages(directory).get(actor) or []
-            if packages:
-                head = resolve_model_path(packages[0], getattr(prefs, "raw_data_root", ""))
-                if head is not None:
-                    result.update({
-                        key: value
-                        for key, value in event_part_defaults_from_head(str(head), prefs).items()
-                        if key not in result
-                    })
+            if effective_head is not None:
+                result.update(event_part_defaults_from_head(str(effective_head), prefs))
         if "accessory" not in result and find_accessory is not None and result.get("body"):
+            accessory = find_accessory(Path(result["body"]), prefs)
+            if accessory is not None:
+                result["accessory"] = str(accessory)
+        elif "body" in actor_overrides and find_accessory is not None and result.get("body"):
             accessory = find_accessory(Path(result["body"]), prefs)
             if accessory is not None:
                 result["accessory"] = str(accessory)
@@ -3271,6 +3286,8 @@ def event_part_defaults_from_head(head_model: str, prefs) -> dict[str, str]:
     if find_part is None:
         return {}
     body = find_part(head_path, "u", prefs)
+    if body is not None:
+        body = importer.declared_body_variant_for_character(body, head_path, prefs)
     shoes = find_part(head_path, "s", prefs)
     accessory = find_accessory(body, prefs) if body is not None and find_accessory is not None else None
     return {

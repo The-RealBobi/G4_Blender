@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 5, 5),
+    "version": (1, 5, 6),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -28,12 +28,62 @@ from bpy.types import AddonPreferences, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
 
+try:
+    from .formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+except ImportError:
+    from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+
 ADDON_ID = __name__
 MODEL_EXTENSIONS = {".g4md", ".g4pkm"}
 CHARACTER_PART_ACCESSORY_CACHE: dict[Path, dict[str, str]] = {}
 CHARACTER_PART_BODY_VARIANT_CACHE: dict[Path, dict[tuple[str, str], dict[int, str]]] = {}
 CHARACTER_BODY_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
 CHARACTER_BODY_MESH_PROFILE_CACHE: dict[Path, dict[int, int]] = {}
+
+
+def character_part_info_rows(config_path: Path) -> list[tuple[str, list[object]]]:
+    """Read modular part rows from the native CFGBIN or its XML sidecar."""
+    if config_path.name.lower().endswith(".cfg.bin"):
+        try:
+            document = parse_cfgbin_file(config_path)
+        except (OSError, ValueError):
+            return []
+        if not isinstance(document, CfgBinDocument):
+            return []
+        names = {
+            "CHARA_PARTS_CLOTHES_INFO",
+            "CHARA_PARTS_SHOES_INFO",
+            "CHARA_PARTS_GLOVE_INFO",
+        }
+        return [
+            (entry.name, [value.value for value in entry.values])
+            for entry in document.entries
+            if entry.name in names
+        ]
+
+    try:
+        text = config_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    rows = []
+    for match in re.finditer(
+        r'<entry index="\d+" name="(CHARA_PARTS_(?:CLOTHES|SHOES|GLOVE)_INFO)">\s*<values>(.*?)</values>',
+        text,
+        re.DOTALL,
+    ):
+        values = {}
+        body = match.group(2)
+        for index, value in re.findall(r'<value index="(\d+)" type="String">([^<]+)</value>', body):
+            values[int(index)] = value.replace("\\", "/").lower()
+        for index, value in re.findall(
+            r'<value index="(\d+)" type="(?:Integer|Unsigned Integer)">([^<]+)</value>', body
+        ):
+            try:
+                values[int(index)] = int(value)
+            except ValueError:
+                continue
+        rows.append((match.group(1), [values.get(index) for index in range(max(values, default=-1) + 1)]))
+    return rows
 
 
 def update_import_progress(context, completed: int, total: int, status: str, redraw: bool = True) -> None:
@@ -3139,35 +3189,23 @@ def declared_body_variant_for_character(body_path: Path, model_path: Path, prefs
             relative = body_path.resolve().relative_to(data_root / "common" / "chr").as_posix().lower()
         except ValueError:
             continue
-        config_paths = sorted((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin.xml"))
+        config_paths = sorted(
+            set((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin"))
+            | set((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin.xml"))
+        )
         for config_path in config_paths:
             variants = CHARACTER_PART_BODY_VARIANT_CACHE.get(config_path)
             if variants is None:
                 variants = {}
-                try:
-                    text = config_path.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    continue
-                for entry in re.finditer(
-                    r'<entry index="\d+" name="CHARA_PARTS_(?:CLOTHES|SHOES|GLOVE)_INFO">\s*<values>(.*?)</values>',
-                    text,
-                    re.DOTALL,
-                ):
+                for _, values in character_part_info_rows(config_path):
                     strings = {
-                        int(index): value.replace("\\", "/").lower()
-                        for index, value in re.findall(
-                            r'<value index="(\d+)" type="String">([^<]+\.g4md)</value>', entry.group(1)
-                        )
-                    }
-                    integers = {
-                        int(index): value
-                        for index, value in re.findall(
-                            r'<value index="(\d+)" type="(?:Integer|Unsigned Integer)">([^<]+)</value>', entry.group(1)
-                        )
+                        index: value
+                        for index, value in enumerate(values)
+                        if isinstance(value, str) and value.endswith(".g4md")
                     }
                     try:
-                        candidate_profile = int(integers.get(2, ""))
-                    except ValueError:
+                        candidate_profile = int(values[2])
+                    except (IndexError, TypeError, ValueError):
                         continue
                     for candidate in strings.values():
                         if not candidate.startswith("_uniform/") or not candidate.endswith(".g4md"):
@@ -3294,28 +3332,25 @@ def declared_accessory_part_for_body(body_path: Path, prefs: G4ImporterPreferenc
             relative = body_path.resolve().relative_to(data_root / "common" / "chr").as_posix().lower()
         except ValueError:
             continue
-        config_paths = sorted((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin.xml"))
+        config_paths = sorted(
+            set((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin"))
+            | set((data_root / "common" / "gamedata" / "character").glob("chara_parts*.cfg.bin.xml"))
+        )
         for config_path in config_paths:
             lookup = CHARACTER_PART_ACCESSORY_CACHE.get(config_path)
             if lookup is None:
-                try:
-                    text = config_path.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    continue
                 lookup = {}
-                for entry in re.finditer(
-                    r'<entry index="\d+" name="CHARA_PARTS_CLOTHES_INFO">\s*<values>(.*?)</values>',
-                    text,
-                    re.DOTALL,
-                ):
-                    values = {
-                        int(index): value.replace("\\", "/").lower()
-                        for index, value in re.findall(
-                            r'<value index="(\d+)" type="String">([^<]+\.g4md)</value>', entry.group(1)
-                        )
-                    }
-                    if values.get(0, "").startswith("_uniform/") and values.get(6, "").startswith("_uniform/"):
-                        lookup.setdefault(values[0], values[6])
+                for name, values in character_part_info_rows(config_path):
+                    if name != "CHARA_PARTS_CLOTHES_INFO" or len(values) < 7:
+                        continue
+                    source, accessory = values[0], values[6]
+                    if (
+                        isinstance(source, str)
+                        and isinstance(accessory, str)
+                        and source.startswith("_uniform/")
+                        and accessory.startswith("_uniform/")
+                    ):
+                        lookup.setdefault(source, accessory)
                 CHARACTER_PART_ACCESSORY_CACHE[config_path] = lookup
             declared = lookup.get(relative)
             if declared:
@@ -3460,6 +3495,8 @@ def autofill_character_setup_parts(operator) -> None:
         return
     prefs = addon_preferences()
     body = find_character_part(head_path, "u", prefs)
+    if body is not None:
+        body = declared_body_variant_for_character(body, head_path, prefs)
     shoes = find_character_part(head_path, "s", prefs)
     accessory = find_accessory_part_for_body(body, prefs) if body is not None else None
     for key, path in (

@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement and animation skeletons (1.5.5)
+### Event placement and animation skeletons (1.5.6)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -214,3 +214,15 @@ up its external G4SK. This keeps models whose skeleton is shared through the
 character catalog on the same bind skeleton as their animation and prevents
 localized bone deformation when the importer starts in a fresh Blender
 session.
+
+Event character assembly also reads the native `chara_parts*.cfg.bin` tables
+when they are available. The declared body profile selects the matching
+`u000xxx` mesh and its paired `sk000xxx` accessory, so modular characters no
+longer fall back to the profile-0 arms. Event `event_cfg` model substitutions
+are applied before this lookup, and the animation importer passes every part
+slot by name so a body cannot be attached as shoes by argument position.
+
+The joint palette resolver prefers a complete named source-skeleton mapping
+when a separated character part exposes more named joints than the partial
+CRC32 palette. This preserves the CRC32 path while avoiding unresolved arm
+weights on compact character rigs.

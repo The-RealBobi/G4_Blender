@@ -4954,10 +4954,43 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             else (None, 0)
         )
         if crc_palette_is_authoritative and hash_palette is not None:
-            joint_palette = hash_palette
-            palette_remap_count = hash_remap_count
-            palette_remap_source = "G4MD CRC32 joint table (named character part)"
-            palette_spatial_score = hash_palette_score
+            # Separated parts can carry a physical 165-joint palette whose
+            # CRC table names optional ``*_wgt`` helpers.  When the selected
+            # actor exposes the compact 99-joint rig, the partial CRC match
+            # may resolve only a few slots and silently send the remaining
+            # arm weights to the wrong bones.  Prefer the complete source
+            # skeleton name translation when it resolves more palette slots.
+            named_candidates = []
+            for source_skeleton, source in uniform_palette_sources:
+                named_palette, named_remaps = remap_joint_palette_by_name(
+                    joint_palette, source_skeleton, skeleton_info
+                )
+                resolved_slots = sum(index >= 0 for index in named_palette)
+                if resolved_slots:
+                    source_stem = Path(source.split(" via ", 1)[0]).stem.casefold()
+                    family_stem = f"c{path.stem[2:]}".casefold()
+                    named_candidates.append(
+                        (resolved_slots, int(source_stem == family_stem),
+                         -sum(index < 0 for index in named_palette), -named_remaps,
+                         named_palette, named_remaps, source)
+                    )
+            # Keep the first source when the quality metrics tie.  The
+            # candidates are ordered from the model family skeleton outward;
+            # comparing the palette contents would make unrelated fallback
+            # rigs win merely because their indices sort higher.
+            named_choice = max(named_candidates, key=lambda item: item[:4], default=None)
+            hash_resolved_slots = sum(index >= 0 for index in hash_palette)
+            if named_choice is not None and named_choice[0] > hash_resolved_slots:
+                _, _, _, _, joint_palette, palette_remap_count, palette_remap_source = named_choice
+                palette_spatial_score = palette_spatial_error(
+                    position_tuples, skin_influences, joint_palette, skeleton_info
+                )
+                palette_remap_source = f"{palette_remap_source} (named source skeleton)"
+            else:
+                joint_palette = hash_palette
+                palette_remap_count = hash_remap_count
+                palette_remap_source = "G4MD CRC32 joint table (named character part)"
+                palette_spatial_score = hash_palette_score
         elif shoe_palette is not None:
             joint_palette = shoe_palette
             palette_remap_count = shoe_palette_remap_count
