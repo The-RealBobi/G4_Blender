@@ -21,7 +21,7 @@ from mathutils import Matrix, Quaternion, Vector
 
 try:
     from .g4_model_probe import g4sk_entries_from_candidate
-    from .g4_model_probe import find_skeleton_for_model, parse_g4sk
+    from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
     from .g4pk_extract_g4mt import select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
@@ -34,7 +34,7 @@ try:
     )
 except ImportError:
     from g4_model_probe import g4sk_entries_from_candidate
-    from g4_model_probe import find_skeleton_for_model, parse_g4sk
+    from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
     from g4pk_extract_g4mt import select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
@@ -362,6 +362,7 @@ def resolve_skeleton_path(model_path: Path | None) -> Path | None:
     # whose bind transforms do not match the sibling rig used by its mesh
     # palette; decoding against that fallback stretches skinned descendants.
     try:
+        configure_raw_data_root_from_path(model_path)
         skeleton_data, skeleton_source = find_skeleton_for_model(model_path)
     except (OSError, ValueError, RuntimeError):
         skeleton_data, skeleton_source = None, None
@@ -671,6 +672,7 @@ def has_display_oriented_bones(armature) -> bool:
 def align_armature_to_native_bind(armature, model_path: Path) -> int:
     """Use the model's G4SK bind matrices as the animation rig rest axes."""
     try:
+        configure_raw_data_root_from_path(model_path)
         skeleton_data, _source = find_skeleton_for_model(model_path)
         skeleton = parse_g4sk(skeleton_data) if skeleton_data else None
     except (OSError, ValueError, RuntimeError, struct.error):
