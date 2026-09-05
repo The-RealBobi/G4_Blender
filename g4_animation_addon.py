@@ -22,7 +22,7 @@ from mathutils import Matrix, Quaternion, Vector
 try:
     from .g4_model_probe import g4sk_entries_from_candidate
     from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
-    from .g4pk_extract_g4mt import select_g4mt_entry
+    from .g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
     from .g4ma_motion import decode_material_motion
@@ -35,7 +35,7 @@ try:
 except ImportError:
     from g4_model_probe import g4sk_entries_from_candidate
     from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
-    from g4pk_extract_g4mt import select_g4mt_entry
+    from g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
     from g4ma_motion import decode_material_motion
@@ -2715,6 +2715,36 @@ def event_g4ma_path(package: Path) -> Path:
     return package.with_suffix("") / f"{package.stem}.g4ma"
 
 
+def materialize_event_g4ma(package: Path, temporary_directory: Path) -> Path | None:
+    """Resolve an event G4MA from its sidecar or from the package entry."""
+    sidecar = event_g4ma_path(package)
+    if sidecar.is_file():
+        return sidecar
+    if package.suffix.lower() != ".g4pk":
+        return None
+    try:
+        data = package.read_bytes()
+        entry = next(
+            (
+                (name, offset, size)
+                for name, offset, size in g4pk_entries(data)
+                if data[offset : offset + 4] == b"G4MA"
+            ),
+            None,
+        )
+    except (OSError, ValueError, struct.error):
+        return None
+    if entry is None:
+        return None
+    name, offset, size = entry
+    destination = temporary_directory / f"{package.stem}_{Path(name).name}"
+    try:
+        destination.write_bytes(data[offset : offset + size])
+    except OSError:
+        return None
+    return destination
+
+
 def material_crc32b(material) -> int:
     """Resolve an imported material name back to the CRC used by G4MA."""
     stored_crc = material.get("g4_material_crc32b")
@@ -2786,10 +2816,11 @@ def animate_event_face_materials(
     clip: dict,
     strip_start: int,
     duration: int,
+    temporary_directory: Path,
 ) -> int:
     """Apply channel-32 G4MA material states as stepped 4x2 facial-atlas UV offsets."""
-    path = event_g4ma_path(package)
-    if not path.is_file():
+    path = materialize_event_g4ma(package, temporary_directory)
+    if path is None:
         return 0
     try:
         motion = decode_material_motion(path, clip["name"])
@@ -3048,6 +3079,7 @@ def import_event_actor(
             clip,
             strip_start,
             duration,
+            temporary_directory,
         )
         if debug_log is not None:
             debug_log.append(
