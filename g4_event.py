@@ -105,7 +105,16 @@ def _event_light_value_rows(path: Path) -> list[list[object]]:
 
 
 def event_light_parameter_entries(path: Path) -> list[tuple[str, list[float]]]:
-    """Read every named character-light parameter without merging duplicates."""
+    """Read character-light and outline parameters without merging duplicates."""
+
+    outline_names = {
+        "edgeColor",
+        "edgeWeight0",
+        "edgeWeight1",
+        "edgePixel",
+        "useExtrutedEdge",
+        "writeDepthLumaThreshold",
+    }
 
     entries = _event_light_value_rows(path)
     result = []
@@ -113,7 +122,11 @@ def event_light_parameter_entries(path: Path) -> list[tuple[str, list[float]]]:
         if not values or not isinstance(values[0], str):
             continue
         numeric = [float(value) for value in values[1:] if isinstance(value, (int, float))]
-        if values[0].startswith("chara") and numeric:
+        if (
+            values[0].startswith("chara")
+            or values[0].startswith("edge2Outline")
+            or values[0] in outline_names
+        ) and numeric:
             result.append((values[0], numeric))
     return result
 
@@ -129,7 +142,6 @@ def event_light_parameters(path: Path) -> dict[str, list[float]]:
 
 _EVENT_LIGHT_COMPONENTS = {
     "charalightdir": ("direction", 3),
-    "charahighlightcolor": ("color", 4),
     "charalightcolor": ("color", 4),
     "charalightenergy": ("energy", 1),
 }
@@ -137,7 +149,7 @@ _EVENT_LIGHT_NAME_RE = re.compile(r"^(.*?)(?:[_\-\[\(]?(\d+)[\]\)]?)?$", re.IGNO
 
 
 def event_light_slots(entries: list[tuple[str, list[float]]]) -> list[dict[str, list[float]]]:
-    """Expand repeated or indexed CFGBIN light parameters into stable light slots."""
+    """Expand diffuse-light parameters into stable slots; highlights stay material-only."""
 
     slots: dict[int, dict[str, list[float]]] = {}
     occurrences: dict[str, int] = {}

@@ -106,6 +106,17 @@ def character_texture_role(name: str | Path) -> str:
     return "base"
 
 
+def character_normal_encoding(name: str | Path) -> str:
+    """Return the packed normal encoding used by a Character texture."""
+
+    stem = _texture_stem(name)
+    if stem.endswith(("nml", "_normal")):
+        return "rgb_nml"
+    if character_texture_role(stem) == "normal":
+        return "dxt5nm_alpha_green"
+    return ""
+
+
 def character_texture_base_key(name: str | Path, role: str | None = None) -> str:
     """Remove a Character texture role suffix while retaining its material key."""
 
@@ -139,6 +150,7 @@ def _texture_stem(name: str | Path) -> str:
 __all__ = [
     "GLOBAL_CHARACTER_RAMP_NAMES",
     "character_data_roots",
+    "character_normal_encoding",
     "character_shader_texture_containers",
     "character_texture_base_key",
     "character_texture_role",

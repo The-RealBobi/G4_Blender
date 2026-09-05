@@ -734,6 +734,7 @@ def import_model_for_animation(
     ball_model: str = "",
     character_part_stem: str = "",
     align_to_motion_rest: bool = True,
+    force_character_styling: bool = False,
 ):
     if model_path is None:
         raise RuntimeError("Select the G4MD/G4PKM model that will receive the animation.")
@@ -757,6 +758,7 @@ def import_model_for_animation(
             # again and returns before an armature exists for the G4MT action.
             character_setup_complete=True,
             skip_character_setup=True,
+            force_character_styling=force_character_styling,
             body_model=body_model,
             shoes_model=shoes_model,
             accessory_model=accessory_model,
@@ -2396,6 +2398,59 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         return None
 
     scene = bpy.context.scene
+    edge2_parameters = {}
+    edge_parameters = {}
+    edge2_group = bpy.data.node_groups.get("G4 edge2 Preview Geometry")
+    edge2_scale_node = edge2_group.nodes.get("G4 edge2 Scale") if edge2_group is not None else None
+    edge2_scale_socket = edge2_scale_node.inputs[1] if edge2_scale_node is not None else None
+    edge2_material = bpy.data.materials.get("G4 edge2 Preview")
+    edge2_color_node = (
+        edge2_material.node_tree.nodes.get("G4 edge2 Color")
+        if edge2_material is not None and edge2_material.node_tree is not None
+        else None
+    )
+    edge2_color_socket = edge2_color_node.inputs.get("Color") if edge2_color_node is not None else None
+    for cut, frame, parameters, _ in keyed:
+        values = {
+            name: parameters[name][0]
+            for name in (
+                "edge2OutlineDepthScaleMax",
+                "edge2OutlineDepthScaleOffset",
+                "edge2OutlineScale",
+            )
+            if parameters.get(name)
+        }
+        if values:
+            edge2_parameters[cut] = values
+        values = {
+            name: parameters[name]
+            for name in (
+                "edgeColor",
+                "edgeWeight0",
+                "edgeWeight1",
+                "edgePixel",
+                "useExtrutedEdge",
+                "writeDepthLumaThreshold",
+            )
+            if parameters.get(name)
+        }
+        if values:
+            edge_parameters[cut] = values
+        edge_color = parameters.get("edgeColor")
+        if edge2_color_socket is not None and edge_color and len(edge_color) >= 3:
+            # chr_edge2.pfxo writes CBUSE_UB_MODEL_MATERIAL_IDX[29].xyz;
+            # EventMap's edgeColor is the recovered high-level source for it.
+            edge2_color_socket.default_value = tuple(
+                max(0.0, value) for value in edge_color[:3]
+            ) + (1.0,)
+            edge2_color_socket.keyframe_insert("default_value", frame=frame)
+        scale = parameters.get("edge2OutlineScale")
+        if edge2_scale_socket is not None and scale:
+            # edge2's vertex shader applies 0.5 * u_edge2Scale * 0.01
+            # before the runtime material/depth terms. Keep the known part
+            # exact and animate it with the EventMap light profile.
+            edge2_scale_socket.default_value = 0.5 * max(0.0, scale[0]) * 0.01
+            edge2_scale_socket.keyframe_insert("default_value", frame=frame)
     if scene.world is None:
         scene.world = bpy.data.worlds.new(f"{directory.name} World")
     light_keys = []
@@ -2472,11 +2527,18 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         under_rim_strength = material.node_tree.nodes.get("G4 Under Rim Strength")
         keyed_material = False
         for _, frame, parameters, _ in keyed:
-            for node, parameter_name in (
-                (highlight_node, "charaHighLightColor"),
-                (underlight_node, "charaUnderRimColor"),
+            for node, parameter_names in (
+                (highlight_node, ("charaHighLightColor", "charaHighColor")),
+                (underlight_node, ("charaUnderRimColor", "charaUnderRim")),
             ):
-                values = parameters.get(parameter_name)
+                values = next(
+                    (
+                        parameters.get(name)
+                        for name in parameter_names
+                        if parameters.get(name)
+                    ),
+                    None,
+                )
                 if node is None or not values or len(values) < 3:
                     continue
                 intensity = values[3] if len(values) > 3 else 1.0
@@ -2495,11 +2557,34 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
                 primary_shadow.color_ramp.elements[-1].keyframe_insert("position", frame=frame)
                 secondary_shadow.color_ramp.elements[-1].keyframe_insert("position", frame=frame)
                 keyed_material = True
-            for node, parameter_name in (
-                (primary_shadow, "charaShadowRate1"),
-                (secondary_shadow, "charaShadowRate2"),
+            for node, color_names, rate_name in (
+                (
+                    primary_shadow,
+                    ("charaShadowColor1", "charaShadow1"),
+                    "charaShadowRate1",
+                ),
+                (
+                    secondary_shadow,
+                    ("charaShadowColor2", "charaShadow2"),
+                    "charaShadowRate2",
+                ),
             ):
-                values = parameters.get(parameter_name)
+                values = next(
+                    (
+                        parameters.get(name)
+                        for name in color_names
+                        if parameters.get(name)
+                    ),
+                    None,
+                )
+                if node is not None and values and len(values) >= 3:
+                    node.color_ramp.elements[0].color = tuple(
+                        max(0.0, value) for value in values[:3]
+                    ) + (1.0,)
+                    node.color_ramp.elements[0].keyframe_insert("color", frame=frame)
+                    keyed_material = True
+                    continue
+                values = parameters.get(rate_name)
                 if node is None or not values:
                     continue
                 shade = max(0.0, min(1.0, values[0]))
@@ -2534,6 +2619,8 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
     scene["g4_event_light_parameters"] = json.dumps(
         {cut: parameters for cut, _, parameters, _ in keyed}, sort_keys=True
     )
+    scene["g4_event_edge2_parameters"] = json.dumps(edge2_parameters, sort_keys=True)
+    scene["g4_event_edge_parameters"] = json.dumps(edge_parameters, sort_keys=True)
     scene["g4_event_lights"] = json.dumps(
         {cut: slots for cut, _, _, slots in keyed}, sort_keys=True
     )
@@ -2984,6 +3071,7 @@ def import_event_actor(
         # native rest bones here breaks the skin bind and stretches the mesh;
         # the event action retargets onto the imported native rest instead.
         align_to_motion_rest=False,
+        force_character_styling=True,
     )
     importer = model_importer_module()
     apply_skin_color = getattr(importer, "apply_character_skin_mask_color", None) if importer is not None else None

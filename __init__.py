@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 6, 4),
+    "version": (1, 7, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -126,6 +126,7 @@ if __package__:
     from .shading.character_profile import annotate_current_toon_material
     from .shading.character_textures import (
         character_texture_base_key,
+        character_normal_encoding,
         character_texture_role,
     )
     from .shading.map_surfaces import classify_map_surface
@@ -136,6 +137,7 @@ else:
     from shading.character_profile import annotate_current_toon_material
     from shading.character_textures import (
         character_texture_base_key,
+        character_normal_encoding,
         character_texture_role,
     )
     from shading.map_surfaces import classify_map_surface
@@ -1482,6 +1484,8 @@ def apply_level5_toon_shader(
     if normal_path is not None:
         image = load_image(normal_path)
         if image is not None:
+            normal_encoding = character_normal_encoding(normal_path)
+            normal_is_rgb = normal_encoding == "rgb_nml"
             image.colorspace_settings.name = "Non-Color"
             normal_texture = nodes.new("ShaderNodeTexImage")
             normal_texture.name = "G4 Normal"
@@ -1491,11 +1495,13 @@ def apply_level5_toon_shader(
             normal_channels.name = "G4 DXT5nm Channels"
             normal_channels.location = (-780, -160)
             normal_x = nodes.new("ShaderNodeMath")
+            normal_x.name = "G4 Normal X"
             normal_x.operation = "MULTIPLY_ADD"
             normal_x.inputs[1].default_value = 2.0
             normal_x.inputs[2].default_value = -1.0
             normal_x.location = (-580, -200)
             normal_y = nodes.new("ShaderNodeMath")
+            normal_y.name = "G4 Normal Y"
             normal_y.operation = "MULTIPLY_ADD"
             normal_y.inputs[1].default_value = 2.0
             normal_y.inputs[2].default_value = -1.0
@@ -1530,7 +1536,16 @@ def apply_level5_toon_shader(
             normal_map.location = (700, -180)
             normal_map.inputs["Strength"].default_value = 1.0
             links.new(normal_texture.outputs["Color"], normal_channels.inputs["Color"])
-            links.new(normal_texture.outputs["Alpha"], normal_x.inputs[0])
+            # The native character set contains both packed DXT5nm normals
+            # (.2: X in alpha, Y in green) and occasional conventional nml
+            # maps (X in red, Y in green).  Applying the packed route to nml
+            # makes X stick at +1 and visibly flattens the surface.
+            if normal_is_rgb:
+                links.new(normal_channels.outputs["Red"], normal_x.inputs[0])
+                links.new(normal_channels.outputs["Red"], packed_normal.inputs["Red"])
+            else:
+                links.new(normal_texture.outputs["Alpha"], normal_x.inputs[0])
+                links.new(normal_texture.outputs["Alpha"], packed_normal.inputs["Red"])
             links.new(normal_channels.outputs["Green"], normal_y.inputs[0])
             links.new(normal_x.outputs[0], normal_x2.inputs[0])
             links.new(normal_x.outputs[0], normal_x2.inputs[1])
@@ -1541,7 +1556,6 @@ def apply_level5_toon_shader(
             links.new(normal_xy2.outputs[0], normal_z2.inputs[1])
             links.new(normal_z2.outputs[0], normal_z.inputs[0])
             links.new(normal_z.outputs[0], encoded_z.inputs[0])
-            links.new(normal_texture.outputs["Alpha"], packed_normal.inputs["Red"])
             links.new(normal_channels.outputs["Green"], packed_normal.inputs["Green"])
             links.new(encoded_z.outputs[0], packed_normal.inputs["Blue"])
             links.new(packed_normal.outputs["Color"], normal_map.inputs["Color"])
@@ -1652,7 +1666,11 @@ def apply_level5_toon_shader(
     shadow_primary.name = "G4 Shadow Color 0"
     shadow_primary.location = (20, -80)
     shadow_primary.color_ramp.interpolation = "CONSTANT"
-    shadow_primary.color_ramp.elements[0].color = (0.58, 0.58, 0.58, 1.0)
+    # The native character pass uses coloured shadow uniforms rather than a
+    # neutral grey multiply.  A cool violet low band keeps the palette alive
+    # under stadium or effect lighting, matching the chromatic shadows visible
+    # in the reference captures without flattening the lit albedo.
+    shadow_primary.color_ramp.elements[0].color = (0.52, 0.46, 0.62, 1.0)
     shadow_primary.color_ramp.elements[1].position = 0.32
     shadow_primary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
     links.new(toon_factor, shadow_primary.inputs["Fac"])
@@ -1681,7 +1699,7 @@ def apply_level5_toon_shader(
     shadow_secondary.name = "G4 Shadow Color 1"
     shadow_secondary.location = (240, -80)
     shadow_secondary.color_ramp.interpolation = "CONSTANT"
-    shadow_secondary.color_ramp.elements[0].color = (0.82, 0.82, 0.82, 1.0)
+    shadow_secondary.color_ramp.elements[0].color = (0.82, 0.80, 0.90, 1.0)
     shadow_secondary.color_ramp.elements[1].position = 0.46
     shadow_secondary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
     links.new(secondary_factor, shadow_secondary.inputs["Fac"])
@@ -1763,14 +1781,18 @@ def apply_level5_toon_shader(
     line_informative = False
     if line_path is not None:
         image = load_image(line_path)
-        if image is not None:
+        # Character packages commonly bind an 8x8 solid-blue ``*line`` DDS
+        # as a shader default.  It carries no painted line information and is
+        # not one of the character's authored surface maps, so do not turn it
+        # into an artificial inner rim in Blender.
+        if image is not None and max(image.size) > 8:
             image.colorspace_settings.name = "Non-Color"
             line_texture = nodes.new("ShaderNodeTexImage")
             line_texture.name = "G4 Line Parameter"
             line_texture.label = line_path.name
             line_texture.image = image
             line_texture.location = (-180, -520)
-            line_informative = max(image.size) > 8
+            line_informative = True
             line_channels = nodes.new("ShaderNodeSeparateColor")
             line_channels.name = "G4 Line Channels"
             line_channels.location = (20, -520)
@@ -2004,6 +2026,9 @@ def apply_level5_toon_shader(
     material["g4_base_texture"] = str(base_path)
     material["g4_recolor_mask"] = str(mask_path) if mask_path is not None else ""
     material["g4_normal_texture"] = str(normal_path) if normal_path is not None else ""
+    material["g4_normal_encoding"] = (
+        character_normal_encoding(normal_path) if normal_path is not None else ""
+    )
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
     material["g4_toon_scene_gradient"] = "in_texGrd: texture2dms scene framebuffer; binding pending"
@@ -2624,6 +2649,150 @@ def mark_level5_internal_edges(obj) -> int:
     return marked
 
 
+EDGE2_PREVIEW_MODIFIER_NAME = "G4 edge2 Preview"
+EDGE2_PREVIEW_GROUP_NAME = "G4 edge2 Preview Geometry"
+EDGE2_PREVIEW_MATERIAL_NAME = "G4 edge2 Preview"
+
+
+def edge2_preview_material():
+    material = bpy.data.materials.get(EDGE2_PREVIEW_MATERIAL_NAME)
+    if material is not None:
+        return material
+    material = bpy.data.materials.new(EDGE2_PREVIEW_MATERIAL_NAME)
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputMaterial")
+    transparent = nodes.new("ShaderNodeBsdfTransparent")
+    emission = nodes.new("ShaderNodeEmission")
+    emission.name = "G4 edge2 Color"
+    emission.inputs["Color"].default_value = (0.018, 0.012, 0.018, 1.0)
+    emission.inputs["Strength"].default_value = 1.0
+    mix = nodes.new("ShaderNodeMixShader")
+    facing = nodes.new("ShaderNodeNewGeometry")
+    # The native edge2 pixel shader writes the material edge colour.  The
+    # front side of the expanded shell stays transparent; only the grazing
+    # back-facing part becomes the visible outline.
+    links.new(facing.outputs["Backfacing"], mix.inputs[0])
+    links.new(transparent.outputs["BSDF"], mix.inputs[1])
+    links.new(emission.outputs["Emission"], mix.inputs[2])
+    links.new(mix.outputs["Shader"], output.inputs["Surface"])
+    set_transparent_material(material)
+    material["g4_edge2_color_source"] = "CBUSE_UB_MODEL_MATERIAL_IDX[29].xyz"
+    return material
+
+
+def edge2_preview_node_group():
+    material = edge2_preview_material()
+    group = bpy.data.node_groups.get(EDGE2_PREVIEW_GROUP_NAME)
+    if group is not None and group.get("g4_edge2_preview_schema") == 2:
+        return group
+    if group is None:
+        group = bpy.data.node_groups.new(EDGE2_PREVIEW_GROUP_NAME, "GeometryNodeTree")
+    else:
+        group.nodes.clear()
+        for item in tuple(group.interface.items_tree):
+            group.interface.remove(item)
+
+    geometry_in = group.interface.new_socket(
+        name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry"
+    )
+    geometry_out = group.interface.new_socket(
+        name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry"
+    )
+    nodes = group.nodes
+    links = group.links
+    input_node = nodes.new("NodeGroupInput")
+    output_node = nodes.new("NodeGroupOutput")
+    set_position = nodes.new("GeometryNodeSetPosition")
+    normal = nodes.new("GeometryNodeInputNormal")
+    named_color = nodes.new("GeometryNodeInputNamedAttribute")
+    named_color.data_type = "FLOAT_COLOR"
+    named_color.inputs["Name"].default_value = "G4 Outline Parameters"
+    blue = nodes.new("ShaderNodeVectorMath")
+    blue.operation = "DOT_PRODUCT"
+    blue.inputs[1].default_value = (0.0, 0.0, 1.0)
+    scale = nodes.new("ShaderNodeMath")
+    scale.name = "G4 edge2 Scale"
+    scale.operation = "MULTIPLY"
+    # The native vertex shader applies COLOR.b * cb4[29].w * 0.5 *
+    # u_edge2Scale * 0.01 along the normalized model-space normal. Generic
+    # character-light profiles provide edge2OutlineScale=2.5; event light
+    # profiles can animate this socket (usually to 1.0).  The native shader
+    # reduces its depth branch to exactly 1 when max is positive, which is
+    # the value used by every inspected dump profile (max=7, offset=0.1).
+    # cb4[29].w remains a runtime material input not present in an imported
+    # scene.
+    scale.inputs[1].default_value = 0.5 * 2.5 * 0.01
+    vector_scale = nodes.new("ShaderNodeVectorMath")
+    vector_scale.operation = "SCALE"
+    set_material = nodes.new("GeometryNodeSetMaterial")
+    set_material.inputs["Material"].default_value = material
+    join = nodes.new("GeometryNodeJoinGeometry")
+
+    geometry = input_node.outputs[geometry_in.identifier]
+    links.new(geometry, set_position.inputs["Geometry"])
+    links.new(normal.outputs["Normal"], vector_scale.inputs[0])
+    links.new(named_color.outputs["Attribute"], blue.inputs[0])
+    links.new(blue.outputs["Value"], scale.inputs[0])
+    links.new(scale.outputs[0], vector_scale.inputs[3])
+    links.new(vector_scale.outputs["Vector"], set_position.inputs["Offset"])
+    links.new(set_position.outputs["Geometry"], set_material.inputs["Geometry"])
+    links.new(geometry, join.inputs["Geometry"])
+    links.new(set_material.outputs["Geometry"], join.inputs["Geometry"])
+    links.new(join.outputs["Geometry"], output_node.inputs[geometry_out.identifier])
+    group["g4_edge2_preview_schema"] = 2
+    group["g4_edge2_scale_source"] = "edge2OutlineScale from native light profiles; default 2.5"
+    group["g4_edge2_displacement_source"] = (
+        "COLOR.b * cb4[29].w * 0.5 * u_edge2Scale * 0.01 * normal; "
+        "depth branch is 1 for observed positive max profiles"
+    )
+    return group
+
+
+def remove_edge2_preview(imported_names: set[str]) -> int:
+    removed = 0
+    for name in imported_names:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "MESH":
+            continue
+        modifier = obj.modifiers.get(EDGE2_PREVIEW_MODIFIER_NAME)
+        if modifier is not None:
+            obj.modifiers.remove(modifier)
+            removed += 1
+        obj.pop("g4_edge2_preview", None)
+    return removed
+
+
+def configure_edge2_preview(imported_names: set[str], debug: list[str] | None = None) -> int:
+    group = edge2_preview_node_group()
+    excluded = re.compile(r"(?:^|_)(?:eye|mouth|teeth|tongue|pupil|eyelash)(?:_|$)", re.IGNORECASE)
+    configured = 0
+    removed = 0
+    for name in imported_names:
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "MESH" or excluded.search(obj.name):
+            continue
+        attribute = obj.data.color_attributes.get("G4 Outline Parameters")
+        values = [value.color[2] for value in attribute.data] if attribute is not None else []
+        modifier = obj.modifiers.get(EDGE2_PREVIEW_MODIFIER_NAME)
+        if not values or max(values) <= (1.0 / 255.0):
+            if modifier is not None:
+                obj.modifiers.remove(modifier)
+                removed += 1
+            obj.pop("g4_edge2_preview", None)
+            continue
+        if modifier is None:
+            modifier = obj.modifiers.new(EDGE2_PREVIEW_MODIFIER_NAME, "NODES")
+        modifier.node_group = group
+        obj["g4_edge2_preview"] = True
+        configured += 1
+    if debug is not None:
+        debug.append(f"[outline] edge2 preview geometry={configured} removed={removed}")
+    return configured
+
+
 def configure_level5_outlines(
     imported_names: set[str],
     detailed: bool = False,
@@ -2666,16 +2835,25 @@ def configure_level5_outlines(
             if obj is None or obj.type != "MESH" or excluded.search(obj.name):
                 continue
             attribute = obj.data.color_attributes.get("G4 Outline Parameters")
-            blue = (
-                sum(value.color[2] for value in attribute.data) / len(attribute.data)
-                if attribute is not None and attribute.data
-                else 0.5
-            )
+            blue_values = [value.color[2] for value in attribute.data] if attribute is not None else []
+            # The exporter clears COLOR.b for a record whose native edge2
+            # displacement is disabled.  Freestyle cannot express a
+            # per-corner mask, but it can at least avoid creating a silhouette
+            # for a record that is entirely opted out.
+            if blue_values and max(blue_values) <= (1.0 / 255.0):
+                for collection in (source_collection, thin_collection, detail_collection):
+                    if collection.objects.get(obj.name) is not None:
+                        collection.objects.unlink(obj)
+                continue
+            blue = sum(blue_values) / len(blue_values) if blue_values else 0.5
             has_line_map = any(
                 slot.material is not None and slot.material.get("g4_line_informative", False)
                 for slot in obj.material_slots
             )
             collection = thin_collection if blue < 0.35 or has_line_map else source_collection
+            other_collection = source_collection if collection == thin_collection else thin_collection
+            if other_collection.objects.get(obj.name) is not None:
+                other_collection.objects.unlink(obj)
             if collection.objects.get(obj.name) is None:
                 collection.objects.link(obj)
             if detail_collection.objects.get(obj.name) is None:
@@ -2777,18 +2955,35 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
     has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
     if not has_level5_lines:
         if mode == "OFF":
+            names = {
+                obj.name for obj in bpy.data.objects
+                if obj.type == "MESH" and obj.get("g4_edge2_preview")
+            }
+            remove_edge2_preview(names)
             return False
         names = {
             obj.name for obj in bpy.data.objects
             if obj.type == "MESH" and obj.get("g4_viewport_outline") == "SCREEN_SPACE"
         }
-        return bool(names) and configure_level5_outlines(names, detailed=mode == "HULL")
+        if not names:
+            return False
+        configured = configure_level5_outlines(names, detailed=mode == "HULL")
+        if mode == "HULL":
+            configure_edge2_preview(names)
+        else:
+            remove_edge2_preview(names)
+        return configured
     if mode == "OFF":
         for line_set in tuple(settings.linesets):
             if line_set.name in managed:
                 settings.linesets.remove(line_set)
         if not settings.linesets:
             scene.render.use_freestyle = False
+        names = {
+            obj.name for obj in bpy.data.objects
+            if obj.type == "MESH" and obj.get("g4_edge2_preview")
+        }
+        remove_edge2_preview(names)
         return True
 
     names: set[str] = set()
@@ -2802,7 +2997,12 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
             names.update(obj.name for obj in collection.objects if obj.type == "MESH")
     if not names:
         return False
-    return configure_level5_outlines(names, detailed=mode == "HULL")
+    configured = configure_level5_outlines(names, detailed=mode == "HULL")
+    if mode == "HULL":
+        configure_edge2_preview(names)
+    else:
+        remove_edge2_preview(names)
+    return configured
 
 
 @persistent
@@ -2971,13 +3171,17 @@ def import_g4_model(
         apply_styling=apply_styling,
     )
     if apply_styling:
-        modifier_count = configure_character_parameter_modifiers(imported_names, force_character=is_character_model(path))
+        modifier_count = configure_character_parameter_modifiers(imported_names, force_character=True)
         debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
     if apply_styling:
         configure_character_color_management(debug)
         if outline_mode != "OFF":
             configure_level5_outlines(imported_names, outline_mode == "HULL", debug)
             configure_viewport_outlines(imported_names, outline_mode == "HULL", debug)
+            if outline_mode == "HULL":
+                configure_edge2_preview(imported_names, debug)
+        else:
+            remove_edge2_preview(imported_names)
         if outline_mode == "HULL":
             debug.append("[outline] detailed render and viewport cavity edges enabled")
         elif outline_mode == "SIMPLE":
@@ -3415,6 +3619,7 @@ def attach_part_to_armature(
         prefs,
         create_report_text,
         target_armature=target_armature,
+        apply_styling=True,
     )
     imported_objects = [bpy.data.objects.get(name) for name in imported_names]
     imported_objects = [obj for obj in imported_objects if obj is not None]
@@ -3934,6 +4139,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
+    force_character_styling: BoolProperty(
+        default=False,
+        options={"HIDDEN", "SKIP_SAVE"},
+    )
     body_model: StringProperty(
         name="Body Model",
         description="Optional u*.g4md/.g4pkm override; empty detects the matching body automatically",
@@ -4050,6 +4259,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         prefs,
                         self.create_report_text,
                         target_armature=target_armature,
+                        apply_styling=True if self.force_character_styling else None,
                     )
                     summaries.append(summary)
                     imported_total += len(imported_names)
@@ -4634,6 +4844,23 @@ def set_character_texture_node_image(material, node_name: str, role: str, path: 
         material["g4_recolor_mask"] = str(path)
     elif role == "normal":
         material["g4_normal_texture"] = str(path)
+        material["g4_normal_encoding"] = character_normal_encoding(path)
+        normal_texture = node
+        normal_channels = material.node_tree.nodes.get("G4 DXT5nm Channels")
+        normal_x = material.node_tree.nodes.get("G4 Normal X")
+        packed_normal = material.node_tree.nodes.get("G4 Reconstructed Normal")
+        if normal_channels is not None and normal_x is not None and packed_normal is not None:
+            links = material.node_tree.links
+            for socket in (normal_x.inputs[0], packed_normal.inputs["Red"]):
+                for link in tuple(socket.links):
+                    links.remove(link)
+            source = (
+                normal_channels.outputs["Red"]
+                if character_normal_encoding(path) == "rgb_nml"
+                else normal_texture.outputs["Alpha"]
+            )
+            links.new(source, normal_x.inputs[0])
+            links.new(source, packed_normal.inputs["Red"])
     elif role == "line":
         material["g4_line_texture"] = str(path)
         material["g4_line_informative"] = max(image.size) > 8

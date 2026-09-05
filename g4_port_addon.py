@@ -581,7 +581,9 @@ def export_collada(
                 # The game creates its outline from G4 vertex/shader data.
                 # Exporting Blender Solidify duplicates the surface and loses
                 # its one-to-one skin correspondence, producing a T-pose G4.
-                if modifier.type == "SOLIDIFY":
+                if modifier.type == "SOLIDIFY" or (
+                    modifier.name == "G4 edge2 Preview" and pose_source.get("g4_edge2_preview")
+                ):
                     modifier.show_viewport = False
                 elif modifier.type == "ARMATURE":
                     modifier.object = temporary_rig
