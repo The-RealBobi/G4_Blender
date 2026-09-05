@@ -3195,6 +3195,26 @@ EVENT_PART_OVERRIDES = {
 }
 
 
+def is_base_uniform_part_path(value: str) -> bool:
+    """Identify a persisted part fallback such as _uniform/u000101/u000101.g4md."""
+    if not value:
+        return False
+    path = Path(bpy.path.abspath(str(value)))
+    return (
+        path.parent.name.casefold() == path.stem.casefold()
+        and path.parent.parent.name.casefold() == "_uniform"
+    )
+
+
+def event_part_needs_default(value: str, key: str, overrides: dict[str, str]) -> bool:
+    """Use event_cfg for empty or legacy base parts while preserving explicit variants."""
+    return (
+        not value
+        or key in overrides
+        or (key in {"body", "shoes", "accessory"} and is_base_uniform_part_path(value))
+    )
+
+
 def event_part_defaults(directory: Path, actor: str, prefs) -> dict[str, str]:
     actor_id = event_actor_base_id(actor)
     match = re.fullmatch(r"c(\d{6,8})", actor_id, re.IGNORECASE)
@@ -3359,9 +3379,22 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             event_defaults = event_part_defaults(directory, slot_actors[0], prefs) if slot_actors else {}
             default_head = event_setup_actor_model(directory, slot_actors[0], prefs) if slot_actors else None
             item.head_model = generic_saved.get("head") or (str(default_head) if default_head else "")
-            item.body_model = generic_saved.get("body") or event_defaults.get("body", "")
-            item.shoes_model = generic_saved.get("shoes") or event_defaults.get("shoes", "")
-            item.accessory_model = generic_saved.get("accessory") or event_defaults.get("accessory", "")
+            generic_overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(slot_actors[0], {}) if slot_actors else {}
+            item.body_model = (
+                event_defaults.get("body", "")
+                if event_part_needs_default(generic_saved.get("body", ""), "body", generic_overrides)
+                else generic_saved.get("body", "")
+            )
+            item.shoes_model = (
+                event_defaults.get("shoes", "")
+                if event_part_needs_default(generic_saved.get("shoes", ""), "shoes", generic_overrides)
+                else generic_saved.get("shoes", "")
+            )
+            item.accessory_model = (
+                event_defaults.get("accessory", "")
+                if event_part_needs_default(generic_saved.get("accessory", ""), "accessory", generic_overrides)
+                else generic_saved.get("accessory", "")
+            )
             item.gloves_model = generic_saved.get("gloves", "")
             item.armband_model = generic_saved.get("armband", "")
             item.nameplate_model = generic_saved.get("nameplate", "")
@@ -3385,8 +3418,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                     if not actor_parts.get(key)
                 })
             defaults = event_part_defaults(directory, actor, prefs)
+            overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {})
             for key, value in defaults.items():
-                if not actor_parts.get(key) or key in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                if event_part_needs_default(actor_parts.get(key, ""), key, overrides):
                     actor_parts[key] = value
             if "body" in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
                 accessory = event_accessory_from_body(actor_parts.get("body", ""), prefs)
@@ -3675,8 +3709,9 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             progress()
                         continue
                     defaults = event_part_defaults(directory, actor, prefs)
+                    overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {})
                     for key, value in defaults.items():
-                        if not actor_parts.get(key) or key in EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                        if event_part_needs_default(actor_parts.get(key, ""), key, overrides):
                             actor_parts[key] = value
                     actor_base = event_actor_base_id(actor)
                     try:

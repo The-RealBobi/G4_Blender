@@ -183,7 +183,7 @@ Validation covers both banks of the reported Yo-Kai Watch 4 y03150000 model
 Road event cuts with world-matrix and skinned-vertex comparisons. This does
 not establish native-game equivalence or support for additive blending.
 
-### Event placement and animation skeletons (1.6.0)
+### Event placement and animation skeletons (1.6.1)
 
 Event imports now apply per-cut actor attachments from `event_cfg/evt` or
 `event_cfg/vis` to the corresponding `point_sXX` animation and `evpXX` joint.
@@ -230,4 +230,8 @@ weights on compact character rigs.
 The event character-parts dialog now starts each actor from the model declared
 by `event_cfg`, including its body, shoes and matching arms. Existing saved
 choices remain available, and changing the head continues to refill the
-modular parts for that head.
+modular parts for that head. Legacy saved paths that point directly to a base
+folder such as `_uniform/u000101/u000101.g4md` are treated as old fallbacks and
+are replaced by the event profile in both the dialog and direct batch imports.
+Profile-specific paths such as `_uniform/u000101/u000102.g4md` remain explicit
+choices.

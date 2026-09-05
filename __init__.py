@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 6, 0),
+    "version": (1, 6, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -3587,8 +3587,9 @@ class IMPORT_OT_level5_g4_character_setup(Operator):
             self.head_model = selected.get("head") or self.model_path
             autofill_character_setup_parts(self)
             defaults = g4_animation_addon.event_part_defaults(directory, actor, prefs)
+            overrides = g4_animation_addon.EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {})
             for key, value in defaults.items():
-                if not selected.get(key) or key in g4_animation_addon.EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {}):
+                if g4_animation_addon.event_part_needs_default(selected.get(key, ""), key, overrides):
                     selected[key] = value
             self.body_model = selected.get("body") or self.body_model
             self.shoes_model = selected.get("shoes") or self.shoes_model
