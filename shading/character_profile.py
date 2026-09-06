@@ -30,9 +30,14 @@ class CharacterShaderProfile:
             parameters=(
                 ShaderParameter("base_color", "color", native_source="G4TX"),
                 ShaderParameter("normal_dxt5nm", "normal", native_source="G4TX"),
+                ShaderParameter("normal_rgb_nml", "normal", native_source="G4TX nml/normal (optional)"),
+                ShaderParameter("occlusion", "mask", native_source="G4TX _oc"),
+                ShaderParameter("specular_shape", "texture", native_source="G4TX _sp"),
+                ShaderParameter("specular_mask", "mask", native_source="G4TX _spm"),
                 ShaderParameter("mask_rgb", "color", native_source="G4TX"),
+                ShaderParameter("mask_rgb_msk", "color", native_source="G4TX _msk (optional)"),
                 ShaderParameter("toon_ramp", "color", native_source="G4TX dp/ramp (optional, diagnostic until bound)"),
-                ShaderParameter("scene_gradient", "texture", native_source="DXBC in_texGrd texture2dms scene framebuffer", supported=False),
+                ShaderParameter("scene_gradient", "texture", native_source="DXBC in_texGrd texture2d scene-space framebuffer", supported=False),
                 ShaderParameter("scene_gradient_params", "vector", native_source="light_data.cfg.bin u_charaGrTParam", supported=False),
                 ShaderParameter("rim", "float", native_source="shader variant"),
                 ShaderParameter("specular", "float", native_source="shader variant"),
@@ -40,7 +45,7 @@ class CharacterShaderProfile:
             notes=(
                 "Preserve the existing apply_level5_toon_shader node graph.",
                 "ShaderToRGB requires EEVEE; other engines receive a marked fallback.",
-                "Character ambient, dual shadow colors, threshold and rim defaults follow the native light profiles; chr_toon's in_texGrd scene framebuffer remains runtime-only.",
+                "Character ambient, dual shadow colors, threshold and rim defaults follow the native light profiles; normal/_oc/_sp/_spm are the authoritative surface maps, while nml/_msk are optional variants and chr_toon's in_texGrd scene framebuffer remains runtime-only.",
             ),
         )
 

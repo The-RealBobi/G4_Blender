@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 7, 2),
+    "version": (1, 7, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -1678,6 +1678,15 @@ def apply_level5_toon_shader(
     shadow_primary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
     links.new(toon_factor, shadow_primary.inputs["Fac"])
 
+    shadow_primary_rate = nodes.new("ShaderNodeMixRGB")
+    shadow_primary_rate.name = "G4 Shadow Rate 0"
+    shadow_primary_rate.label = "G4 Shadow Rate 0"
+    shadow_primary_rate.blend_type = "MIX"
+    shadow_primary_rate.inputs[0].default_value = 0.50
+    shadow_primary_rate.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
+    shadow_primary_rate.location = (240, -180)
+    links.new(shadow_primary.outputs["Color"], shadow_primary_rate.inputs[2])
+
     secondary_factor = toon_factor
     if occlusion_channels is not None:
         inverse_light = nodes.new("ShaderNodeMath")
@@ -1703,11 +1712,20 @@ def apply_level5_toon_shader(
     shadow_secondary.location = (240, -80)
     shadow_secondary.color_ramp.interpolation = "CONSTANT"
     shadow_secondary.color_ramp.elements[0].color = (0.50, 0.45, 0.60, 1.0)
-    # The second native shadow band is offset by the blend region; this is the
-    # same normalized separation used by the event importer for threshold 1.5.
-    shadow_secondary.color_ramp.elements[1].position = 0.64
+    # Both native shadow colors share the character terminator.  Their fourth
+    # component is the strength (charaShadowRate1/2), not a second threshold.
+    shadow_secondary.color_ramp.elements[1].position = 0.50
     shadow_secondary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
     links.new(secondary_factor, shadow_secondary.inputs["Fac"])
+
+    shadow_secondary_rate = nodes.new("ShaderNodeMixRGB")
+    shadow_secondary_rate.name = "G4 Shadow Rate 1"
+    shadow_secondary_rate.label = "G4 Shadow Rate 1"
+    shadow_secondary_rate.blend_type = "MIX"
+    shadow_secondary_rate.inputs[0].default_value = 0.54
+    shadow_secondary_rate.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
+    shadow_secondary_rate.location = (430, -180)
+    links.new(shadow_secondary.outputs["Color"], shadow_secondary_rate.inputs[2])
 
     shadow_mix = nodes.new("ShaderNodeMixRGB")
     shadow_mix.name = "G4 Dual Toon Ramp"
@@ -1716,8 +1734,8 @@ def apply_level5_toon_shader(
     # is rate/(1+rate), hence 0.642857 rather than the previous weak 0.18 mix.
     shadow_mix.inputs[0].default_value = 0.642857
     shadow_mix.location = (450, -40)
-    links.new(shadow_primary.outputs["Color"], shadow_mix.inputs[1])
-    links.new(shadow_secondary.outputs["Color"], shadow_mix.inputs[2])
+    links.new(shadow_primary_rate.outputs["Color"], shadow_mix.inputs[1])
+    links.new(shadow_secondary_rate.outputs["Color"], shadow_mix.inputs[2])
 
     lit = nodes.new("ShaderNodeMixRGB")
     lit.name = "G4 Cel Diffuse"
@@ -2055,7 +2073,7 @@ def apply_level5_toon_shader(
     )
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
-    material["g4_toon_scene_gradient"] = "in_texGrd: texture2dms scene framebuffer; binding pending"
+    material["g4_toon_scene_gradient"] = "in_texGrd: texture2d scene-space input; binding pending"
     annotate_current_toon_material(material, variants)
     if debug is not None:
         debug.append(
@@ -2570,17 +2588,29 @@ def configure_character_color_management(debug: list[str] | None = None) -> None
 def mark_level5_internal_edges(obj) -> int:
     """Mark authored split seams without enabling Freestyle on every triangle."""
     mesh = obj.data
-    finger_group = re.compile(r"^[lr]_(?:thb|idx|mid|rng|pky)", re.IGNORECASE)
-    facial_detail_group = re.compile(
-        r"(?:head|hair|face|ear|neck|cheek|jaw|brow|nose|lip|mouth|eye)",
+    finger_group = re.compile(
+        r"(?:^|_)(?:[lr]_)?(?:thb|idx|mid|rng|pky|finger|fing|digit|nail)(?:_|$)",
         re.IGNORECASE,
     )
-    detail_name = re.compile(r"(?:head|hair|face|ear)", re.IGNORECASE)
+    facial_detail_group = re.compile(
+        r"(?:head|hair|face|ear|neck|cheek|jaw|brow|nose|lip|mouth|eye|teeth|tongue|nail|finger|digit)",
+        re.IGNORECASE,
+    )
+    detail_name = re.compile(
+        r"(?:head|hair|face|ear|neck|cheek|jaw|brow|nose|lip|mouth|eye|teeth|tongue|eyelash|nail|finger|digit)",
+        re.IGNORECASE,
+    )
+    open_detail_name = re.compile(
+        r"(?:^|_)(?:mouth|teeth|tongue|lip|eye|pupil|eyelash|brow|nail|finger|fing|digit)(?:_|$)",
+        re.IGNORECASE,
+    )
 
     material_names = " ".join(
         slot.material.name for slot in obj.material_slots if slot.material is not None
     )
-    detail_name_hint = bool(detail_name.search(f"{obj.name} {material_names}"))
+    object_material_name = f"{obj.name} {material_names}"
+    detail_name_hint = bool(detail_name.search(object_material_name))
+    open_detail_hint = bool(open_detail_name.search(object_material_name))
 
     def vertex_group_matches(vertex, pattern) -> bool:
         return any(
@@ -2661,12 +2691,13 @@ def mark_level5_internal_edges(obj) -> int:
             edge.use_freestyle_mark = True
             marked += 1
             continue
-        if len(polygons) == 1 and all(
-            belongs_to_finger(mesh.vertices[index]) for index in edge.vertices
+        if len(polygons) == 1 and (
+            all(belongs_to_finger(mesh.vertices[index]) for index in edge.vertices)
+            or open_detail_hint
         ):
-            # Fingernails are authored as open inset surfaces in several
-            # character bodies. Their perimeter is a source detail line, not
-            # a hull, so preserve it as an explicit non-destructive edge mark.
+            # Fingernails and facial inserts are authored as open surfaces in
+            # several character bodies. Their perimeter is a source detail
+            # line, not a hull, so preserve it as an explicit edge mark.
             edge.use_freestyle_mark = True
             marked += 1
             continue
@@ -2720,7 +2751,7 @@ def edge2_preview_material():
 def edge2_preview_node_group():
     material = edge2_preview_material()
     group = bpy.data.node_groups.get(EDGE2_PREVIEW_GROUP_NAME)
-    if group is not None and group.get("g4_edge2_preview_schema") == 4:
+    if group is not None and group.get("g4_edge2_preview_schema") == 5:
         return group
     if group is None:
         group = bpy.data.node_groups.new(EDGE2_PREVIEW_GROUP_NAME, "GeometryNodeTree")
@@ -2740,7 +2771,7 @@ def edge2_preview_node_group():
     input_node = nodes.new("NodeGroupInput")
     output_node = nodes.new("NodeGroupOutput")
     set_position = nodes.new("GeometryNodeSetPosition")
-    set_position.name = "G4 edge2 Camera Offset"
+    set_position.name = "G4 edge2 Model-Space Offset"
     camera_transform = nodes.new("GeometryNodeTransform")
     camera_transform.name = "G4 edge2 To Camera"
     restore_transform = nodes.new("GeometryNodeTransform")
@@ -2835,11 +2866,24 @@ def edge2_preview_node_group():
     links.new(camera_info.outputs["Transform"], invert_camera.inputs["Matrix"])
     links.new(invert_camera.outputs["Matrix"], camera_model_matrix.inputs[0])
     links.new(self_info.outputs["Transform"], camera_model_matrix.inputs[1])
-    links.new(camera_model_matrix.outputs["Matrix"], camera_transform.inputs["Transform"])
+    camera_transform_input = camera_transform.inputs.get("Transform")
+    if camera_transform_input is None:
+        # Blender 4.5 exposes this socket but its collection lookup by name
+        # returns None; in 5.x the named lookup works as expected.
+        camera_transform_input = camera_transform.inputs[-1]
+    restore_transform_input = restore_transform.inputs.get("Transform")
+    if restore_transform_input is None:
+        restore_transform_input = restore_transform.inputs[-1]
+    links.new(camera_model_matrix.outputs["Matrix"], camera_transform_input)
     links.new(camera_model_matrix.outputs["Matrix"], invert_camera_model.inputs["Matrix"])
-    links.new(invert_camera_model.outputs["Matrix"], restore_transform.inputs["Transform"])
-    links.new(geometry, camera_transform.inputs["Geometry"])
-    links.new(camera_transform.outputs["Geometry"], set_position.inputs["Geometry"])
+    links.new(invert_camera_model.outputs["Matrix"], restore_transform_input)
+    # The native edge2 vertex shader adds the model-space normal displacement
+    # before multiplying POSITION by the view/model matrix.  Applying this
+    # after camera_transform would leave the normal in object space while the
+    # geometry is already in camera space, which changes the outline whenever
+    # the character or camera rotates.
+    links.new(geometry, set_position.inputs["Geometry"])
+    links.new(set_position.outputs["Geometry"], camera_transform.inputs["Geometry"])
     links.new(position.outputs["Position"], view_position.inputs["Vector"])
     links.new(camera_model_matrix.outputs["Matrix"], view_position.inputs["Transform"])
     links.new(view_position.outputs["Vector"], depth_z.inputs["Vector"])
@@ -2876,12 +2920,12 @@ def edge2_preview_node_group():
     links.new(material_weighted.outputs[0], scale.inputs[0])
     links.new(scale.outputs[0], vector_scale.inputs[3])
     links.new(vector_scale.outputs["Vector"], set_position.inputs["Offset"])
-    links.new(set_position.outputs["Geometry"], set_material.inputs["Geometry"])
+    links.new(camera_transform.outputs["Geometry"], set_material.inputs["Geometry"])
     links.new(set_material.outputs["Geometry"], restore_transform.inputs["Geometry"])
     links.new(geometry, join.inputs["Geometry"])
     links.new(restore_transform.outputs["Geometry"], join.inputs["Geometry"])
     links.new(join.outputs["Geometry"], output_node.inputs[geometry_out.identifier])
-    group["g4_edge2_preview_schema"] = 4
+    group["g4_edge2_preview_schema"] = 5
     group["g4_edge2_scale_source"] = "edge2OutlineScale from native light profiles; default 2.5"
     group["g4_edge2_displacement_source"] = (
         "COLOR.b * cb4[29].w * depth_factor * 0.5 * u_edge2Scale * 0.01 * normal; "
@@ -2906,7 +2950,10 @@ def remove_edge2_preview(imported_names: set[str]) -> int:
 
 def configure_edge2_preview(imported_names: set[str], debug: list[str] | None = None) -> int:
     group = edge2_preview_node_group()
-    excluded = re.compile(r"(?:^|_)(?:eye|mouth|teeth|tongue|pupil|eyelash)(?:_|$)", re.IGNORECASE)
+    excluded = re.compile(
+        r"(?:^|_)(?:eye|mouth|teeth|tongue|pupil|eyelash|nail|finger|digit)(?:_|$)",
+        re.IGNORECASE,
+    )
     configured = 0
     removed = 0
     for name in imported_names:
@@ -2972,19 +3019,26 @@ def configure_level5_outlines(
         if detail_collection is None:
             detail_collection = bpy.data.collections.new("Level-5 G4 Internal Detail Sources")
             scene.collection.children.link(detail_collection)
-        excluded = re.compile(r"(?:^|_)(?:eye|mouth|teeth|tongue|pupil|eyelash)(?:_|$)", re.IGNORECASE)
+        # These meshes must not receive the expanded edge2 shell: doing so
+        # outlines the complete eye/mouth insert and produces a second halo.
+        # They are still valid Freestyle detail sources below.
+        shell_excluded = re.compile(
+            r"(?:^|_)(?:eye|mouth|teeth|tongue|pupil|eyelash|nail|finger|digit)(?:_|$)",
+            re.IGNORECASE,
+        )
         marked_edges = 0
         for name in imported_names:
             obj = bpy.data.objects.get(name)
-            if obj is None or obj.type != "MESH" or excluded.search(obj.name):
+            if obj is None or obj.type != "MESH":
                 continue
+            is_detail_only = bool(shell_excluded.search(obj.name))
             attribute = obj.data.color_attributes.get("G4 Outline Parameters")
             blue_values = [value.color[2] for value in attribute.data] if attribute is not None else []
             # The exporter clears COLOR.b for a record whose native edge2
             # displacement is disabled.  Freestyle cannot express a
             # per-corner mask, but it can at least avoid creating a silhouette
             # for a record that is entirely opted out.
-            if blue_values and max(blue_values) <= (1.0 / 255.0):
+            if blue_values and max(blue_values) <= (1.0 / 255.0) and not is_detail_only:
                 for collection in (source_collection, thin_collection, detail_collection):
                     if collection.objects.get(obj.name) is not None:
                         collection.objects.unlink(obj)
@@ -2995,9 +3049,11 @@ def configure_level5_outlines(
                 for slot in obj.material_slots
             )
             collection = thin_collection if blue < 0.35 or has_line_map else source_collection
-            other_collection = source_collection if collection == thin_collection else thin_collection
-            if other_collection.objects.get(obj.name) is not None:
-                other_collection.objects.unlink(obj)
+            if is_detail_only:
+                collection = detail_collection
+            for other_collection in (source_collection, thin_collection):
+                if other_collection.objects.get(obj.name) is not None:
+                    other_collection.objects.unlink(obj)
             if collection.objects.get(obj.name) is None:
                 collection.objects.link(obj)
             if detail_collection.objects.get(obj.name) is None:

@@ -2541,6 +2541,8 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         ambient_node = material.node_tree.nodes.get("G4 Character Ambient")
         primary_shadow = material.node_tree.nodes.get("G4 Shadow Color 0")
         secondary_shadow = material.node_tree.nodes.get("G4 Shadow Color 1")
+        primary_shadow_rate = material.node_tree.nodes.get("G4 Shadow Rate 0")
+        secondary_shadow_rate = material.node_tree.nodes.get("G4 Shadow Rate 1")
         shadow_blend = material.node_tree.nodes.get("G4 Dual Toon Ramp")
         under_rim_width = material.node_tree.nodes.get("G4 Under Rim Width")
         under_rim_strength = material.node_tree.nodes.get("G4 Under Rim Strength")
@@ -2570,23 +2572,27 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
             high_threshold = parameters.get("charaHighThreshold")
             if high_threshold and primary_shadow is not None and secondary_shadow is not None:
                 # The game expresses this threshold around 1.0; Blender's ramps
-                # operate in 0..1, so mirror it around 2.0.
+                # operate in 0..1, so mirror it around 2.0. Both native shadow
+                # colors use this same terminator; their fourth component is
+                # the per-band strength and is handled below.
                 position = max(0.02, min(0.98, 2.0 - high_threshold[0]))
                 primary_shadow.color_ramp.elements[-1].position = position
-                secondary_shadow.color_ramp.elements[-1].position = min(0.98, position + 0.14)
+                secondary_shadow.color_ramp.elements[-1].position = position
                 primary_shadow.color_ramp.elements[-1].keyframe_insert("position", frame=frame)
                 secondary_shadow.color_ramp.elements[-1].keyframe_insert("position", frame=frame)
                 keyed_material = True
-            for node, color_names, rate_name in (
+            for node, color_names, rate_name, node_rate in (
                 (
                     primary_shadow,
                     ("charaShadowColor1", "charaShadow1"),
                     "charaShadowRate1",
+                    primary_shadow_rate,
                 ),
                 (
                     secondary_shadow,
                     ("charaShadowColor2", "charaShadow2"),
                     "charaShadowRate2",
+                    secondary_shadow_rate,
                 ),
             ):
                 values = next(
@@ -2603,14 +2609,24 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
                     ) + (1.0,)
                     node.color_ramp.elements[0].keyframe_insert("color", frame=frame)
                     keyed_material = True
+                    if len(values) >= 4:
+                        rate = values[3]
+                    else:
+                        rate_values = parameters.get(rate_name)
+                        rate = rate_values[0] if rate_values else None
+                    if rate is not None and node_rate is not None:
+                        node_rate.inputs[0].default_value = max(0.0, min(1.0, rate))
+                        node_rate.inputs[0].keyframe_insert("default_value", frame=frame)
+                        keyed_material = True
                     continue
                 values = parameters.get(rate_name)
                 if node is None or not values:
                     continue
-                shade = max(0.0, min(1.0, values[0]))
-                node.color_ramp.elements[0].color = (shade, shade, shade, 1.0)
-                node.color_ramp.elements[0].keyframe_insert("color", frame=frame)
-                keyed_material = True
+                rate = max(0.0, min(1.0, values[0]))
+                if node_rate is not None:
+                    node_rate.inputs[0].default_value = rate
+                    node_rate.inputs[0].keyframe_insert("default_value", frame=frame)
+                    keyed_material = True
             shadow_blend_rate = parameters.get("charaShadowBlendRate")
             if shadow_blend is not None and shadow_blend_rate:
                 rate = max(0.0, shadow_blend_rate[0])
