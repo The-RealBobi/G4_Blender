@@ -258,3 +258,19 @@ model importer module in every event batch path. This fixes events such as
 selection because the deferred dialog callback referenced an unavailable
 function. Generic actor variants now open the assignment dialog and continue
 through the same data-root and character-part resolution used by named actors.
+
+### Character rendering (v1.8.0)
+
+Game is the default outline mode; Simple and Off remain available. Game uses
+screen-space vertex parameters, normals and depth to darken the character's
+own colors. Render outlines require EEVEE and the compositor. The viewport
+uses Blender's object silhouette preview. Detailed has been retired.
+
+The character shader uses capture-derived shadow coverage and UNORM color
+processing with neutral saturation and brightness. This is a Blender preview
+approximation of the captured shader variant, not a complete reproduction of
+the game's lighting, post-processing or every gradient-table variant.
+
+Existing Game compositor groups update on load. Facial mask gradients no
+longer become triangular dark patches. Block animation imports validate model
+paths separately from skin color.

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 7, 3),
+    "version": (1, 8, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -131,6 +131,8 @@ if __package__:
     )
     from .shading.map_surfaces import classify_map_surface
     from .shading.map_nodes import apply_map_surface_nodes
+    from .shading.character_lighting import build_character_lighting, color_transfer
+    from .shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 else:
     import g4_port_addon
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
@@ -142,6 +144,8 @@ else:
     )
     from shading.map_surfaces import classify_map_surface
     from shading.map_nodes import apply_map_surface_nodes
+    from shading.character_lighting import build_character_lighting, color_transfer
+    from shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 
 if __package__:
     from . import g4_animation_addon
@@ -261,7 +265,7 @@ def addon_preferences() -> "G4ImporterPreferences":
         pack_imported_textures = True
         cleanup_import_cache = True
         apply_bone_orientation = True
-        outline_mode = "OFF"
+        outline_mode = "SCREEN"
 
     return Defaults()
 
@@ -391,19 +395,16 @@ class G4ImporterPreferences(AddonPreferences):
     outline_mode: EnumProperty(
         name="Character Outline",
         items=(
+            ("SCREEN", "Game", "Color-aware character lines from screen-space surface data in renders", 0),
             (
                 "SIMPLE",
                 "Simple",
                 "Non-destructive object silhouette in the viewport and render",
+                1,
             ),
-            (
-                "HULL",
-                "Detailed",
-                "Use source-weighted silhouettes and add depth/normal cavity detail in the viewport",
-            ),
-            ("OFF", "Off", "Do not add render or viewport outlines"),
+            ("OFF", "Off", "Do not add render or viewport outlines", 3),
         ),
-        default="HULL",
+        default="SCREEN",
         update=outline_mode_changed,
     )
     outline_thickness: FloatProperty(
@@ -1445,39 +1446,12 @@ def apply_level5_toon_shader(
     saturation = nodes.new("ShaderNodeHueSaturation")
     saturation.name = "G4 Saturation"
     saturation.location = (-760, 280)
-    # Standard display transform preserves the authored palette; this small
-    # correction matches the in-game red-hair reference without clipping it.
-    saturation.inputs["Saturation"].default_value = 1.10
-    saturation.inputs["Value"].default_value = 1.04
-    links.new(base.outputs["Color"], saturation.inputs["Color"])
-
-    # Cool authored regions (uniforms, ribbons and cyan accents) need a
-    # channel-aware correction: a global exposure that fixes skin and hair
-    # otherwise washes their red channel towards grey.
-    palette_channels = nodes.new("ShaderNodeSeparateColor")
-    palette_channels.name = "G4 Palette Channels"
-    palette_channels.location = (-760, 500)
-    cool_delta = nodes.new("ShaderNodeMath")
-    cool_delta.name = "G4 Cool Color Delta"
-    cool_delta.operation = "SUBTRACT"
-    cool_delta.location = (-570, 500)
-    cool_mask = nodes.new("ShaderNodeMath")
-    cool_mask.name = "G4 Cool Palette Mask"
-    cool_mask.operation = "GREATER_THAN"
-    cool_mask.inputs[1].default_value = 0.08
-    cool_mask.location = (-380, 500)
-    cool_correction = nodes.new("ShaderNodeMixRGB")
-    cool_correction.name = "G4 Cool Palette Correction"
-    cool_correction.blend_type = "MULTIPLY"
-    cool_correction.inputs[2].default_value = (0.60, 0.90, 0.94, 1.0)
-    cool_correction.location = (-170, 360)
-    links.new(base.outputs["Color"], palette_channels.inputs["Color"])
-    links.new(palette_channels.outputs["Blue"], cool_delta.inputs[0])
-    links.new(palette_channels.outputs["Red"], cool_delta.inputs[1])
-    links.new(cool_delta.outputs[0], cool_mask.inputs[0])
-    links.new(cool_mask.outputs[0], cool_correction.inputs[0])
-    links.new(saturation.outputs["Color"], cool_correction.inputs[1])
-    base_color = cool_correction.outputs["Color"]
+    # Captured base textures are UNORM, not SRGB. Work in that RGB domain,
+    # then convert the completed color back to Blender's linear emission.
+    saturation.inputs["Saturation"].default_value = 1.0
+    saturation.inputs["Value"].default_value = 1.0
+    links.new(color_transfer(nodes, links, base.outputs["Color"], encode=True), saturation.inputs["Color"])
+    base_color = saturation.outputs["Color"]
 
     surface_normal = None
     normal_path = first_variant_path(variants, "normal")
@@ -1599,220 +1573,9 @@ def apply_level5_toon_shader(
             occlusion_channels.location = (-760, 760)
             links.new(occlusion.outputs["Color"], occlusion_channels.inputs["Color"])
 
-    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
-    diffuse.location = (-720, -100)
-    diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-    diffuse.inputs["Roughness"].default_value = 0.0
-    if surface_normal is not None:
-        links.new(surface_normal, diffuse.inputs["Normal"])
-    diffuse_rgb = nodes.new("ShaderNodeShaderToRGB")
-    diffuse_rgb.location = (-520, -100)
-    diffuse_bw = nodes.new("ShaderNodeRGBToBW")
-    diffuse_bw.location = (-340, -100)
-    light_floor = nodes.new("ShaderNodeMath")
-    light_floor.name = "G4 Toon Ambient"
-    light_floor.operation = "MULTIPLY_ADD"
-    # The native profiles place the character terminator around
-    # charaHighThreshold=1.5 (0.5 in the normalized ramp).  The old 0.88/0.12
-    # remap kept almost every surface in the lit band and made the material
-    # look like an unshaded albedo in a neutral scene.
-    light_floor.inputs[1].default_value = 0.78
-    light_floor.inputs[2].default_value = 0.08
-    light_floor.use_clamp = True
-    light_floor.location = (-160, -100)
-    links.new(diffuse.outputs["BSDF"], diffuse_rgb.inputs["Shader"])
-    links.new(diffuse_rgb.outputs["Color"], diffuse_bw.inputs["Color"])
-    links.new(diffuse_bw.outputs["Val"], light_floor.inputs[0])
-
-    safe_brightness = nodes.new("ShaderNodeMath")
-    safe_brightness.operation = "MAXIMUM"
-    safe_brightness.inputs[1].default_value = 0.001
-    safe_brightness.location = (-330, -250)
-    light_chroma = nodes.new("ShaderNodeVectorMath")
-    light_chroma.operation = "DIVIDE"
-    light_chroma.location = (-140, -250)
-    light_chroma_limit = nodes.new("ShaderNodeVectorMath")
-    light_chroma_limit.operation = "MINIMUM"
-    light_chroma_limit.inputs[1].default_value = (1.5, 1.5, 1.5)
-    light_chroma_limit.location = (40, -250)
-    light_tint = nodes.new("ShaderNodeMixRGB")
-    light_tint.name = "G4 Point Light Color"
-    # Scene-light chroma can turn the underside of animated clothing brown
-    # when a normal swings through a grazing angle. Keep the imported shader
-    # neutral unless a material explicitly needs a coloured light treatment.
-    light_tint.inputs[0].default_value = 0.0
-    light_tint.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
-    light_tint.location = (220, -250)
-    links.new(diffuse_bw.outputs["Val"], safe_brightness.inputs[0])
-    links.new(diffuse_rgb.outputs["Color"], light_chroma.inputs[0])
-    links.new(safe_brightness.outputs[0], light_chroma.inputs[1])
-    links.new(light_chroma.outputs["Vector"], light_chroma_limit.inputs[0])
-    links.new(light_chroma_limit.outputs["Vector"], light_tint.inputs[2])
-
-    toon_factor = light_floor.outputs[0]
-    if occlusion_channels is not None:
-        occlusion_offset = nodes.new("ShaderNodeMath")
-        occlusion_offset.operation = "MULTIPLY_ADD"
-        occlusion_offset.inputs[1].default_value = 0.18
-        occlusion_offset.inputs[2].default_value = -0.18
-        occlusion_offset.location = (-520, 680)
-        occlusion_add = nodes.new("ShaderNodeMath")
-        occlusion_add.name = "G4 Occlusion Threshold"
-        occlusion_add.operation = "ADD"
-        occlusion_add.use_clamp = True
-        occlusion_add.location = (-320, 680)
-        links.new(occlusion_channels.outputs["Red"], occlusion_offset.inputs[0])
-        links.new(toon_factor, occlusion_add.inputs[0])
-        links.new(occlusion_offset.outputs[0], occlusion_add.inputs[1])
-        toon_factor = occlusion_add.outputs[0]
-
-    shadow_primary = nodes.new("ShaderNodeValToRGB")
-    shadow_primary.name = "G4 Shadow Color 0"
-    shadow_primary.location = (20, -80)
-    shadow_primary.color_ramp.interpolation = "CONSTANT"
-    # These defaults are the neutral/cool range used by the native character
-    # profiles (charaShadow1 ~= .60/.55/.70, high threshold ~= 1.5).  Event
-    # animation can replace both the low color and the high edge.
-    shadow_primary.color_ramp.elements[0].color = (0.60, 0.55, 0.70, 1.0)
-    shadow_primary.color_ramp.elements[1].position = 0.50
-    shadow_primary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
-    links.new(toon_factor, shadow_primary.inputs["Fac"])
-
-    shadow_primary_rate = nodes.new("ShaderNodeMixRGB")
-    shadow_primary_rate.name = "G4 Shadow Rate 0"
-    shadow_primary_rate.label = "G4 Shadow Rate 0"
-    shadow_primary_rate.blend_type = "MIX"
-    shadow_primary_rate.inputs[0].default_value = 0.50
-    shadow_primary_rate.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
-    shadow_primary_rate.location = (240, -180)
-    links.new(shadow_primary.outputs["Color"], shadow_primary_rate.inputs[2])
-
-    secondary_factor = toon_factor
-    if occlusion_channels is not None:
-        inverse_light = nodes.new("ShaderNodeMath")
-        inverse_light.operation = "SUBTRACT"
-        inverse_light.inputs[0].default_value = 1.0
-        inverse_light.location = (-300, 580)
-        secondary_offset = nodes.new("ShaderNodeMath")
-        secondary_offset.operation = "MULTIPLY"
-        secondary_offset.location = (-120, 580)
-        secondary_add = nodes.new("ShaderNodeMath")
-        secondary_add.operation = "ADD"
-        secondary_add.use_clamp = True
-        secondary_add.location = (60, 580)
-        links.new(toon_factor, inverse_light.inputs[1])
-        links.new(inverse_light.outputs[0], secondary_offset.inputs[0])
-        links.new(occlusion_channels.outputs["Green"], secondary_offset.inputs[1])
-        links.new(toon_factor, secondary_add.inputs[0])
-        links.new(secondary_offset.outputs[0], secondary_add.inputs[1])
-        secondary_factor = secondary_add.outputs[0]
-
-    shadow_secondary = nodes.new("ShaderNodeValToRGB")
-    shadow_secondary.name = "G4 Shadow Color 1"
-    shadow_secondary.location = (240, -80)
-    shadow_secondary.color_ramp.interpolation = "CONSTANT"
-    shadow_secondary.color_ramp.elements[0].color = (0.50, 0.45, 0.60, 1.0)
-    # Both native shadow colors share the character terminator.  Their fourth
-    # component is the strength (charaShadowRate1/2), not a second threshold.
-    shadow_secondary.color_ramp.elements[1].position = 0.50
-    shadow_secondary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
-    links.new(secondary_factor, shadow_secondary.inputs["Fac"])
-
-    shadow_secondary_rate = nodes.new("ShaderNodeMixRGB")
-    shadow_secondary_rate.name = "G4 Shadow Rate 1"
-    shadow_secondary_rate.label = "G4 Shadow Rate 1"
-    shadow_secondary_rate.blend_type = "MIX"
-    shadow_secondary_rate.inputs[0].default_value = 0.54
-    shadow_secondary_rate.inputs[1].default_value = (1.0, 1.0, 1.0, 1.0)
-    shadow_secondary_rate.location = (430, -180)
-    links.new(shadow_secondary.outputs["Color"], shadow_secondary_rate.inputs[2])
-
-    shadow_mix = nodes.new("ShaderNodeMixRGB")
-    shadow_mix.name = "G4 Dual Toon Ramp"
-    shadow_mix.blend_type = "MIX"
-    # charaShadowBlendRate=1.8 is the common profile value.  Native blending
-    # is rate/(1+rate), hence 0.642857 rather than the previous weak 0.18 mix.
-    shadow_mix.inputs[0].default_value = 0.642857
-    shadow_mix.location = (450, -40)
-    links.new(shadow_primary_rate.outputs["Color"], shadow_mix.inputs[1])
-    links.new(shadow_secondary_rate.outputs["Color"], shadow_mix.inputs[2])
-
-    lit = nodes.new("ShaderNodeMixRGB")
-    lit.name = "G4 Cel Diffuse"
-    lit.blend_type = "MULTIPLY"
-    lit.inputs[0].default_value = 1.0
-    lit.location = (60, 250)
-    links.new(base_color, lit.inputs[1])
-    links.new(shadow_mix.outputs["Color"], lit.inputs[2])
-    color_output = lit.outputs["Color"]
-
-    if occlusion_channels is not None:
-        base_luminance = nodes.new("ShaderNodeRGBToBW")
-        base_luminance.location = (40, 700)
-        luminance_scale = nodes.new("ShaderNodeMath")
-        luminance_scale.operation = "MULTIPLY"
-        luminance_scale.inputs[1].default_value = 0.2
-        luminance_scale.location = (220, 700)
-        recovery = nodes.new("ShaderNodeMath")
-        recovery.name = "G4 Albedo Recovery"
-        recovery.operation = "ADD"
-        recovery.use_clamp = True
-        recovery.location = (400, 700)
-        recovery_mix = nodes.new("ShaderNodeMixRGB")
-        recovery_mix.name = "G4 Occlusion Composite"
-        recovery_mix.location = (590, 500)
-        links.new(base_color, base_luminance.inputs["Color"])
-        links.new(base_luminance.outputs["Val"], luminance_scale.inputs[0])
-        links.new(luminance_scale.outputs[0], recovery.inputs[0])
-        links.new(occlusion_channels.outputs["Blue"], recovery.inputs[1])
-        links.new(recovery.outputs[0], recovery_mix.inputs[0])
-        links.new(color_output, recovery_mix.inputs[1])
-        links.new(base_color, recovery_mix.inputs[2])
-        color_output = recovery_mix.outputs["Color"]
-
-        painted_occlusion = nodes.new("ShaderNodeValToRGB")
-        painted_occlusion.name = "G4 Painted Occlusion"
-        painted_occlusion.color_ramp.interpolation = "EASE"
-        painted_occlusion.color_ramp.elements[0].position = 0.0
-        painted_occlusion.color_ramp.elements[0].color = (0.48, 0.48, 0.48, 1.0)
-        middle = painted_occlusion.color_ramp.elements.new(0.4)
-        # 0.4 is the authored neutral plateau used across character hair and
-        # clothing, not a 37% cavity shadow. Preserve it while keeping true
-        # zero-valued creases visibly occluded.
-        middle.color = (0.90, 0.90, 0.90, 1.0)
-        painted_occlusion.color_ramp.elements[-1].position = 0.62
-        painted_occlusion.color_ramp.elements[-1].color = (1.0, 1.0, 1.0, 1.0)
-        painted_occlusion.location = (570, 680)
-        occlusion_multiply = nodes.new("ShaderNodeMixRGB")
-        occlusion_multiply.name = "G4 Painted Occlusion Composite"
-        occlusion_multiply.blend_type = "MULTIPLY"
-        occlusion_multiply.inputs[0].default_value = 1.0
-        occlusion_multiply.location = (760, 520)
-        links.new(occlusion_channels.outputs["Red"], painted_occlusion.inputs["Fac"])
-        links.new(color_output, occlusion_multiply.inputs[1])
-        links.new(painted_occlusion.outputs["Color"], occlusion_multiply.inputs[2])
-        color_output = occlusion_multiply.outputs["Color"]
-
-    colored_light = nodes.new("ShaderNodeMixRGB")
-    colored_light.name = "G4 Colored Light Composite"
-    colored_light.blend_type = "MULTIPLY"
-    colored_light.inputs[0].default_value = 1.0
-    colored_light.location = (760, 440)
-    links.new(color_output, colored_light.inputs[1])
-    links.new(light_tint.outputs["Color"], colored_light.inputs[2])
-    color_output = colored_light.outputs["Color"]
-
-    ambient_tint = nodes.new("ShaderNodeMixRGB")
-    ambient_tint.name = "G4 Character Ambient"
-    ambient_tint.label = "G4 Character Ambient"
-    ambient_tint.blend_type = "MULTIPLY"
-    # Keep neutral scenes unchanged while allowing charaAmbient from event
-    # profiles to provide the blue/magenta/warm response seen in the game.
-    ambient_tint.inputs[0].default_value = 0.24
-    ambient_tint.inputs[2].default_value = (1.0, 1.0, 1.0, 1.0)
-    ambient_tint.location = (940, 440)
-    links.new(color_output, ambient_tint.inputs[1])
-    color_output = ambient_tint.outputs["Color"]
+    color_output, toon_factor, shadow_mix, native_highlight, native_underlight = build_character_lighting(
+        nodes, links, base_color, occlusion_channels, surface_normal
+    )
 
     line_path = first_variant_path(variants, "line")
     line_informative = False
@@ -1946,26 +1709,6 @@ def apply_level5_toon_shader(
             links.new(spec_multiply.outputs["Color"], spec_add.inputs[2])
             color_output = spec_add.outputs["Color"]
 
-    layer_weight = nodes.new("ShaderNodeLayerWeight")
-    layer_weight.name = "G4 View Facing"
-    layer_weight.location = (260, -430)
-    grazing = nodes.new("ShaderNodeMath")
-    grazing.name = "G4 Grazing Angle"
-    grazing.operation = "SUBTRACT"
-    grazing.inputs[0].default_value = 1.0
-    grazing.location = (440, -430)
-    inverse_toon = nodes.new("ShaderNodeMath")
-    inverse_toon.operation = "SUBTRACT"
-    inverse_toon.inputs[0].default_value = 1.0
-    inverse_toon.location = (440, -520)
-    highlight_factor = nodes.new("ShaderNodeMath")
-    highlight_factor.name = "G4 Highlight Factor"
-    highlight_factor.operation = "MULTIPLY"
-    highlight_factor.location = (620, -390)
-    underlight_factor = nodes.new("ShaderNodeMath")
-    underlight_factor.name = "G4 Underlight Factor"
-    underlight_factor.operation = "MULTIPLY"
-    underlight_factor.location = (620, -500)
     highlight_add = nodes.new("ShaderNodeMixRGB")
     highlight_add.name = "G4 Highlight"
     highlight_add.blend_type = "ADD"
@@ -1979,17 +1722,11 @@ def apply_level5_toon_shader(
     # Common profiles use charaUnderRimColor=(.02,.075,.10) with rate 1.45.
     # Keep the default restrained because the factor already contains both
     # grazing angle and the unlit-side mask.
-    underlight_add.inputs[2].default_value = (0.03, 0.11, 0.145, 1.0)
+    underlight_add.inputs[2].default_value = (0.02, 0.075, 0.10, 1.0)
     underlight_add.location = (980, 250)
-    links.new(layer_weight.outputs["Facing"], grazing.inputs[1])
-    links.new(toon_factor, inverse_toon.inputs[1])
-    links.new(grazing.outputs[0], highlight_factor.inputs[0])
-    links.new(toon_factor, highlight_factor.inputs[1])
-    links.new(grazing.outputs[0], underlight_factor.inputs[0])
-    links.new(inverse_toon.outputs[0], underlight_factor.inputs[1])
-    links.new(highlight_factor.outputs[0], highlight_add.inputs[0])
+    links.new(native_highlight, highlight_add.inputs[0])
     links.new(color_output, highlight_add.inputs[1])
-    links.new(underlight_factor.outputs[0], underlight_add.inputs[0])
+    links.new(native_underlight, underlight_add.inputs[0])
     links.new(highlight_add.outputs["Color"], underlight_add.inputs[1])
     color_output = underlight_add.outputs["Color"]
 
@@ -2036,7 +1773,8 @@ def apply_level5_toon_shader(
     emission = nodes.new("ShaderNodeEmission")
     emission.location = (820, 180)
     emission.inputs["Strength"].default_value = 1.0
-    links.new(color_output, emission.inputs["Color"])
+    links.new(color_transfer(nodes, links, color_output, encode=False), emission.inputs["Color"])
+    add_outline_outputs(nodes, links)
     alpha_output = base.outputs.get("Alpha")
     alpha_path = first_variant_path(variants, "alpha_red")
     if alpha_path is not None:
@@ -2073,7 +1811,7 @@ def apply_level5_toon_shader(
     )
     material["g4_line_texture"] = str(line_path) if line_path is not None else ""
     material["g4_line_informative"] = line_informative
-    material["g4_toon_scene_gradient"] = "in_texGrd: texture2d scene-space input; binding pending"
+    material["g4_toon_scene_gradient"] = "in_texGrd: chrGrd_01 UNORM alpha rows 254/250; capture 16"
     annotate_current_toon_material(material, variants)
     if debug is not None:
         debug.append(
@@ -2296,10 +2034,10 @@ def apply_auxiliary_textures_to_imported_materials(
 
 
 CHARACTER_PARAMETER_SOCKETS = (
-    ("Saturation", "g4_saturation", 1.10, 0.0, 2.0),
-    ("Brightness", "g4_brightness", 1.04, 0.0, 2.0),
-    ("Light Floor", "g4_light_floor", 0.88, 0.0, 1.0),
-    ("Shadow Floor", "g4_shadow_floor", 0.12, 0.0, 1.0),
+    ("Saturation", "g4_saturation", 1.0, 0.0, 2.0),
+    ("Brightness", "g4_brightness", 1.0, 0.0, 2.0),
+    ("Light Floor", "g4_light_floor", 0.5, 0.0, 1.0),
+    ("Shadow Floor", "g4_shadow_floor", 0.5, 0.0, 1.0),
     ("Normal Strength", "g4_normal_strength", 1.0, 0.0, 2.0),
     ("Specular Strength", "g4_specular_strength", 0.22, 0.0, 2.0),
     ("Wetness", "g4_wetness", 0.0, 0.0, 1.0),
@@ -2625,6 +2363,22 @@ def mark_level5_internal_edges(obj) -> int:
     def belongs_to_facial_detail(vertex) -> bool:
         return vertex_group_matches(vertex, facial_detail_group)
 
+    freestyle_attribute = None
+    if hasattr(mesh, "attributes"):
+        freestyle_attribute = mesh.attributes.get("freestyle_edge")
+        if freestyle_attribute is None:
+            freestyle_attribute = mesh.attributes.new(
+                "freestyle_edge", type="BOOLEAN", domain="EDGE"
+            )
+
+    def set_freestyle_mark(edge, value: bool) -> None:
+        if freestyle_attribute is not None:
+            freestyle_attribute.data[edge.index].value = value
+            return
+        # Blender 4.5 and older expose the tag directly on MeshEdge. Blender
+        # 5.0 moved it to the generic boolean attribute above.
+        edge.use_freestyle_mark = value
+
     bounds = [obj.matrix_world @ vertex.co for vertex in mesh.vertices]
     if bounds:
         min_bound = Vector((min(co.x for co in bounds), min(co.y for co in bounds), min(co.z for co in bounds)))
@@ -2685,10 +2439,10 @@ def mark_level5_internal_edges(obj) -> int:
 
     marked = 0
     for edge in mesh.edges:
-        edge.use_freestyle_mark = False
+        set_freestyle_mark(edge, False)
         polygons = polygons_by_edge.get(tuple(sorted(edge.key)), ())
         if edge.index in authored_duplicate_edges:
-            edge.use_freestyle_mark = True
+            set_freestyle_mark(edge, True)
             marked += 1
             continue
         if len(polygons) == 1 and (
@@ -2698,7 +2452,7 @@ def mark_level5_internal_edges(obj) -> int:
             # Fingernails and facial inserts are authored as open surfaces in
             # several character bodies. Their perimeter is a source detail
             # line, not a hull, so preserve it as an explicit edge mark.
-            edge.use_freestyle_mark = True
+            set_freestyle_mark(edge, True)
             marked += 1
             continue
     return marked
@@ -3137,11 +2891,34 @@ def configure_level5_outlines(
     return True
 
 
+def configure_game_outlines(imported_names, debug=None):
+    scene = bpy.context.scene
+    remove_edge2_preview(imported_names)
+    settings = getattr(bpy.context.view_layer, "freestyle_settings", None)
+    if settings is not None:
+        for line_set in tuple(settings.linesets):
+            if line_set.name in {"Level-5 G4 Outline", "Level-5 G4 Thin Outline", "Level-5 G4 Internal Detail"}:
+                settings.linesets.remove(line_set)
+        if not settings.linesets:
+            scene.render.use_freestyle = False
+    width = float(getattr(addon_preferences(), "outline_thickness", 1.65)) / 1.65
+    configured = configure_screen_outline(scene, bpy.context.view_layer, width)
+    configure_viewport_outlines(imported_names, False, debug)
+    if debug is not None:
+        debug.append(f"[outline] screen-space character render={configured}; viewport uses object silhouette")
+    return configured
+
+
 def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
     view_layer = bpy.context.view_layer
     scene = bpy.context.scene
     if view_layer is None or scene is None:
         return False
+    if mode is None:
+        mode = getattr(addon_preferences(), "outline_mode", "SCREEN")
+    if mode in {"SCREEN", "HULL"}:
+        return configure_game_outlines({obj.name for obj in scene.objects if obj.type == "MESH"})
+    remove_screen_outline(scene)
     settings = getattr(view_layer, "freestyle_settings", None)
     if settings is None:
         return False
@@ -3150,8 +2927,6 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
         "Level-5 G4 Thin Outline",
         "Level-5 G4 Internal Detail",
     }
-    if mode is None:
-        mode = getattr(addon_preferences(), "outline_mode", "HULL")
     has_level5_lines = any(line_set.name in managed for line_set in settings.linesets)
     if not has_level5_lines:
         if mode == "OFF":
@@ -3167,11 +2942,8 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
         }
         if not names:
             return False
-        configured = configure_level5_outlines(names, detailed=mode == "HULL")
-        if mode == "HULL":
-            configure_edge2_preview(names)
-        else:
-            remove_edge2_preview(names)
+        configured = configure_level5_outlines(names, detailed=False)
+        remove_edge2_preview(names)
         return configured
     if mode == "OFF":
         for line_set in tuple(settings.linesets):
@@ -3197,11 +2969,8 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
             names.update(obj.name for obj in collection.objects if obj.type == "MESH")
     if not names:
         return False
-    configured = configure_level5_outlines(names, detailed=mode == "HULL")
-    if mode == "HULL":
-        configure_edge2_preview(names)
-    else:
-        remove_edge2_preview(names)
+    configured = configure_level5_outlines(names, detailed=False)
+    remove_edge2_preview(names)
     return configured
 
 
@@ -3363,7 +3132,7 @@ def import_g4_model(
     compact_skeleton_summary(summary)
     collapse_duplicate_materials(imported_names)
     apply_material_texture_variants(summary, debug, imported_names)
-    outline_mode = getattr(prefs, "outline_mode", "HULL") if apply_styling else "OFF"
+    outline_mode = getattr(prefs, "outline_mode", "SCREEN") if apply_styling else "OFF"
     apply_auxiliary_textures_to_imported_materials(
         imported_names,
         summary,
@@ -3375,15 +3144,18 @@ def import_g4_model(
         debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
     if apply_styling:
         configure_character_color_management(debug)
-        if outline_mode != "OFF":
-            configure_level5_outlines(imported_names, outline_mode == "HULL", debug)
-            configure_viewport_outlines(imported_names, outline_mode == "HULL", debug)
-            if outline_mode == "HULL":
-                configure_edge2_preview(imported_names, debug)
-        else:
+        if outline_mode == "SCREEN":
+            configure_game_outlines(imported_names, debug)
+        elif outline_mode != "OFF":
+            remove_screen_outline(bpy.context.scene)
+            configure_level5_outlines(imported_names, False, debug)
+            configure_viewport_outlines(imported_names, False, debug)
             remove_edge2_preview(imported_names)
-        if outline_mode == "HULL":
-            debug.append("[outline] detailed render and viewport cavity edges enabled")
+        else:
+            remove_screen_outline(bpy.context.scene)
+            remove_edge2_preview(imported_names)
+        if outline_mode == "SCREEN":
+            debug.append("[outline] character screen-space composition enabled")
         elif outline_mode == "SIMPLE":
             debug.append("[outline] simple viewport silhouette; geometry left unchanged")
         else:
@@ -5207,14 +4979,22 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
             box.prop(ambient.inputs[1], "default_value", text="Light Floor")
             box.prop(ambient.inputs[2], "default_value", text="Shadow Floor")
         dual_toon = nodes.get("G4 Dual Toon Ramp")
-        if dual_toon is not None:
+        if dual_toon is not None and not dual_toon.inputs[0].is_linked:
             box.prop(dual_toon.inputs[0], "default_value", text="Secondary Shadow")
         shadow_primary = nodes.get("G4 Shadow Color 0")
         if shadow_primary is not None:
-            box.prop(shadow_primary.color_ramp.elements[1], "position", text="Shadow Band 0")
+            if shadow_primary.type == "RGB":
+                box.prop(shadow_primary.outputs[0], "default_value", text="Shadow Color 0")
+                box.prop(nodes["G4 Shadow Threshold 0"].outputs[0], "default_value", text="Shadow Band 0")
+            else:
+                box.prop(shadow_primary.color_ramp.elements[1], "position", text="Shadow Band 0")
         shadow_secondary = nodes.get("G4 Shadow Color 1")
         if shadow_secondary is not None:
-            box.prop(shadow_secondary.color_ramp.elements[1], "position", text="Shadow Band 1")
+            if shadow_secondary.type == "RGB":
+                box.prop(shadow_secondary.outputs[0], "default_value", text="Shadow Color 1")
+                box.prop(nodes["G4 Shadow Threshold 1"].outputs[0], "default_value", text="Shadow Band 1")
+            else:
+                box.prop(shadow_secondary.color_ramp.elements[1], "position", text="Shadow Band 1")
         highlight = nodes.get("G4 Highlight")
         if highlight is not None:
             box.prop(highlight.inputs[2], "default_value", text="Highlight Color")
