@@ -2404,9 +2404,15 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
     edge2_max_node = edge2_group.nodes.get("G4 edge2 Depth Max") if edge2_group is not None else None
     edge2_offset_node = edge2_group.nodes.get("G4 edge2 Depth Offset") if edge2_group is not None else None
     edge2_scale_node = edge2_group.nodes.get("G4 edge2 Scale") if edge2_group is not None else None
+    edge2_material_scale_node = (
+        edge2_group.nodes.get("G4 edge2 Material Scale") if edge2_group is not None else None
+    )
     edge2_max_socket = edge2_max_node.inputs[1] if edge2_max_node is not None else None
     edge2_offset_socket = edge2_offset_node.inputs[1] if edge2_offset_node is not None else None
     edge2_scale_socket = edge2_scale_node.inputs[1] if edge2_scale_node is not None else None
+    edge2_material_scale_socket = (
+        edge2_material_scale_node.outputs[0] if edge2_material_scale_node is not None else None
+    )
     edge2_material = bpy.data.materials.get("G4 edge2 Preview")
     edge2_color_node = (
         edge2_material.node_tree.nodes.get("G4 edge2 Color")
@@ -2448,6 +2454,11 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
                 max(0.0, value) for value in edge_color[:3]
             ) + (1.0,)
             edge2_color_socket.keyframe_insert("default_value", frame=frame)
+        if edge2_material_scale_socket is not None and edge_color and len(edge_color) >= 4:
+            # `chr_toon_edge2.vfxo` multiplies the shell displacement by the
+            # same cb4[29].w whose RGB components the edge PS writes.
+            edge2_material_scale_socket.default_value = max(0.0, edge_color[3])
+            edge2_material_scale_socket.keyframe_insert("default_value", frame=frame)
         scale = parameters.get("edge2OutlineScale")
         if edge2_scale_socket is not None and scale:
             # The 0.5 factor is applied after COLOR.b * depth_factor in the

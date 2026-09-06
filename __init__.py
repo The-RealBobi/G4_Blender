@@ -2686,7 +2686,7 @@ def edge2_preview_material():
 def edge2_preview_node_group():
     material = edge2_preview_material()
     group = bpy.data.node_groups.get(EDGE2_PREVIEW_GROUP_NAME)
-    if group is not None and group.get("g4_edge2_preview_schema") == 3:
+    if group is not None and group.get("g4_edge2_preview_schema") == 4:
         return group
     if group is None:
         group = bpy.data.node_groups.new(EDGE2_PREVIEW_GROUP_NAME, "GeometryNodeTree")
@@ -2727,6 +2727,8 @@ def edge2_preview_node_group():
     invert_camera_model.name = "G4 edge2 Invert Camera Model"
     normal = nodes.new("GeometryNodeInputNormal")
     position = nodes.new("GeometryNodeInputPosition")
+    view_position = nodes.new("FunctionNodeTransformPoint")
+    view_position.name = "G4 edge2 View Position"
     depth_z = nodes.new("ShaderNodeSeparateXYZ")
     depth_abs = nodes.new("ShaderNodeMath")
     depth_abs.name = "G4 edge2 Absolute View Depth"
@@ -2775,10 +2777,16 @@ def edge2_preview_node_group():
     scale = nodes.new("ShaderNodeMath")
     scale.name = "G4 edge2 Scale"
     scale.operation = "MULTIPLY"
+    material_scale = nodes.new("ShaderNodeValue")
+    material_scale.name = "G4 edge2 Material Scale"
+    material_scale.outputs[0].default_value = 1.0
+    material_weighted = nodes.new("ShaderNodeMath")
+    material_weighted.name = "G4 edge2 Material Weight"
+    material_weighted.operation = "MULTIPLY"
     # The native vertex shader applies COLOR.b * cb4[29].w * 0.5 *
     # depth_factor * u_edge2Scale * 0.01 along the normalized model-space
-    # normal.  cb4[29].w remains a runtime material input not present in an
-    # imported scene, so the preview carries the known geometry/light terms.
+    # normal.  The event-light importer supplies cb4[29].w from edgeColor.a;
+    # the neutral value remains 1.0 when no event profile is available.
     scale.inputs[1].default_value = 2.5 * 0.01
     vector_scale = nodes.new("ShaderNodeVectorMath")
     vector_scale.operation = "SCALE"
@@ -2798,7 +2806,9 @@ def edge2_preview_node_group():
     links.new(invert_camera_model.outputs["Matrix"], restore_transform.inputs["Transform"])
     links.new(geometry, camera_transform.inputs["Geometry"])
     links.new(camera_transform.outputs["Geometry"], set_position.inputs["Geometry"])
-    links.new(position.outputs["Position"], depth_z.inputs["Vector"])
+    links.new(position.outputs["Position"], view_position.inputs["Vector"])
+    links.new(camera_model_matrix.outputs["Matrix"], view_position.inputs["Transform"])
+    links.new(view_position.outputs["Vector"], depth_z.inputs["Vector"])
     links.new(depth_z.outputs["Z"], depth_abs.inputs[0])
     links.new(depth_abs.outputs[0], depth_max.inputs[0])
     links.new(depth_max.outputs[0], depth_offset.inputs[0])
@@ -2827,7 +2837,9 @@ def edge2_preview_node_group():
     links.new(blue.outputs["Value"], blue_depth.inputs[0])
     links.new(depth_normalize.outputs[0], blue_depth.inputs[1])
     links.new(blue_depth.outputs[0], half_depth.inputs[0])
-    links.new(half_depth.outputs[0], scale.inputs[0])
+    links.new(half_depth.outputs[0], material_weighted.inputs[0])
+    links.new(material_scale.outputs[0], material_weighted.inputs[1])
+    links.new(material_weighted.outputs[0], scale.inputs[0])
     links.new(scale.outputs[0], vector_scale.inputs[3])
     links.new(vector_scale.outputs["Vector"], set_position.inputs["Offset"])
     links.new(set_position.outputs["Geometry"], set_material.inputs["Geometry"])
@@ -2835,7 +2847,7 @@ def edge2_preview_node_group():
     links.new(geometry, join.inputs["Geometry"])
     links.new(restore_transform.outputs["Geometry"], join.inputs["Geometry"])
     links.new(join.outputs["Geometry"], output_node.inputs[geometry_out.identifier])
-    group["g4_edge2_preview_schema"] = 3
+    group["g4_edge2_preview_schema"] = 4
     group["g4_edge2_scale_source"] = "edge2OutlineScale from native light profiles; default 2.5"
     group["g4_edge2_displacement_source"] = (
         "COLOR.b * cb4[29].w * depth_factor * 0.5 * u_edge2Scale * 0.01 * normal; "
