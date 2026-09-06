@@ -2548,6 +2548,12 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         under_rim_strength = material.node_tree.nodes.get("G4 Under Rim Strength")
         keyed_material = False
         for _, frame, parameters, _ in keyed:
+            if primary_shadow is not None and primary_shadow.type == "RGB":
+                from .shading.character_lighting import animate_capture_lighting
+                animate_capture_lighting(material.node_tree.nodes, parameters, frame)
+                keyed_material = True
+                continue
+
             for node, parameter_names in (
                 (highlight_node, ("charaHighLightColor", "charaHighColor")),
                 (underlight_node, ("charaUnderRimColor", "charaUnderRim")),
@@ -3709,7 +3715,7 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 "ball": bpy.path.abspath(item.ball_model) if item.ball_model else "",
             }
             for key, path_value in actor_parts.items():
-                if key == "attach_ball":
+                if key in {"attach_ball", "skin_color"}:
                     continue
                 path = Path(path_value) if path_value else None
                 if path is not None and (not path.is_file() or path.suffix.lower() not in {".g4md", ".g4pkm"}):
