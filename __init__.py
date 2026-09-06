@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 7, 0),
+    "version": (1, 7, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -2652,32 +2652,42 @@ def mark_level5_internal_edges(obj) -> int:
 EDGE2_PREVIEW_MODIFIER_NAME = "G4 edge2 Preview"
 EDGE2_PREVIEW_GROUP_NAME = "G4 edge2 Preview Geometry"
 EDGE2_PREVIEW_MATERIAL_NAME = "G4 edge2 Preview"
+EDGE2_PREVIEW_COLOR = (0.018, 0.012, 0.018, 1.0)
 
 
 def edge2_preview_material():
     material = bpy.data.materials.get(EDGE2_PREVIEW_MATERIAL_NAME)
-    if material is not None:
-        return material
-    material = bpy.data.materials.new(EDGE2_PREVIEW_MATERIAL_NAME)
+    created = material is None
+    if created:
+        material = bpy.data.materials.new(EDGE2_PREVIEW_MATERIAL_NAME)
     material.use_nodes = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
-    nodes.clear()
-    output = nodes.new("ShaderNodeOutputMaterial")
-    transparent = nodes.new("ShaderNodeBsdfTransparent")
-    emission = nodes.new("ShaderNodeEmission")
-    emission.name = "G4 edge2 Color"
-    emission.inputs["Color"].default_value = (0.018, 0.012, 0.018, 1.0)
+    emission = nodes.get("G4 edge2 Color")
+    if created or emission is None:
+        nodes.clear()
+        output = nodes.new("ShaderNodeOutputMaterial")
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        emission = nodes.new("ShaderNodeEmission")
+        emission.name = "G4 edge2 Color"
+        mix = nodes.new("ShaderNodeMixShader")
+        facing = nodes.new("ShaderNodeNewGeometry")
+        # The native edge2 pixel shader writes a material edge colour.  The
+        # front side of the expanded shell stays transparent; only the
+        # grazing back-facing part becomes the visible outline.
+        links.new(facing.outputs["Backfacing"], mix.inputs[0])
+        links.new(transparent.outputs["BSDF"], mix.inputs[1])
+        links.new(emission.outputs["Emission"], mix.inputs[2])
+        links.new(mix.outputs["Shader"], output.inputs["Surface"])
+    # Older scenes may contain the provisional event edgeColor animation.
+    # It was the raw grey edge buffer, not the final dark character line, so
+    # migrate it once when this addon-owned material is reused.
+    if material.get("g4_edge2_color_mode") != "dark_render":
+        if material.node_tree.animation_data is not None:
+            material.node_tree.animation_data_clear()
+        material["g4_edge2_color_mode"] = "dark_render"
+    emission.inputs["Color"].default_value = EDGE2_PREVIEW_COLOR
     emission.inputs["Strength"].default_value = 1.0
-    mix = nodes.new("ShaderNodeMixShader")
-    facing = nodes.new("ShaderNodeNewGeometry")
-    # The native edge2 pixel shader writes the material edge colour.  The
-    # front side of the expanded shell stays transparent; only the grazing
-    # back-facing part becomes the visible outline.
-    links.new(facing.outputs["Backfacing"], mix.inputs[0])
-    links.new(transparent.outputs["BSDF"], mix.inputs[1])
-    links.new(emission.outputs["Emission"], mix.inputs[2])
-    links.new(mix.outputs["Shader"], output.inputs["Surface"])
     set_transparent_material(material)
     material["g4_edge2_color_source"] = "CBUSE_UB_MODEL_MATERIAL_IDX[29].xyz"
     return material
@@ -2891,6 +2901,11 @@ def configure_edge2_preview(imported_names: set[str], debug: list[str] | None = 
         if modifier is None:
             modifier = obj.modifiers.new(EDGE2_PREVIEW_MODIFIER_NAME, "NODES")
         modifier.node_group = group
+        # edge2 is a render pass in the native pipeline.  Keeping the
+        # expanded shell out of the viewport avoids the old double-outline
+        # appearance while preserving the render reconstruction.
+        modifier.show_viewport = False
+        modifier.show_render = True
         obj["g4_edge2_preview"] = True
         configured += 1
     if debug is not None:

@@ -2414,12 +2414,15 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         edge2_material_scale_node.outputs[0] if edge2_material_scale_node is not None else None
     )
     edge2_material = bpy.data.materials.get("G4 edge2 Preview")
-    edge2_color_node = (
-        edge2_material.node_tree.nodes.get("G4 edge2 Color")
-        if edge2_material is not None and edge2_material.node_tree is not None
-        else None
-    )
-    edge2_color_socket = edge2_color_node.inputs.get("Color") if edge2_color_node is not None else None
+    if edge2_material is not None and edge2_material.node_tree is not None:
+        # edgeColor is retained below as event metadata, but the debugger
+        # capture shows it is the raw edge buffer colour.  Feeding its
+        # typical (0.3, 0.3, 0.3) value directly to the render shell creates
+        # the grey halo rejected by the character references.
+        edge2_material.node_tree.animation_data_clear()
+        edge2_color_node = edge2_material.node_tree.nodes.get("G4 edge2 Color")
+        if edge2_color_node is not None:
+            edge2_color_node.inputs["Color"].default_value = (0.018, 0.012, 0.018, 1.0)
     for cut, frame, parameters, _ in keyed:
         values = {
             name: parameters[name][0]
@@ -2447,13 +2450,6 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         if values:
             edge_parameters[cut] = values
         edge_color = parameters.get("edgeColor")
-        if edge2_color_socket is not None and edge_color and len(edge_color) >= 3:
-            # chr_edge2.pfxo writes CBUSE_UB_MODEL_MATERIAL_IDX[29].xyz;
-            # EventMap's edgeColor is the recovered high-level source for it.
-            edge2_color_socket.default_value = tuple(
-                max(0.0, value) for value in edge_color[:3]
-            ) + (1.0,)
-            edge2_color_socket.keyframe_insert("default_value", frame=frame)
         if edge2_material_scale_socket is not None and edge_color and len(edge_color) >= 4:
             # `chr_toon_edge2.vfxo` multiplies the shell displacement by the
             # same cb4[29].w whose RGB components the edge PS writes.
