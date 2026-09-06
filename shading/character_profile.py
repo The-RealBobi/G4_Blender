@@ -40,7 +40,7 @@ class CharacterShaderProfile:
             notes=(
                 "Preserve the existing apply_level5_toon_shader node graph.",
                 "ShaderToRGB requires EEVEE; other engines receive a marked fallback.",
-                "chrGrd_01 is exposed for inspection; native chr_toon uses a scene gradient input whose binding is not reconstructed here.",
+                "Character ambient, dual shadow colors, threshold and rim defaults follow the native light profiles; chr_toon's in_texGrd scene framebuffer remains runtime-only.",
             ),
         )
 

@@ -2538,6 +2538,7 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
             continue
         highlight_node = material.node_tree.nodes.get("G4 Highlight")
         underlight_node = material.node_tree.nodes.get("G4 Under Light")
+        ambient_node = material.node_tree.nodes.get("G4 Character Ambient")
         primary_shadow = material.node_tree.nodes.get("G4 Shadow Color 0")
         secondary_shadow = material.node_tree.nodes.get("G4 Shadow Color 1")
         shadow_blend = material.node_tree.nodes.get("G4 Dual Toon Ramp")
@@ -2548,6 +2549,7 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
             for node, parameter_names in (
                 (highlight_node, ("charaHighLightColor", "charaHighColor")),
                 (underlight_node, ("charaUnderRimColor", "charaUnderRim")),
+                (ambient_node, ("charaAmbient",)),
             ):
                 values = next(
                     (
@@ -2559,7 +2561,7 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
                 )
                 if node is None or not values or len(values) < 3:
                     continue
-                intensity = values[3] if len(values) > 3 else 1.0
+                intensity = values[3] if len(values) > 3 and node is not ambient_node else 1.0
                 node.inputs[2].default_value = tuple(
                     max(0.0, value * intensity) for value in values[:3]
                 ) + (1.0,)

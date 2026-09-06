@@ -1612,8 +1612,12 @@ def apply_level5_toon_shader(
     light_floor = nodes.new("ShaderNodeMath")
     light_floor.name = "G4 Toon Ambient"
     light_floor.operation = "MULTIPLY_ADD"
-    light_floor.inputs[1].default_value = 0.88
-    light_floor.inputs[2].default_value = 0.12
+    # The native profiles place the character terminator around
+    # charaHighThreshold=1.5 (0.5 in the normalized ramp).  The old 0.88/0.12
+    # remap kept almost every surface in the lit band and made the material
+    # look like an unshaded albedo in a neutral scene.
+    light_floor.inputs[1].default_value = 0.78
+    light_floor.inputs[2].default_value = 0.08
     light_floor.use_clamp = True
     light_floor.location = (-160, -100)
     links.new(diffuse.outputs["BSDF"], diffuse_rgb.inputs["Shader"])
@@ -1666,12 +1670,11 @@ def apply_level5_toon_shader(
     shadow_primary.name = "G4 Shadow Color 0"
     shadow_primary.location = (20, -80)
     shadow_primary.color_ramp.interpolation = "CONSTANT"
-    # The native character pass uses coloured shadow uniforms rather than a
-    # neutral grey multiply.  A cool violet low band keeps the palette alive
-    # under stadium or effect lighting, matching the chromatic shadows visible
-    # in the reference captures without flattening the lit albedo.
-    shadow_primary.color_ramp.elements[0].color = (0.52, 0.46, 0.62, 1.0)
-    shadow_primary.color_ramp.elements[1].position = 0.32
+    # These defaults are the neutral/cool range used by the native character
+    # profiles (charaShadow1 ~= .60/.55/.70, high threshold ~= 1.5).  Event
+    # animation can replace both the low color and the high edge.
+    shadow_primary.color_ramp.elements[0].color = (0.60, 0.55, 0.70, 1.0)
+    shadow_primary.color_ramp.elements[1].position = 0.50
     shadow_primary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
     links.new(toon_factor, shadow_primary.inputs["Fac"])
 
@@ -1699,15 +1702,19 @@ def apply_level5_toon_shader(
     shadow_secondary.name = "G4 Shadow Color 1"
     shadow_secondary.location = (240, -80)
     shadow_secondary.color_ramp.interpolation = "CONSTANT"
-    shadow_secondary.color_ramp.elements[0].color = (0.82, 0.80, 0.90, 1.0)
-    shadow_secondary.color_ramp.elements[1].position = 0.46
+    shadow_secondary.color_ramp.elements[0].color = (0.50, 0.45, 0.60, 1.0)
+    # The second native shadow band is offset by the blend region; this is the
+    # same normalized separation used by the event importer for threshold 1.5.
+    shadow_secondary.color_ramp.elements[1].position = 0.64
     shadow_secondary.color_ramp.elements[1].color = (1.0, 1.0, 1.0, 1.0)
     links.new(secondary_factor, shadow_secondary.inputs["Fac"])
 
     shadow_mix = nodes.new("ShaderNodeMixRGB")
     shadow_mix.name = "G4 Dual Toon Ramp"
     shadow_mix.blend_type = "MIX"
-    shadow_mix.inputs[0].default_value = 0.18
+    # charaShadowBlendRate=1.8 is the common profile value.  Native blending
+    # is rate/(1+rate), hence 0.642857 rather than the previous weak 0.18 mix.
+    shadow_mix.inputs[0].default_value = 0.642857
     shadow_mix.location = (450, -40)
     links.new(shadow_primary.outputs["Color"], shadow_mix.inputs[1])
     links.new(shadow_secondary.outputs["Color"], shadow_mix.inputs[2])
@@ -1776,6 +1783,18 @@ def apply_level5_toon_shader(
     links.new(color_output, colored_light.inputs[1])
     links.new(light_tint.outputs["Color"], colored_light.inputs[2])
     color_output = colored_light.outputs["Color"]
+
+    ambient_tint = nodes.new("ShaderNodeMixRGB")
+    ambient_tint.name = "G4 Character Ambient"
+    ambient_tint.label = "G4 Character Ambient"
+    ambient_tint.blend_type = "MULTIPLY"
+    # Keep neutral scenes unchanged while allowing charaAmbient from event
+    # profiles to provide the blue/magenta/warm response seen in the game.
+    ambient_tint.inputs[0].default_value = 0.24
+    ambient_tint.inputs[2].default_value = (1.0, 1.0, 1.0, 1.0)
+    ambient_tint.location = (940, 440)
+    links.new(color_output, ambient_tint.inputs[1])
+    color_output = ambient_tint.outputs["Color"]
 
     line_path = first_variant_path(variants, "line")
     line_informative = False
@@ -1932,12 +1951,17 @@ def apply_level5_toon_shader(
     highlight_add = nodes.new("ShaderNodeMixRGB")
     highlight_add.name = "G4 Highlight"
     highlight_add.blend_type = "ADD"
-    highlight_add.inputs[2].default_value = (0.06, 0.06, 0.06, 1.0)
+    # Native charaHighColor is normally around 0.3 in the captured profiles;
+    # the previous .06 was effectively invisible except at grazing angles.
+    highlight_add.inputs[2].default_value = (0.30, 0.30, 0.30, 1.0)
     highlight_add.location = (800, 250)
     underlight_add = nodes.new("ShaderNodeMixRGB")
     underlight_add.name = "G4 Under Light"
     underlight_add.blend_type = "ADD"
-    underlight_add.inputs[2].default_value = (0.0, 0.0, 0.0, 1.0)
+    # Common profiles use charaUnderRimColor=(.02,.075,.10) with rate 1.45.
+    # Keep the default restrained because the factor already contains both
+    # grazing angle and the unlit-side mask.
+    underlight_add.inputs[2].default_value = (0.03, 0.11, 0.145, 1.0)
     underlight_add.location = (980, 250)
     links.new(layer_weight.outputs["Facing"], grazing.inputs[1])
     links.new(toon_factor, inverse_toon.inputs[1])
