@@ -141,7 +141,7 @@ def character_texture_base_key(name: str | Path, role: str | None = None) -> str
 
 def _texture_stem(name: str | Path) -> str:
     value = str(name).replace("\\", "/").rsplit("/", 1)[-1].casefold()
-    for suffix in (".dds", ".nxtch", ".bin"):
+    for suffix in (".dds", ".png", ".tga", ".jpg", ".jpeg", ".bmp", ".nxtch", ".bin"):
         if value.endswith(suffix):
             return value[: -len(suffix)]
     return value
