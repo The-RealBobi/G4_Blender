@@ -31,7 +31,7 @@ try:
     from .g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
-    from .g4ma_motion import decode_material_motion
+    from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
     from .g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
@@ -44,7 +44,7 @@ except ImportError:
     from g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
-    from g4ma_motion import decode_material_motion
+    from g4ma_motion import decode_material_motion, material_animation_paths
     from g4cm_camera import decode_camera, parse_g4cm
     from g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
@@ -2069,6 +2069,7 @@ def create_effect_g4ma_actions(paths: list[Path], materials_by_crc: dict[int, li
                                     "CONSTANT" if curve["interpolation"] == "STEP" else "LINEAR"
                                 )
                     if action_fcurves(action):
+                        action.use_fake_user = True
                         action_names.append(action.name)
                     else:
                         bpy.data.actions.remove(action)
@@ -2093,7 +2094,9 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
             asset_directory = model.parent
             particle = next(asset_directory.glob("*.ptlb"), None)
             objbin_cfg = next(asset_directory.glob("*.objbin.cfg"), None)
-            material_animations = sorted(asset_directory.glob(f"{model.stem}/*.g4ma"))
+            material_animations = material_animation_paths(
+                model, Path(tempfile.gettempdir()) / "level5_g4ma_blender"
+            )
             shader_params = parse_effect_shader_params(objbin_cfg)
             cut = None
             suffix = re.search(r"(\d{5})$", model.stem)
@@ -2150,14 +2153,7 @@ def decode_event_effect_motions(directory: Path, prefs, temporary_directory: Pat
 
 
 def configure_event_effect_materials(imported: set[object]) -> list[str]:
-    """Turn imported effect surfaces into transparent emissive materials.
-
-    Victory Road effect meshes use material families such as ``Effect_*`` and
-    ``MA_smoke*``.  They are authored for additive/transparent runtime
-    shaders, while the normal G4 model importer intentionally creates a
-    conservative Principled material.  Rebuild only those effect families;
-    character and scenery materials remain untouched.
-    """
+    """Preserve reconstructed shaders and provide a fallback for other effects."""
     effect_tokens = ("effect_", "ma_smoke", "_aura", "threshold")
     converted = []
     seen = set()
@@ -2168,6 +2164,9 @@ def configure_event_effect_materials(imported: set[object]) -> list[str]:
             if material is None or material in seen:
                 continue
             seen.add(material)
+            if material.get("g4_effect_preview") in {"T1_STATIC", "T1M1_STATIC", "THRESHOLD_STATIC"}:
+                converted.append(material.name)
+                continue
             name = material.name.lower()
             if not any(token in name for token in effect_tokens):
                 continue
@@ -2219,6 +2218,7 @@ def import_event_effect_models(
     candidates: list[dict],
     motions: dict[str, dict],
     cut_starts: dict[str, int],
+    event_end: int,
 ) -> list[object]:
     imported_roots = []
     failed_models = []
@@ -2230,10 +2230,17 @@ def import_event_effect_models(
         if cut not in cut_starts:
             continue
         following = [frame for frame in cut_starts.values() if frame > cut_starts[cut]]
-        end_frame = min(following) if following else cut_starts[cut] + 1
+        end_frame = min(following) if following else event_end + 1
         for effect_index, candidate in enumerate(cut_candidates, 1):
             model_path = Path(candidate["model"])
             before = set(bpy.data.objects)
+            scene = bpy.context.scene
+            previous_timing = (scene.frame_start, scene.frame_end, scene.render.fps, scene.render.fps_base)
+            scene.frame_end = max(scene.frame_end, end_frame-1)
+            scene.frame_start = cut_starts[cut]
+            scene.frame_end = end_frame-1
+            scene.render.fps = 60
+            scene.render.fps_base = 1.0
             try:
                 result = bpy.ops.import_scene.level5_g4(
                     filepath=str(model_path),
@@ -2245,6 +2252,8 @@ def import_event_effect_models(
                     bpy.data.objects.remove(obj, do_unlink=True)
                 failed_models.append({"model": str(model_path), "error": str(exc)})
                 continue
+            finally:
+                scene.frame_start, scene.frame_end, scene.render.fps, scene.render.fps_base = previous_timing
             if "FINISHED" not in result:
                 continue
             imported = set(bpy.data.objects) - before
@@ -2277,7 +2286,7 @@ def import_event_effect_models(
                 for material in obj.data.materials:
                     if material is None:
                         continue
-                    material_crc = zlib.crc32(material.name.encode("utf-8")) & 0xFFFFFFFF
+                    material_crc = material_crc32b(material)
                     if material not in materials_by_crc[material_crc]:
                         materials_by_crc[material_crc].append(material)
                     parameters = shader_params_by_crc.get(material_crc)
@@ -2298,18 +2307,17 @@ def import_event_effect_models(
                     track.name = "Event Effect Placement"
                     duration = max(1, end_frame - cut_starts[cut])
                     add_nla_strip(root, track, action, cut, cut_starts[cut], duration)
-            root.hide_viewport = True
-            root.hide_render = True
-            root.keyframe_insert("hide_viewport", frame=max(1, cut_starts[cut] - 1))
-            root.keyframe_insert("hide_render", frame=max(1, cut_starts[cut] - 1))
-            root.hide_viewport = False
-            root.hide_render = False
-            root.keyframe_insert("hide_viewport", frame=cut_starts[cut])
-            root.keyframe_insert("hide_render", frame=cut_starts[cut])
-            root.hide_viewport = True
-            root.hide_render = True
-            root.keyframe_insert("hide_viewport", frame=end_frame)
-            root.keyframe_insert("hide_render", frame=end_frame)
+            # Empty visibility does not propagate to children in rendered output.
+            for obj in imported:
+                for frame, hidden in ((cut_starts[cut]-1, True), (cut_starts[cut], False), (end_frame, True)):
+                    obj.hide_viewport = hidden
+                    obj.hide_render = hidden
+                    obj.keyframe_insert("hide_viewport", frame=frame)
+                    obj.keyframe_insert("hide_render", frame=frame)
+                for curve in action_fcurves(obj.animation_data.action):
+                    if curve.data_path in ("hide_viewport", "hide_render"):
+                        for point in curve.keyframe_points:
+                            point.interpolation = 'CONSTANT'
             imported_roots.append(root)
     if failed_models:
         bpy.context.scene["g4_event_effect_failures"] = json.dumps(failed_models)
@@ -4002,7 +4010,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 import_event_character_lighting(directory, cut_starts)
                 event_log.append("stage=importing-effects")
                 write_event_import_log(event_log)
-                effect_roots = import_event_effect_models(effect_candidates, effect_motions, cut_starts)
+                effect_roots = import_event_effect_models(effect_candidates, effect_motions, cut_starts, frame_end-frame_origin+1)
                 event_log.append(f"effect_roots={len(effect_roots)}")
                 write_event_import_log(event_log)
                 if camera_paths:

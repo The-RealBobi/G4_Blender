@@ -671,19 +671,31 @@ def parse_material_records(data: bytes, material_table: int, material_count: int
     records: list[dict] = []
     if material_count <= 0 or material_table <= 0 or material_table + material_count * 0x10 > len(data):
         return records
-    fallback_ref_table = material_table + material_count * 0x10 + 0x30
-    ref_table = infer_material_ref_table(data, material_table, material_count, fallback_ref_table)
-    ref_table_length = 0
-    while ref_table + ref_table_length * 6 + 6 <= len(data):
-        ref_off = ref_table + ref_table_length * 6
-        if data[ref_off + 1] != 3 or data[ref_off] > 0x40:
-            break
-        ref_table_length += 1
+    base = u16(data, 0x0A) * 4 if len(data) >= 0x6C else 0
+    explicit_layout = len(data) >= 0x6C and data[:4] == b"G4MD" and base + u16(data, 0x64) * 4 == material_table
+    if explicit_layout:
+        ref_table = base + u16(data, 0x68) * 4
+        ref_end = base + u16(data, 0x6A) * 4
+        if not material_table + material_count * 0x10 <= ref_table <= ref_end <= len(data):
+            raise ValueError("Material texture descriptor section is outside the model")
+        ref_table_length = (ref_end - ref_table) // 6
+    else:
+        fallback_ref_table = material_table + material_count * 0x10 + 0x30
+        ref_table = infer_material_ref_table(data, material_table, material_count, fallback_ref_table)
+        ref_table_length = 0
+        while ref_table + ref_table_length * 6 + 6 <= len(data):
+            ref_off = ref_table + ref_table_length * 6
+            if data[ref_off + 1] != 3 or data[ref_off] > 0x40:
+                break
+            ref_table_length += 1
     for index in range(material_count):
         off = material_table + index * 0x10
         values = struct.unpack_from("<8H", data, off)
         texture_ref_count = values[6] & 0xFF
-        texture_ref_start = values[7]
+        # The texture start is independent of the submesh-name start at +0x0e.
+        texture_ref_start = values[3] if explicit_layout else values[7]
+        if explicit_layout and texture_ref_start + texture_ref_count > ref_table_length:
+            raise ValueError(f"Material {index} texture references exceed their descriptor section")
         refs = []
         for ref_index in range(texture_ref_count):
             if texture_ref_start + ref_index >= ref_table_length:
@@ -824,7 +836,7 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
                 )
             absolute_index_offset = index_base + index_offset
             count = min(effective_index_count, 12)
-            if absolute_index_offset + count * 2 <= len(g4mg):
+            if index_count > 0 and absolute_index_offset + count * 2 <= len(g4mg):
                 first_indices = struct.unpack_from("<" + "H" * count, g4mg, absolute_index_offset)
 
         records.append(
@@ -855,6 +867,53 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
     material_records = parse_material_records(data, material_table, material_count)
     texture_hashes = parse_texture_hash_table(data)
     name_base_bias = u16(data, 0x0A) * 4
+    # Preserve the native material inputs for selective effect adapters.
+    if len(data) >= 0x7C and name_base_bias + u16(data, 0x64) * 4 == material_table:
+        color_base = name_base_bias + u16(data, 0x66) * 4
+        color_end = name_base_bias + u16(data, 0x68) * 4
+        state_base = name_base_bias + u16(data, 0x6C) * 4
+        state_end = name_base_bias + u16(data, 0x6E) * 4
+        sampler_end = name_base_bias + u16(data, 0x70) * 4
+        shader_base = name_base_bias + u16(data, 0x78) * 4
+        shader_end = name_base_bias + u16(data, 0x7A) * 4
+        for material in material_records:
+            values = material["raw_u16"]
+            color_offset = color_base + values[0] * 48
+            state_offset = state_base + values[2] * 2
+            state_count = values[5] >> 8
+            shader_offset = shader_base + (values[4] >> 8) * 4
+            if color_base <= color_offset and color_offset + 48 <= color_end <= len(data):
+                material["native_colors"] = list(struct.unpack_from("<12f", data, color_offset))
+            if state_base <= state_offset and state_offset + state_count * 2 <= state_end <= len(data):
+                material["render_states"] = [list(data[offset:offset + 2]) for offset in range(state_offset, state_offset + state_count * 2, 2)]
+            for reference in material["texture_refs"]:
+                tail = reference["tail"]
+                sampler_offset = state_end + (tail[2] | tail[3] << 8) * 2
+                if state_end <= sampler_offset and sampler_offset + 6 <= sampler_end <= len(data):
+                    reference["sampler_states"] = [
+                        list(data[offset:offset + 2]) for offset in range(sampler_offset, sampler_offset + 6, 2)
+                    ]
+            if shader_base <= shader_offset and shader_offset + 4 <= shader_end <= len(data):
+                material["shader_hash"] = u32(data, shader_offset)
+            if len(data) >= 0x8C:
+                uv_base = name_base_bias + u16(data, 0x88) * 4
+                parameter_base = name_base_bias + u16(data, 0x6A) * 4
+                parameter_offset = parameter_base + values[1] * 16
+                # Parameter blocks can share trailing vectors with another material.
+                parameter_end = parameter_offset + (values[5] & 0xFF) * 16
+                if parameter_base <= parameter_offset <= parameter_end <= uv_base <= len(data):
+                    material["shader_parameters"] = [
+                        list(struct.unpack_from("<4f", data, offset))
+                        for offset in range(parameter_offset, parameter_end - 15, 16)
+                    ]
+                uv_end = name_base_bias + u16(data, 0x8A) * 4
+                uv_offset = uv_base + values[7] * 32
+                uv_count = material["texture_ref_count"]
+                if uv_base <= uv_offset and uv_offset + uv_count * 32 <= uv_end <= len(data):
+                    material["uv_matrices"] = [
+                        list(struct.unpack_from("<8f", data, uv_offset + index * 32))
+                        for index in range(uv_count)
+                    ]
     joint_hash_table = name_base_bias + u16(data, 0x74) * 4
     mesh_name_table = name_base_bias + u16(data, 0x84) * 4
     material_name_table = name_base_bias + u16(data, 0x86) * 4
@@ -1074,10 +1133,16 @@ def uv_raw_size_for_format(format_id: int, slice_size: int) -> int:
 
 
 def read_uv0(g4mg: bytes, md_info: dict, record: dict, vertex_index: int) -> tuple[float, float]:
+    return read_uv_channel(g4mg, md_info, record, vertex_index, 0)
+
+
+def read_uv_channel(g4mg: bytes, md_info: dict, record: dict, vertex_index: int, channel: int) -> tuple[float, float]:
     stride = vertex_stride_for_record(record)
     layout = layout_for_record(md_info, record)
-    element = layout_element(layout, 10)
+    element = layout_element(layout, 10 + channel)
     if element is None:
+        if channel != 0:
+            raise ValueError(f"Missing UV channel {channel} in mesh record {record['index']}")
         uv_offset = uv0_offset_for_stride(stride)
         if uv_offset is None:
             return 0.0, 0.0
@@ -4853,11 +4918,17 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
     normalized_path = path.as_posix().lower()
     prefer_material_refs = "/map/" in normalized_path or "/effect/" in normalized_path
     for record in records:
+        nonindexed = (
+            "effect" in {part.lower() for part in path.parts}
+            and record.get("index_count") == 0
+            and record.get("triangle_count", 0) > 0
+            and record.get("vertex_count") == record["triangle_count"] * 3
+        )
         if (
             not record.get("vertex_range_ok", True)
-            or not record.get("index_range_ok", True)
+            or (not nonindexed and not record.get("index_range_ok", True))
             or record.get("vertex_count", 0) <= 0
-            or record.get("index_count", 0) < 3
+            or (not nonindexed and record.get("index_count", 0) < 3)
         ):
             continue
         mesh_name = mesh_name_for_export(md_info, record, skeleton_info)
@@ -4878,7 +4949,13 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         positions: list[float] = []
         position_tuples: list[tuple[float, float, float]] = []
         texcoords: list[float] = []
+        texcoords1: list[float] = []
+        texcoords2: list[float] = []
+        uv1_element = layout_element(layout_for_record(md_info, record), 11) if "effect" in {part.lower() for part in path.parts} else None
+        uv2_element = layout_element(layout_for_record(md_info, record), 12) if uv1_element is not None else None
         vertex_colors: list[float] = []
+        vertex_colors1: list[float] = []
+        color1_element = layout_element(layout_for_record(md_info, record), 9)
         color_element = layout_element(layout_for_record(md_info, record), 8)
         color_offset = color_element.get("value_offset") if color_element is not None else None
         for vertex_index in range(vertex_count):
@@ -4887,12 +4964,24 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             position_tuples.append(position)
             positions.extend(position)
             texcoords.extend(read_uv0(g4mg, md_info, record, vertex_index))
+            if uv1_element is not None:
+                texcoords1.extend(read_uv_channel(g4mg, md_info, record, vertex_index, 1))
+            if uv2_element is not None:
+                texcoords2.extend(read_uv_channel(g4mg, md_info, record, vertex_index, 2))
             if color_offset is not None and off + color_offset + 4 <= len(g4mg):
                 vertex_colors.extend(value / 255.0 for value in g4mg[off + color_offset : off + color_offset + 4])
             else:
                 vertex_colors.extend((1.0, 1.0, 1.0, 1.0))
+            if color1_element is not None and color1_element['format_id'] == 12:
+                color1_offset = off + color1_element['value_offset']
+                vertex_colors1.extend(value / 255.0 for value in g4mg[color1_offset:color1_offset+4])
 
-        indices = list(struct.unpack_from("<" + "H" * index_count, g4mg, index_base + index_offset))
+        if nonindexed:
+            # Nonindexed effect draws consume each consecutive triple as a GS input primitive.
+            indices = list(range(vertex_count))
+            index_count = vertex_count
+        else:
+            indices = list(struct.unpack_from("<" + "H" * index_count, g4mg, index_base + index_offset))
         native_normals = read_native_normals_for_record(g4mg, md_info, record)
         if native_normals is None:
             normals_tuples = [(0.0, 1.0, 0.0)] * vertex_count
@@ -5068,7 +5157,10 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "positions": positions,
                 "normals": normals,
                 "texcoords": texcoords,
+                "texcoords1": texcoords1,
+                "texcoords2": texcoords2,
                 "vertex_colors": vertex_colors,
+                "vertex_colors1": vertex_colors1,
                 "color_offset": color_offset,
                 "indices": p,
                 "triangle_indices": indices,
@@ -5103,7 +5195,10 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "positions": payload["positions"],
                 "normals": payload["normals"],
                 "texcoords": payload["texcoords"],
+                "texcoords1": payload["texcoords1"],
+                "texcoords2": payload["texcoords2"],
                 "vertex_colors": payload["vertex_colors"],
+                "vertex_colors1": payload["vertex_colors1"],
                 "indices": payload["triangle_indices"],
                 "joint_palette": payload["joint_palette"],
                 "palette_base": payload["palette_base"],

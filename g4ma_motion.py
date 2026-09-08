@@ -11,15 +11,41 @@ been resolved from the source asset/runtime.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 try:
     from .g4mt_motion import encoding_step, sample_channel, select_clip
     from .g4mt_probe import parse_g4mt
+    from .g4pk_extract_g4mt import entries
 except ImportError:
     from g4mt_motion import encoding_step, sample_channel, select_clip
     from g4mt_probe import parse_g4mt
+    from g4pk_extract_g4mt import entries
+
+
+def material_animation_paths(model: Path, cache_root: Path) -> list[Path]:
+    """Resolve packed animations first, retaining unmatched extracted companions."""
+    data = model.read_bytes()
+    resolved = []
+    packed_names = set()
+    destination = cache_root / hashlib.sha256(data).hexdigest()
+    for index, (name, offset, size) in enumerate(entries(data)):
+        if data[offset:offset + 4] != b"G4MA":
+            continue
+        safe_name = Path(name.replace("\\", "/")).name
+        destination.mkdir(parents=True, exist_ok=True)
+        path = destination / f"{index}_{safe_name}"
+        payload = data[offset:offset + size]
+        if not path.is_file() or path.read_bytes() != payload:
+            path.write_bytes(payload)
+        resolved.append(path)
+        packed_names.add(safe_name.casefold())
+    for path in sorted((model.parent / model.stem).glob("*.g4ma")):
+        if path.name.casefold() not in packed_names:
+            resolved.append(path)
+    return resolved
 
 
 def decode_material_motion(path: Path, clip_selector: str) -> dict:

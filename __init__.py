@@ -752,6 +752,13 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
                 uv_layer.data[loop.index].uv = flat_uvs[offset : offset + 2]
 
         flat_colors = mesh_payload.get("vertex_colors") or []
+        for channel in (1, 2):
+            flat_uvs_extra = mesh_payload.get(f"texcoords{channel}") or []
+            if len(flat_uvs_extra) >= len(positions) * 2:
+                uv_layer = mesh.uv_layers.new(name=f"UVMap{channel}")
+                for loop in mesh.loops:
+                    offset = loop.vertex_index * 2
+                    uv_layer.data[loop.index].uv = flat_uvs_extra[offset : offset + 2]
         if len(flat_colors) >= len(positions) * 4:
             colors = mesh.color_attributes.new(
                 name="G4 Outline Parameters", type="BYTE_COLOR", domain="CORNER"
@@ -759,6 +766,16 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
             for loop in mesh.loops:
                 offset = loop.vertex_index * 4
                 colors.data[loop.index].color = flat_colors[offset : offset + 4]
+
+        flat_colors1 = mesh_payload.get("vertex_colors1") or []
+        if len(flat_colors1) == len(positions) * 4:
+            colors1 = mesh.color_attributes.new(
+                name="G4 Particle Color", type="FLOAT_COLOR", domain="CORNER"
+            )
+            for loop in mesh.loops:
+                offset = loop.vertex_index * 4
+                colors1.data[loop.index].color = flat_colors1[offset:offset+4]
+            mesh.color_attributes.active_color = mesh.color_attributes.get("G4 Outline Parameters") or colors1
 
         if custom_normals:
             apply_custom_vertex_normals(mesh, mesh_payload.get("normals") or [], len(positions))
@@ -3139,6 +3156,51 @@ def import_g4_model(
         debug,
         apply_styling=apply_styling,
     )
+    if "effect" in {part.lower() for part in path.parts}:
+        from .shading.effect_nodes import build_static_effect_material
+
+        records = {record["name"]: record for record in summary.get("material_records", [])}
+        materials = {
+            slot.material for name in imported_names
+            if (obj := bpy.data.objects.get(name)) is not None
+            for slot in obj.material_slots if slot.material is not None
+        }
+        converted = 0
+        for material in materials:
+            record = records.get(blender_base_name(material.name))
+            if record is not None and record.get("texture_ref_count", 0) >= 2:
+                missing_uv = any(
+                    obj.type == "MESH" and any(f"UVMap{channel}" not in obj.data.uv_layers
+                                              for channel in range(1, record["texture_ref_count"]))
+                    for name in imported_names if (obj := bpy.data.objects.get(name)) is not None
+                    if any(slot.material == material for slot in obj.material_slots)
+                )
+                if missing_uv:
+                    debug.append(f"[effects] {material.name}: required UV channel unavailable")
+                    continue
+            if record is not None and build_static_effect_material(material, record):
+                converted += 1
+        debug.append(f"[effects] static texture preview materials={converted}/{len(materials)}")
+        effect_source = path.with_suffix(".objbin")
+        if converted and effect_source.is_file():
+            from .shading.effect_animation import (
+                animate_effect_uv_loops, animate_effect_material_phases, animate_effect_geometry_phases,
+            )
+
+            try:
+                curves = animate_effect_uv_loops(
+                    effect_source, list(materials), bpy.context.scene, bpy.context.scene.frame_start
+                )
+                debug.append(f"[effects] animated UV loop curves={curves}")
+                phase_curves = animate_effect_material_phases(path, list(materials), bpy.context.scene)
+                debug.append(f"[effects] animated entry/loop/exit color curves={phase_curves}")
+                armatures = [obj for name in imported_names if (obj := bpy.data.objects.get(name)) is not None
+                             and obj.type == "ARMATURE"]
+                if len(armatures) == 1:
+                    strips = animate_effect_geometry_phases(path, armatures[0], bpy.context.scene)
+                    debug.append(f"[effects] animated geometry phase strips={strips}")
+            except (OSError, ValueError) as error:
+                debug.append(f"[effects] Effect animation unavailable: {error}")
     if apply_styling:
         modifier_count = configure_character_parameter_modifiers(imported_names, force_character=True)
         debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
