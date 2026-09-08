@@ -3727,9 +3727,8 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 "attach_ball": item.attach_ball,
                 "ball": bpy.path.abspath(item.ball_model) if item.ball_model else "",
             }
-            for key, path_value in actor_parts.items():
-                if key in {"attach_ball", "skin_color"}:
-                    continue
+            for key in ("head", "body", "shoes", "accessory", "gloves", "armband", "nameplate", "ball"):
+                path_value = actor_parts[key]
                 path = Path(path_value) if path_value else None
                 if path is not None and (not path.is_file() or path.suffix.lower() not in {".g4md", ".g4pkm"}):
                     self.report({"ERROR"}, f"Character part not found or unsupported: {path}")
