@@ -27,12 +27,21 @@ except ImportError:
 
 def material_animation_paths(model: Path, cache_root: Path) -> list[Path]:
     """Resolve packed animations first, retaining unmatched extracted companions."""
+    return _animation_paths(model, cache_root, b"G4MA", ".g4ma")
+
+
+def texture_animation_paths(model: Path, cache_root: Path) -> list[Path]:
+    """Resolve native packed UV-animation containers."""
+    return _animation_paths(model, cache_root, b"G4TP", ".g4tp")
+
+
+def _animation_paths(model: Path, cache_root: Path, magic: bytes, suffix: str) -> list[Path]:
     data = model.read_bytes()
     resolved = []
     packed_names = set()
     destination = cache_root / hashlib.sha256(data).hexdigest()
     for index, (name, offset, size) in enumerate(entries(data)):
-        if data[offset:offset + 4] != b"G4MA":
+        if data[offset:offset + 4] != magic:
             continue
         safe_name = Path(name.replace("\\", "/")).name
         destination.mkdir(parents=True, exist_ok=True)
@@ -42,7 +51,7 @@ def material_animation_paths(model: Path, cache_root: Path) -> list[Path]:
             path.write_bytes(payload)
         resolved.append(path)
         packed_names.add(safe_name.casefold())
-    for path in sorted((model.parent / model.stem).glob("*.g4ma")):
+    for path in sorted((model.parent / model.stem).glob(f"*{suffix}")):
         if path.name.casefold() not in packed_names:
             resolved.append(path)
     return resolved

@@ -253,3 +253,76 @@ def animate_effect_random_offsets(source: Path, materials: list[bpy.types.Materi
             tree.animation_data.action = None
             tree.animation_data.action = action
     return count
+
+
+def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: dict,
+                                   scene: bpy.types.Scene) -> int:
+    """Bind the authored stand UV clip, retaining its source frame rate and offsets."""
+    from ..g4ma_motion import texture_animation_paths
+    from ..g4mt_motion import sample_channel, encoding_step
+    from ..g4_animation_addon import action_fcurve_new
+
+    hashes = record.get('uv_animation_hashes', [])
+    if len(hashes) != 3:
+        return 0
+    modifier = next((m for m in obj.modifiers if m.type == 'NODES' and m.node_group
+                     and m.node_group.get('g4_particle_geometry')), None)
+    if modifier is None:
+        return 0
+    tree = modifier.node_group
+    with tempfile.TemporaryDirectory(prefix='g4_particle_clock_') as temporary:
+        for path in texture_animation_paths(model, Path(temporary)):
+            parsed = parse_g4mt(path)
+            clip = next((c for c in parsed['clips'] if c['name'] == 'stand'), None)
+            if clip is None or clip['flags'] & 1 or clip['fps'] <= 0:
+                continue
+            bindings = {}
+            for info in parsed['target_infos'][clip['target_info_start']:clip['target_info_start'] + clip['target_info_count']]:
+                target = int(parsed['targets'][info['target_index']]['crc32b'], 16)
+                channels = parsed['channels'][info['channel_start']:info['channel_start'] + info['channel_count']]
+                if len(channels) == 1 and channels[0]['channel_type'] == 11 and channels[0]['encoding'][4] == 1 and channels[0]['encoding'][7] == 0:
+                    bindings[target] = channels[0]
+            if any(hashes[index] not in bindings for index in (1, 2)):
+                continue
+            data = path.read_bytes()
+            samples = {}
+            for index in (1, 2):
+                channel = bindings[hashes[index]]
+                samples[index] = [(frame, sample_channel(data, parsed['section_offsets']['data'], channel,
+                                  parsed['scales'][channel['encoding'][6]], frame)[0])
+                                  for frame in range(clip['start_frame'], clip['end_frame'] + 1)]
+            action = bpy.data.actions.new(f'Particle UV {obj.name} {clip["name"]}')
+            action['g4_effect_animation'] = True
+            frame_scale = scene.render.fps / scene.render.fps_base / clip['fps']
+            for index in (1, 2):
+                uv = tree.nodes[f'Particle UV {index}']
+                for link in list(uv.inputs[1].links):
+                    tree.links.remove(link)
+                # The VS subtracts matrix V translation. Blender's flipped V adds it.
+                offset = tree.nodes.new('ShaderNodeMath')
+                offset.operation = 'ADD'
+                offset.name = f'Particle Native V {index}'
+                tree.links.new(tree.nodes[f'Particle Source UV {index}'].outputs[1], offset.inputs[0])
+                tree.links.new(offset.outputs[0], uv.inputs[1])
+                curve = action_fcurve_new(action, tree, offset.inputs[1].path_from_id('default_value'), 0, 'Particle UV')
+                for frame, value in samples[index]:
+                    key = curve.keyframe_points.insert(scene.frame_start + (frame-clip['start_frame'])*frame_scale,
+                                                       value, options={'FAST'})
+                    key.interpolation = 'CONSTANT' if encoding_step(bindings[hashes[index]]) else 'LINEAR'
+                curve.update()
+            tree.animation_data_create().action = action
+            tree['g4_particle_clock'] = 'G4TP stand'
+            tree['g4_particle_source_fps'] = clip['fps']
+            # The native action replaces the diagnostic range completely.
+            for item in list(tree.interface.items_tree):
+                if item.item_type == 'SOCKET' and item.name in ('Preview Start', 'Preview End'):
+                    tree.interface.remove(item)
+            unused = [node for node in tree.nodes if node.bl_idname != 'NodeGroupOutput'
+                      and not any(socket.is_linked for socket in node.outputs)]
+            while unused:
+                for node in unused:
+                    tree.nodes.remove(node)
+                unused = [node for node in tree.nodes if node.bl_idname != 'NodeGroupOutput'
+                          and not any(socket.is_linked for socket in node.outputs)]
+            return 2
+    return 0

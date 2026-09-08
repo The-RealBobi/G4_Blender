@@ -909,6 +909,14 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
                 uv_end = name_base_bias + u16(data, 0x8A) * 4
                 uv_offset = uv_base + values[7] * 32
                 uv_count = material["texture_ref_count"]
+                uv_hash_base = name_base_bias + u16(data, 0x7A) * 4
+                uv_hash_end = name_base_bias + u16(data, 0x7C) * 4
+                uv_hash_offset = uv_hash_base + values[7] * 4
+                if uv_hash_base <= uv_hash_offset and uv_hash_offset + uv_count * 4 <= uv_hash_end <= len(data):
+                    material["uv_animation_hashes"] = [
+                        u32(data, uv_hash_offset + index * 4) for index in range(uv_count)
+                    ]
+
                 if uv_base <= uv_offset and uv_offset + uv_count * 32 <= uv_end <= len(data):
                     material["uv_matrices"] = [
                         list(struct.unpack_from("<8f", data, uv_offset + index * 32))

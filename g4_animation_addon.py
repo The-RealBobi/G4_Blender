@@ -2081,11 +2081,14 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
     if family_match is None:
         return []
     family = family_match.group(1).lower()
+    available_cuts = {cut for path in directory.glob("*.g4pk")
+                      if (cut := event_cut_name(path)) is not None}
     results = []
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
         family_root = data_root / "common" / "effect" / "event" / family
         event_key = directory.name.lower().replace("_", "")
-        exact_roots = (family_root / event_key, family_root / f"{event_key}0")
+        exact_roots = (family_root / directory.name.lower(), family_root / event_key,
+                       family_root / f"{event_key}0")
         effect_root = next((path for path in exact_roots if path.is_dir()), None)
         if effect_root is None:
             continue
@@ -2101,9 +2104,10 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
             cut = None
             suffix = re.search(r"(\d{5})$", model.stem)
             if suffix:
-                # Effect asset ids encode the first event cut as ...00100,
-                # while the event G4PK timeline begins at c0011.
-                cut = f"c{int(suffix.group(1)) // 10 + 1:04d}"
+                number = int(suffix.group(1)) // 10
+                # Both c0010 and c0011 naming families occur in native events.
+                cut = next((name for name in (f"c{number:04d}", f"c{number + 1:04d}")
+                            if name in available_cuts), None)
             shader_names = set()
             for source in (particle, next(asset_directory.glob("*.objbin"), None)):
                 if source is None:
@@ -2164,7 +2168,7 @@ def configure_event_effect_materials(imported: set[object]) -> list[str]:
             if material is None or material in seen:
                 continue
             seen.add(material)
-            if material.get("g4_effect_preview") in {"T1_STATIC", "T1M1_STATIC", "THRESHOLD_STATIC"}:
+            if material.get("g4_effect_preview") in {"T1_STATIC", "T1M1_STATIC", "THRESHOLD_STATIC", "FAKE_PARTICLE"}:
                 converted.append(material.name)
                 continue
             name = material.name.lower()
@@ -2246,6 +2250,7 @@ def import_event_effect_models(
                     filepath=str(model_path),
                     create_report_text=False,
                     import_character_parts=False,
+                    event_effects=True,
                 )
             except RuntimeError as exc:
                 for obj in set(bpy.data.objects) - before:
@@ -3789,8 +3794,8 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
     )
     import_effects: BoolProperty(
         name="Import Effects",
-        default=False,
-        description="Experimental: load matching assets from data/common/effect/event for this event",
+        default=True,
+        description="Import and animate effects across the complete event",
     )
     import_character_parts: BoolProperty(
         name="Import Body and Shoes",

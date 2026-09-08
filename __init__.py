@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 8, 0),
+    "version": (1, 9, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -775,6 +775,13 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
             for loop in mesh.loops:
                 offset = loop.vertex_index * 4
                 colors1.data[loop.index].color = flat_colors1[offset:offset+4]
+            if len(flat_colors) == len(positions) * 4:
+                controls = mesh.color_attributes.new(
+                    name="G4 Particle Control", type="FLOAT_COLOR", domain="CORNER"
+                )
+                for loop in mesh.loops:
+                    offset = loop.vertex_index * 4
+                    controls.data[loop.index].color = flat_colors[offset:offset + 4]
             mesh.color_attributes.active_color = mesh.color_attributes.get("G4 Outline Parameters") or colors1
 
         if custom_normals:
@@ -3094,6 +3101,7 @@ def import_g4_model(
     create_report_text: bool,
     target_armature=None,
     apply_styling: bool | None = None,
+    event_effects: bool = False,
 ) -> tuple[dict, set[str]]:
     if apply_styling is None:
         apply_styling = is_character_model(path)
@@ -3182,7 +3190,7 @@ def import_g4_model(
                 converted += 1
         debug.append(f"[effects] static texture preview materials={converted}/{len(materials)}")
         effect_source = path.with_suffix(".objbin")
-        if converted and effect_source.is_file():
+        if event_effects and converted and effect_source.is_file():
             from .shading.effect_animation import (
                 animate_effect_uv_loops, animate_effect_material_phases, animate_effect_geometry_phases,
             )
@@ -3201,6 +3209,20 @@ def import_g4_model(
                     debug.append(f"[effects] animated geometry phase strips={strips}")
             except (OSError, ValueError) as error:
                 debug.append(f"[effects] Effect animation unavailable: {error}")
+        from .shading.particle_nodes import build_particle_geometry
+
+        for name in imported_names:
+            obj = bpy.data.objects.get(name)
+            if obj is None or obj.type != 'MESH' or len(obj.data.materials) != 1:
+                continue
+            material = obj.data.materials[0]
+            record = records.get(blender_base_name(material.name)) if material else None
+            if event_effects and record is not None and build_particle_geometry(obj, record, bpy.context.scene):
+                from .shading.effect_animation import animate_particle_texture_clock
+
+                curves = animate_particle_texture_clock(path, obj, record, bpy.context.scene)
+                clock = 'native G4TP stand' if curves else 'explicit preview range'
+                debug.append(f'[effects] {obj.name}: particle geometry with {clock}')
     if apply_styling:
         modifier_count = configure_character_parameter_modifiers(imported_names, force_character=True)
         debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
@@ -4173,6 +4195,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
     )
+    event_effects: BoolProperty(default=False, options={"HIDDEN", "SKIP_SAVE"})
     force_character_styling: BoolProperty(
         default=False,
         options={"HIDDEN", "SKIP_SAVE"},
@@ -4294,6 +4317,7 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                         self.create_report_text,
                         target_armature=target_armature,
                         apply_styling=True if self.force_character_styling else None,
+                        event_effects=self.event_effects,
                     )
                     summaries.append(summary)
                     imported_total += len(imported_names)
@@ -5141,11 +5165,15 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     g4_animation_addon.register()
     g4_port_addon.register()
+    from .shading import particle_nodes
+    particle_nodes.register()
     if refresh_level5_outlines_on_load not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(refresh_level5_outlines_on_load)
 
 
 def unregister():
+    from .shading import particle_nodes
+    particle_nodes.unregister()
     if refresh_level5_outlines_on_load in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(refresh_level5_outlines_on_load)
     g4_animation_addon.unregister()

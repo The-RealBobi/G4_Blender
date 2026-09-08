@@ -274,3 +274,16 @@ the game's lighting, post-processing or every gradient-table variant.
 Existing Game compositor groups update on load. Facial mask gradients no
 longer become triangular dark patches. Block animation imports validate model
 paths separately from skin color.
+
+## Event effects (v1.9.0)
+
+Import the complete event with the batch event importer. **Import Effects** is
+enabled by default there; individual model imports do not start effect animation.
+Effects are assigned to existing event cuts, including both native cut naming
+conventions. T1, T1M1 and ThresholdGrd materials support the reconstructed shader
+paths. Base FakeParticle meshes generate camera-facing particles with embedded
+G4TP stand animation where available. Other particle variants and PTLB simulation
+remain incomplete.
+
+To build the installation ZIP from the tracked runtime files, run
+`python3 build_release.py`. The ZIP is written to `dist/`.
