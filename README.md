@@ -15,6 +15,12 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
+Version 1.9.2 fixes rigid event-effect attachment and plays event-named geometry,
+color, threshold and UV clips during batch import. It also reconstructs the
+six-texture T3ThresholdF variant used by event auras, including its secondary
+vertex colors. Restart Blender and reimport the event to rebuild existing effects.
+Animated mask atlases and scene-depth fading remain unsupported for this shader.
+
 | Area | Capabilities |
 | --- | --- |
 | Models | Import individual assets or folders, create materials, extract textures and assign them automatically. |

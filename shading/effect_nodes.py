@@ -144,7 +144,9 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         def uv(slot):
             node = nodes.new('ShaderNodeUVMap')
             node.uv_map = 'UVMap' if slot == 0 else f'UVMap{slot}'
-            return node.outputs[0]
+            split = nodes.new('ShaderNodeSeparateXYZ')
+            links.new(node.outputs[0], split.inputs[0])
+            return vector(split.outputs[0], split.outputs[1])
 
         def affine(slot, coordinates):
             result = []
@@ -168,8 +170,8 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             # Flipping the native UV origin also flips its negative-Y displacement.
             return tuple(math('SUBTRACT', math('MULTIPLY', split.outputs[i], 2.0), 1.0) for i in range(2))
 
-        flow = flow_direction(sample_texture(5, parameters.textures[5], affine(5, displace(uv(5), (0.0, 0.0), 0.0))))
-        mask_uv = displace(affine(3, displace(uv(3), (0.0, 0.0), 0.0)), flow,
+        flow = flow_direction(sample_texture(5, parameters.textures[5], affine(5, uv(5))))
+        mask_uv = displace(affine(3, uv(3)), flow,
                            math('MULTIPLY', controls.outputs['Alpha'], p[5][0]))
         mask = sample_texture(3, parameters.textures[3], mask_uv)
         direction = flow_direction(mask)

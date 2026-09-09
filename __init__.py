@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 9, 1),
+    "version": (1, 9, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -798,7 +798,7 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
             rigid_joint = mesh_payload.get('rigid_joint')
             if rigid_joint is not None:
                 bone_name = names[rigid_joint]
-                mesh.transform(armature.data.bones[bone_name].matrix_local)
+                mesh.transform(matrix_from_flat(bind_matrices[rigid_joint]))
                 group = obj.vertex_groups.new(name=bone_name)
                 group.add(list(range(len(positions))), 1.0, 'REPLACE')
             palette = mesh_payload.get("joint_palette") or []
