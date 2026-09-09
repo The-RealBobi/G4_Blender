@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 9, 2),
+    "version": (1, 9, 3),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -132,6 +132,7 @@ if __package__:
     from .shading.map_surfaces import classify_map_surface
     from .shading.map_nodes import apply_map_surface_nodes
     from .shading.character_lighting import build_character_lighting, color_transfer
+    from .shading import viewport_outline
     from .shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 else:
     import g4_port_addon
@@ -145,6 +146,7 @@ else:
     from shading.map_surfaces import classify_map_surface
     from shading.map_nodes import apply_map_surface_nodes
     from shading.character_lighting import build_character_lighting, color_transfer
+    from shading import viewport_outline
     from shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 
 if __package__:
@@ -266,6 +268,7 @@ def addon_preferences() -> "G4ImporterPreferences":
         cleanup_import_cache = True
         apply_bone_orientation = True
         outline_mode = "SCREEN"
+        viewport_outlines = False
 
     return Defaults()
 
@@ -407,6 +410,12 @@ class G4ImporterPreferences(AddonPreferences):
         default="SCREEN",
         update=outline_mode_changed,
     )
+    viewport_outlines: BoolProperty(
+        name="Viewport Outlines",
+        description="Draw character outlines in the viewport; final render outlines are controlled separately",
+        default=False,
+        update=outline_mode_changed,
+    )
     outline_thickness: FloatProperty(
         name="Outline Thickness",
         description="Main character silhouette thickness in render pixels; internal lines scale proportionally",
@@ -469,6 +478,7 @@ class G4ImporterPreferences(AddonPreferences):
         import_box.prop(self, "cleanup_import_cache")
         import_box.prop(self, "apply_bone_orientation")
         import_box.prop(self, "outline_mode")
+        import_box.prop(self, "viewport_outlines")
         thickness_row = import_box.row()
         thickness_row.enabled = self.outline_mode != "OFF"
         thickness_row.prop(self, "outline_thickness")
@@ -2094,61 +2104,67 @@ CHARACTER_TEXTURE_NODE_SLOTS = (
 def character_parameter_node_group():
     name = "Level-5 Character Parameters"
     group = bpy.data.node_groups.get(name)
+    if group is not None and group.get("g4_parameter_schema") == 4:
+        return group
+    preserve_interface = group is not None and group.get("g4_parameter_schema") == 3
     if group is None:
         group = bpy.data.node_groups.new(name, "GeometryNodeTree")
-    elif group.get("g4_parameter_schema") != 3:
-        group.nodes.clear()
+    group.nodes.clear()
+    if preserve_interface:
+        inputs = {item.name: item for item in group.interface.items_tree
+                  if item.item_type == "SOCKET" and item.in_out == "INPUT"}
+        geometry_in = inputs["Geometry"]
+        geometry_out = next(item for item in group.interface.items_tree
+                            if item.item_type == "SOCKET" and item.in_out == "OUTPUT")
+        sockets = [inputs[item[0]] for item in (*CHARACTER_PARAMETER_SOCKETS, *CHARACTER_MASK_COLOR_SOCKETS)]
+    else:
         for item in tuple(group.interface.items_tree):
             group.interface.remove(item)
-
-    if group.get("g4_parameter_schema") == 3:
-        return group
-
-    geometry_in = group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
-    geometry_out = group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
-    sockets = []
-    for label, _, default, minimum, maximum in CHARACTER_PARAMETER_SOCKETS:
-        socket = group.interface.new_socket(name=label, in_out="INPUT", socket_type="NodeSocketFloat")
-        socket.default_value = default
-        socket.min_value = minimum
-        socket.max_value = maximum
-        sockets.append(socket)
-    mask_panel = group.interface.new_panel(name="Mask Recolor")
-    for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
-        socket = group.interface.new_socket(
-            name=label,
-            in_out="INPUT",
-            socket_type="NodeSocketColor",
-            parent=mask_panel,
-        )
-        socket.default_value = default
-        sockets.append(socket)
+        geometry_in = group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        geometry_out = group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        sockets = []
+        for label, _, default, minimum, maximum in CHARACTER_PARAMETER_SOCKETS:
+            socket = group.interface.new_socket(name=label, in_out="INPUT", socket_type="NodeSocketFloat")
+            socket.default_value = default
+            socket.min_value = minimum
+            socket.max_value = maximum
+            sockets.append(socket)
+        mask_panel = group.interface.new_panel(name="Mask Recolor")
+        for label, _, default in CHARACTER_MASK_COLOR_SOCKETS:
+            socket = group.interface.new_socket(
+                name=label,
+                in_out="INPUT",
+                socket_type="NodeSocketColor",
+                parent=mask_panel,
+            )
+            socket.default_value = default
+            sockets.append(socket)
 
     input_node = group.nodes.new("NodeGroupInput")
-    input_node.location = (-520, 0)
     output_node = group.nodes.new("NodeGroupOutput")
-    output_node.location = (420, 0)
     geometry = input_node.outputs[geometry_in.identifier]
-    attribute_sockets = [
-        (label, attribute_name, "FLOAT", socket)
-        for (label, attribute_name, _, _, _), socket in zip(CHARACTER_PARAMETER_SOCKETS, sockets)
-    ]
-    attribute_sockets.extend(
-        (label, attribute_name, "FLOAT_COLOR", socket)
-        for (label, attribute_name, _), socket in zip(CHARACTER_MASK_COLOR_SOCKETS, sockets[len(CHARACTER_PARAMETER_SOCKETS):])
-    )
-    for index, (label, attribute_name, data_type, socket) in enumerate(attribute_sockets):
+    values = []
+    # Packing reduces per-mesh attribute buffers without changing modifier sockets.
+    for start in range(0, len(CHARACTER_PARAMETER_SOCKETS), 4):
+        combine = group.nodes.new("FunctionNodeCombineColor")
+        combine.mode = "RGB"
+        for component, socket in enumerate(sockets[start:min(start + 4, len(CHARACTER_PARAMETER_SOCKETS))]):
+            group.links.new(input_node.outputs[socket.identifier], combine.inputs[component])
+        values.append((f"g4_character_controls_{start // 4}", combine.outputs[0]))
+    values.extend((attribute_name, input_node.outputs[socket.identifier])
+                  for (_, attribute_name, _), socket in
+                  zip(CHARACTER_MASK_COLOR_SOCKETS, sockets[len(CHARACTER_PARAMETER_SOCKETS):]))
+    for index, (attribute_name, value) in enumerate(values):
         store = group.nodes.new("GeometryNodeStoreNamedAttribute")
-        store.data_type = data_type
+        store.data_type = "FLOAT_COLOR"
         store.domain = "POINT"
-        store.label = label
-        store.location = (-300 + index * 100, -index * 90)
+        store.location = (-300 + index * 180, -index * 90)
         store.inputs["Name"].default_value = attribute_name
         group.links.new(geometry, store.inputs["Geometry"])
-        group.links.new(input_node.outputs[socket.identifier], store.inputs["Value"])
+        group.links.new(value, store.inputs["Value"])
         geometry = store.outputs["Geometry"]
     group.links.new(geometry, output_node.inputs[geometry_out.identifier])
-    group["g4_parameter_schema"] = 3
+    group["g4_parameter_schema"] = 4
     return group
 
 
@@ -2204,6 +2220,20 @@ def apply_character_skin_mask_color(objects, color: tuple[float, float, float, f
 
 
 def character_shader_attribute(material, label: str, attribute_name: str, color: bool = False):
+    if not color:
+        index = next(i for i, item in enumerate(CHARACTER_PARAMETER_SOCKETS) if item[1] == attribute_name)
+        nodes = material.node_tree.nodes
+        name = f"G4 Packed Controls {index // 4}"
+        attribute = nodes.get(name) or nodes.new("ShaderNodeAttribute")
+        attribute.name = name
+        attribute.attribute_name = f"g4_character_controls_{index // 4}"
+        if index % 4 == 3:
+            return attribute.outputs["Alpha"]
+        components = nodes.get(name + " Components") or nodes.new("ShaderNodeSeparateColor")
+        components.name = name + " Components"
+        components.mode = "RGB"
+        material.node_tree.links.new(attribute.outputs["Color"], components.inputs[0])
+        return components.outputs[index % 4]
     nodes = material.node_tree.nodes
     node_name = f"G4 Control {label}"
     node = nodes.get(node_name) or nodes.new("ShaderNodeAttribute")
@@ -2229,10 +2259,10 @@ def connect_character_parameter_material(material) -> None:
     for label, attribute_name, _, _, _ in CHARACTER_PARAMETER_SOCKETS:
         source = character_shader_attribute(material, label, attribute_name)
         if label == "Wetness":
-            wetness = nodes.get("G4 Wetness")
-            if wetness is not None:
-                for link in tuple(wetness.outputs[0].links):
-                    links.new(source, link.to_socket)
+            for name in ("G4 Wet Diffuse", "G4 Wet Composite"):
+                target = nodes.get(name)
+                if target is not None:
+                    links.new(source, target.inputs[0])
             continue
         target_spec = targets.get(label)
         if target_spec is None:
@@ -2247,6 +2277,10 @@ def connect_character_parameter_material(material) -> None:
         tint = nodes.get(f"G4 Mask {channel} Tint")
         if tint is not None:
             links.new(character_shader_attribute(material, label, attribute_name, color=True), tint.inputs[2])
+
+    for node in tuple(nodes):
+        if node.name.startswith("G4 Control ") and node.type == "ATTRIBUTE" and not any(output.is_linked for output in node.outputs):
+            nodes.remove(node)
 
 
 def material_uses_character_shader(material) -> bool:
@@ -2933,9 +2967,11 @@ def configure_game_outlines(imported_names, debug=None):
             scene.render.use_freestyle = False
     width = float(getattr(addon_preferences(), "outline_thickness", 1.65)) / 1.65
     configured = configure_screen_outline(scene, bpy.context.view_layer, width)
+    enabled = bool(getattr(addon_preferences(), "viewport_outlines", False))
+    viewport_outline.configure(scene, enabled, width)
     configure_viewport_outlines(imported_names, False, debug)
     if debug is not None:
-        debug.append(f"[outline] screen-space character render={configured}; viewport uses object silhouette")
+        debug.append(f"[outline] screen-space character render={configured}; viewport surface outlines={enabled}")
     return configured
 
 
@@ -2949,6 +2985,7 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
     if mode in {"SCREEN", "HULL"}:
         return configure_game_outlines({obj.name for obj in scene.objects if obj.type == "MESH"})
     remove_screen_outline(scene)
+    viewport_outline.configure(scene, False, 1.0)
     settings = getattr(view_layer, "freestyle_settings", None)
     if settings is None:
         return False
@@ -3006,6 +3043,12 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
 
 @persistent
 def refresh_level5_outlines_on_load(_unused) -> None:
+    viewport_outline.unregister()
+    g4_animation_addon.migrate_event_light_visibility(bpy.context.scene)
+    if bpy.data.node_groups.get("Level-5 Character Parameters") is not None:
+        character_parameter_node_group()
+        for material in bpy.data.materials:
+            connect_character_parameter_material(material)
     refresh_existing_level5_outlines()
 
 
@@ -3028,7 +3071,7 @@ def configure_viewport_outlines(
             for space in area.spaces:
                 if space.type != "VIEW_3D":
                     continue
-                space.shading.show_object_outline = True
+                space.shading.show_object_outline = bool(getattr(addon_preferences(), "viewport_outlines", False))
                 space.shading.object_outline_color = (0.018, 0.012, 0.018)
                 if detailed:
                     space.shading.show_cavity = True
@@ -5190,6 +5233,7 @@ def register():
 
 
 def unregister():
+    viewport_outline.unregister()
     from .shading import particle_nodes
     particle_nodes.unregister()
     if refresh_level5_outlines_on_load in bpy.app.handlers.load_post:

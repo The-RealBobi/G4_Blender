@@ -223,7 +223,10 @@ def _particle_material(material: bpy.types.Material, image: bpy.types.Image, add
     links.new(emission.outputs[0], blend.inputs[-1])
     output = nodes.new('ShaderNodeOutputMaterial')
     links.new(blend.outputs[0], output.inputs[0])
-    material.surface_render_method = 'BLENDED'
+    if hasattr(material, 'surface_render_method'):
+        material.surface_render_method = 'BLENDED'
+    else:
+        material.blend_method = 'BLEND'
     material['g4_effect_preview'] = 'FAKE_PARTICLE'
 
 

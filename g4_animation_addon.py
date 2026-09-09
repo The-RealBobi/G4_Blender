@@ -2209,7 +2209,10 @@ def configure_event_effect_materials(imported: set[object]) -> list[str]:
                 links.new(texture.outputs["Alpha"], mix.inputs[0])
             else:
                 mix.inputs[0].default_value = 0.85
-            material.surface_render_method = "DITHERED"
+            if hasattr(material, "surface_render_method"):
+                material.surface_render_method = "DITHERED"
+            else:
+                material.blend_method = "HASHED"
             material["g4_effect_shader_family"] = (
                 "threshold" if "threshold" in name else "basic"
             )
@@ -2359,6 +2362,38 @@ SOURCE_TO_BLENDER = Matrix(
 )
 
 
+def migrate_event_light_visibility(scene) -> int:
+    updated = 0
+    for obj in scene.objects:
+        if obj.type != "LIGHT" or obj.get("g4_viewport_light_visibility") == 1:
+            continue
+        native = obj.get("g4_event_light") or any(
+            re.fullmatch(r"ev\d+_\d+ Event Lights(?:\.\d+)?", collection.name)
+            for collection in obj.users_collection
+        )
+        animation = obj.animation_data
+        if not native or animation is None or animation.action is None:
+            continue
+        curves = tuple(action_fcurves(animation.action))
+        if any(curve.data_path == "hide_viewport" for curve in curves):
+            continue
+        source = next((curve for curve in curves if curve.data_path == "hide_render"), None)
+        if source is None:
+            continue
+        for point in source.keyframe_points:
+            obj.hide_viewport = bool(point.co[1])
+            obj.keyframe_insert("hide_viewport", frame=point.co[0])
+        for curve in action_fcurves(animation.action):
+            if curve.data_path == "hide_viewport":
+                for point in curve.keyframe_points:
+                    point.interpolation = "CONSTANT"
+        obj.hide_viewport = obj.hide_render
+        obj["g4_event_light"] = True
+        obj["g4_viewport_light_visibility"] = 1
+        updated += 1
+    return updated
+
+
 def import_event_character_lighting(directory: Path, cut_starts: dict[str, int]):
     light_directory = directory / f"{directory.name}_light"
     if not light_directory.is_dir():
@@ -2506,6 +2541,8 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         )
         light_data.use_shadow = True
         light_object = bpy.data.objects.new(light_data.name, light_data)
+        light_object["g4_event_light"] = True
+        light_object["g4_viewport_light_visibility"] = 1
         light_collection.objects.link(light_object)
         light_objects.append(light_object)
         light_data_blocks.append(light_data)
@@ -2515,7 +2552,9 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         for index, (light_object, light_data) in enumerate(zip(light_objects, light_data_blocks)):
             slot = slots_by_id.get(light_keys[index])
             light_object.hide_render = slot is None
+            light_object.hide_viewport = slot is None
             light_object.keyframe_insert("hide_render", frame=frame)
+            light_object.keyframe_insert("hide_viewport", frame=frame)
             if slot is None:
                 continue
             direction = slot.get("direction")

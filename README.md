@@ -15,11 +15,23 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
-Version 1.9.2 fixes rigid event-effect attachment and plays event-named geometry,
-color, threshold and UV clips during batch import. It also reconstructs the
-six-texture T3ThresholdF variant used by event auras, including its secondary
-vertex colors. Restart Blender and reimport the event to rebuild existing effects.
-Animated mask atlases and scene-depth fading remain unsupported for this shader.
+Version 1.9.3 restores character shader construction on Blender 4.1 and adds
+Game outlines to Material Preview and Rendered viewports. Character parameters
+use fewer geometry attribute buffers to avoid a Metal shader resource limit;
+existing modifier controls and values are preserved when opening saved scenes.
+The viewport caches topology and outline colors while updating deformed positions
+and normals. Final renders retain the compositor outline pass. Alpha-cutout
+occluders are not sampled by the viewport surface pass, so some intersections can
+differ from final renders. Dense animated scenes still incur geometry update cost.
+Viewport Outlines is an independent preference and is off by default. Event
+lights now follow the same cut visibility in the viewport and final render;
+existing imported event-light animation is migrated when reopening a scene.
+Restart Blender after updating.
+
+Event batch import retains the rigid attachment, color, threshold and UV animation
+fixes from 1.9.2. Animated mask atlases and scene-depth fading remain unsupported
+for T3ThresholdF. Legacy-version validation here covers character shading, not all
+particle geometry variants.
 
 | Area | Capabilities |
 | --- | --- |

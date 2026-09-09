@@ -37,7 +37,8 @@ def add_outline_outputs(nodes: bpy.types.Nodes, links: bpy.types.NodeLinks) -> N
     ):
         node = nodes.new("ShaderNodeOutputAOV")
         node.name = name
-        node.aov_name = name
+        if hasattr(node, "aov_name"):
+            node.aov_name = name
         if source is None:
             node.inputs[kind].default_value = 1.0
         else:
