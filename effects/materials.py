@@ -8,6 +8,7 @@ import zlib
 T1_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in ('Effect_T1', 'Effect_T1_low'))
 T1M1_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in ('Effect_T1M1', 'Effect_T1M1_low'))
 THRESHOLD_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in ('Effect_ThresholdGrd', 'Effect_ThresholdGrd_low'))
+T3_THRESHOLD_SHADER_HASH = zlib.crc32(b'Effect_T3ThresholdF')
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,8 @@ def static_effect_material(record: dict) -> EffectMaterial | None:
         texture_count = 2
     elif shader in THRESHOLD_SHADER_HASHES:
         texture_count = 3
+    elif shader == T3_THRESHOLD_SHADER_HASH:
+        texture_count = 6
     else:
         return None
     colors = record.get('native_colors')
@@ -46,6 +49,11 @@ def static_effect_material(record: dict) -> EffectMaterial | None:
     states = dict(record.get('render_states', []))
     references = record.get('texture_refs', [])
     threshold = None
+    if texture_count == 6:
+        parameters = record.get('shader_parameters', [])
+        if (len(parameters) < 7 or any(len(row) != 4 for row in parameters[:7])
+                or parameters[3][2:] != [1.0, 1.0] or parameters[5][2] != 0.0):
+            return None
     if texture_count == 3:
         parameters = record.get('shader_parameters', [])
         if len(parameters) < 3 or any(len(row) != 4 for row in parameters[:3]):

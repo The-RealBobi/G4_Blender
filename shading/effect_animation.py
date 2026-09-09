@@ -1,5 +1,6 @@
 """Apply native UV loops, material colors and geometry clips to effect previews."""
 from pathlib import Path
+import re
 import tempfile
 
 import bpy
@@ -90,19 +91,26 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
         for path in material_animation_paths(model, Path(temporary)):
             parsed = parse_g4mt(path)
             clips = {clip['name']: clip for clip in parsed['clips']}
-            if not {'in', 'loop', 'out'} <= clips.keys() or any(clips[name]['flags'] & 1 for name in ('in','loop','out')):
+            event_clip = next(iter(clips.values())) if len(clips) == 1 else None
+            is_event = event_clip is not None and re.fullmatch(r'c\d{4}', event_clip['name'])
+            names = (event_clip['name'],) if is_event else ('in', 'loop', 'out')
+            if not set(names) <= clips.keys() or any(clips[name]['flags'] & 1 for name in names):
                 continue
-            phases = effect_phases(clips, scene.frame_start, scene.frame_end, scene.render.fps/scene.render.fps_base)
+            phases = None if is_event else effect_phases(clips, scene.frame_start, scene.frame_end, scene.render.fps/scene.render.fps_base)
             data = path.read_bytes()
             channels = {}
-            for name in ('in', 'loop', 'out'):
+            for name in names:
                 clip = clips[name]
                 channels[name] = {}
                 for info in parsed['target_infos'][clip['target_info_start']:clip['target_info_start']+clip['target_info_count']]:
                     crc = int(parsed['targets'][info['target_index']]['crc32b'], 16)
-                    channels[name][crc] = {c['channel_type']-16: c for c in parsed['channels'][info['channel_start']:info['channel_start']+info['channel_count']]
-                                          if 16 <= c['channel_type'] <= 19 and c['encoding'][7] == 0 and c['encoding'][4] == 1}
-            frames = sorted(set(range(scene.frame_start, scene.frame_end+1)) | {phases.entry_end, phases.exit_start})
+                    channels[name][crc] = {
+                        (c['channel_type']-16 if c['channel_type'] < 32 else (c['encoding'][7], c['channel_type']-32)): c
+                        for c in parsed['channels'][info['channel_start']:info['channel_start']+info['channel_count']]
+                        if c['encoding'][4] == 1 and
+                        ((16 <= c['channel_type'] <= 19 and c['encoding'][7] == 0) or 32 <= c['channel_type'] <= 35)}
+            frames = sorted(set(range(scene.frame_start, scene.frame_end+1)) |
+                            ({phases.entry_end, phases.exit_start} if phases else set()))
             for material in materials:
                 if not material.get('g4_effect_preview') or not material.use_nodes:
                     continue
@@ -111,10 +119,12 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
                 if animation and (animation.nla_tracks or (animation.action and not animation.action.get('g4_effect_animation'))):
                     continue
                 crc = material_crc32b(material)
-                for component in range(4):
-                    if not all(component in channels[name].get(crc,{}) for name in ('in','loop','out')):
+                inputs = [(i, f'Effect Diffuse {"RGBA"[i]}') for i in range(4)]
+                inputs += [((i, j), f'Effect Parameter {i} {"XYZW"[j]}') for i in range(8) for j in range(4)]
+                for component, node_name in inputs:
+                    if not all(component in channels[name].get(crc,{}) for name in names):
                         continue
-                    node = tree.nodes.get(f'Effect Diffuse {"RGBA"[component]}')
+                    node = tree.nodes.get(node_name)
                     if node is None:
                         continue
                     animation = tree.animation_data_create()
@@ -126,7 +136,13 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
                         continue
                     curve = action_fcurve_new(animation.action, tree, data_path, 0, 'Effect Color')
                     for frame in frames:
-                        name, source_frame = phase_source_frame(phases, clips, frame)
+                        if phases is None:
+                            name = event_clip['name']
+                            source_frame = min(event_clip['end_frame'], event_clip['start_frame'] +
+                                               (frame-scene.frame_start) * (event_clip['fps'] or 60) *
+                                               scene.render.fps_base / scene.render.fps)
+                        else:
+                            name, source_frame = phase_source_frame(phases, clips, frame)
                         channel = channels[name][crc][component]
                         value = sample_channel(data, parsed['section_offsets']['data'], channel,
                                                parsed['scales'][channel['encoding'][6]], source_frame)[0]
@@ -139,7 +155,7 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
                     tree.animation_data.action = None
                     tree.animation_data.action = action
             source = model.with_suffix('.objbin')
-            if source.is_file():
+            if phases is not None and source.is_file():
                 count += animate_effect_random_offsets(source, materials, phases, clips)
     return count
 
@@ -165,6 +181,23 @@ def animate_effect_geometry_phases(model: Path, armature: bpy.types.Object, scen
             path = Path(temporary)/f'{index}.g4mt'
             path.write_bytes(data[offset:offset+size])
             clips = {clip['name']:clip for clip in parse_g4mt(path)['clips']}
+            event_clip = next(iter(clips.values())) if len(clips) == 1 else None
+            if event_clip is not None and re.fullmatch(r'c\d{4}', event_clip['name']):
+                if event_clip['flags'] & 1 or event_clip['end_frame'] <= event_clip['start_frame']:
+                    continue
+                motion = decode_motion(path, event_clip['name'], skeleton)
+                action, keyed = create_action(armature, motion)
+                armature.animation_data.action = None
+                track = armature.animation_data.nla_tracks.new()
+                track.name = 'Effect Event'
+                strip = track.strips.new(event_clip['name'], scene.frame_start, action)
+                strip.action_frame_start = 1
+                strip.action_frame_end = event_clip['frame_count']
+                strip.scale = scene.render.fps / scene.render.fps_base / (event_clip['fps'] or 60)
+                strip.blend_type = 'REPLACE'
+                strip.extrapolation = 'HOLD_FORWARD'
+                scene.frame_set(scene.frame_current)
+                return 1
             if not {'in','loop','out'} <= clips.keys() or any(clips[name]['flags'] & 1 for name in ('in','loop','out')):
                 continue
             phases = effect_phases(clips,scene.frame_start,scene.frame_end,scene.render.fps/scene.render.fps_base)
@@ -326,3 +359,60 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
                           and not any(socket.is_linked for socket in node.outputs)]
             return 2
     return 0
+
+
+def animate_event_texture_clip(model: Path, materials: list[bpy.types.Material], records: dict,
+                               scene: bpy.types.Scene) -> int:
+    """Bind event UV translations through the material's native target hashes."""
+    from ..g4ma_motion import texture_animation_paths
+    from ..g4mt_motion import sample_channel, encoding_step
+    from ..g4_animation_addon import action_fcurve_new, action_fcurve_find
+    from .. import blender_base_name
+
+    count = 0
+    with tempfile.TemporaryDirectory(prefix='g4_event_uv_') as temporary:
+        for path in texture_animation_paths(model, Path(temporary)):
+            parsed = parse_g4mt(path)
+            if len(parsed['clips']) != 1:
+                continue
+            clip = parsed['clips'][0]
+            if not re.fullmatch(r'c\d{4}', clip['name']) or clip['flags'] & 1:
+                continue
+            channels = {}
+            for info in parsed['target_infos'][clip['target_info_start']:clip['target_info_start']+clip['target_info_count']]:
+                crc = int(parsed['targets'][info['target_index']]['crc32b'], 16)
+                channels[crc] = parsed['channels'][info['channel_start']:info['channel_start']+info['channel_count']]
+            data = path.read_bytes()
+            for material in materials:
+                if not material.get('g4_effect_preview'):
+                    continue
+                tree = material.node_tree
+                animation = tree.animation_data_create()
+                if animation.nla_tracks or (animation.action and not animation.action.get('g4_effect_animation')):
+                    continue
+                for slot, crc in enumerate(records.get(blender_base_name(material.name), {}).get('uv_animation_hashes', [])):
+                    for channel in channels.get(crc, []):
+                        axis = channel['channel_type']-10
+                        if axis not in (0, 1) or channel['encoding'][4] != 1 or channel['encoding'][7] != 0:
+                            continue
+                        node = tree.nodes.get(f'Effect UV {slot} Row {axis}')
+                        if node is None or node.inputs[1].default_value[1-axis] != 0:
+                            continue
+                        socket = node.inputs[1]
+                        if animation.action is None:
+                            animation.action = bpy.data.actions.new(f'Event UV {material.name}')
+                            animation.action['g4_effect_animation'] = True
+                        target = socket.path_from_id('default_value')
+                        if action_fcurve_find(animation.action, target, 2) is not None:
+                            continue
+                        curve = action_fcurve_new(animation.action, tree, target, 2, 'Effect UV')
+                        scale = -socket.default_value[axis]
+                        for frame in range(clip['start_frame'], clip['end_frame']+1):
+                            value = sample_channel(data, parsed['section_offsets']['data'], channel,
+                                                   parsed['scales'][channel['encoding'][6]], frame)[0]
+                            time = scene.frame_start+(frame-clip['start_frame'])*scene.render.fps/scene.render.fps_base/(clip['fps'] or 60)
+                            key = curve.keyframe_points.insert(time, scale*value, options={'FAST'})
+                            key.interpolation = 'CONSTANT' if encoding_step(channel) else 'LINEAR'
+                        curve.update()
+                        count += 1
+    return count

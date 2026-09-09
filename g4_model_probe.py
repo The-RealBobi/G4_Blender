@@ -3875,7 +3875,7 @@ def read_skin_influences(
                     influences.append([])
             return influences
 
-    if vertex_stride < 0x3C:
+    if layout is not None or vertex_stride < 0x3C:
         return [[] for _ in range(vertex_count)]
     for vertex_index in range(vertex_count):
         off = vertex_offset + vertex_index * vertex_stride
@@ -4959,6 +4959,9 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         texcoords: list[float] = []
         texcoords1: list[float] = []
         texcoords2: list[float] = []
+        extra_uvs = {channel: [] for channel in (3, 4, 5)
+                     if "effect" in {part.lower() for part in path.parts}
+                     and layout_element(layout_for_record(md_info, record), 10 + channel) is not None}
         uv1_element = layout_element(layout_for_record(md_info, record), 11) if "effect" in {part.lower() for part in path.parts} else None
         uv2_element = layout_element(layout_for_record(md_info, record), 12) if uv1_element is not None else None
         vertex_colors: list[float] = []
@@ -4972,6 +4975,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             position_tuples.append(position)
             positions.extend(position)
             texcoords.extend(read_uv0(g4mg, md_info, record, vertex_index))
+            for channel, values in extra_uvs.items():
+                values.extend(read_uv_channel(g4mg, md_info, record, vertex_index, channel))
             if uv1_element is not None:
                 texcoords1.extend(read_uv_channel(g4mg, md_info, record, vertex_index, 1))
             if uv2_element is not None:
@@ -5148,6 +5153,13 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
         if joint_palette_override is not None:
             joint_palette = joint_palette_override
             skin_mode = "rigid_face_head_override"
+        rigid_joint = None
+        layout = layout_for_record(md_info, record)
+        if ("effect" in {part.lower() for part in path.parts} and skeleton_info is not None
+                and layout is not None and not joint_palette
+                and layout_element(layout, 5) is None and layout_element(layout, 6) is None
+                and 0 <= record['name_index'] < len(skeleton_info['names'])):
+            rigid_joint = record['name_index']
         p: list[int] = []
         for index in indices:
             p.extend((index, index, index, index))
@@ -5167,6 +5179,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "texcoords": texcoords,
                 "texcoords1": texcoords1,
                 "texcoords2": texcoords2,
+                "extra_uvs": extra_uvs,
+                "rigid_joint": rigid_joint,
                 "vertex_colors": vertex_colors,
                 "vertex_colors1": vertex_colors1,
                 "color_offset": color_offset,
@@ -5205,6 +5219,8 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
                 "texcoords": payload["texcoords"],
                 "texcoords1": payload["texcoords1"],
                 "texcoords2": payload["texcoords2"],
+                **{f"texcoords{channel}": values for channel, values in payload['extra_uvs'].items()},
+                "rigid_joint": payload['rigid_joint'],
                 "vertex_colors": payload["vertex_colors"],
                 "vertex_colors1": payload["vertex_colors1"],
                 "indices": payload["triangle_indices"],

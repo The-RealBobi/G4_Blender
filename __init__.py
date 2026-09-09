@@ -752,7 +752,7 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
                 uv_layer.data[loop.index].uv = flat_uvs[offset : offset + 2]
 
         flat_colors = mesh_payload.get("vertex_colors") or []
-        for channel in (1, 2):
+        for channel in (1, 2, 3, 4, 5):
             flat_uvs_extra = mesh_payload.get(f"texcoords{channel}") or []
             if len(flat_uvs_extra) >= len(positions) * 2:
                 uv_layer = mesh.uv_layers.new(name=f"UVMap{channel}")
@@ -795,6 +795,12 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
             mesh.materials.append(materials[material_name])
 
         if armature is not None:
+            rigid_joint = mesh_payload.get('rigid_joint')
+            if rigid_joint is not None:
+                bone_name = names[rigid_joint]
+                mesh.transform(armature.data.bones[bone_name].matrix_local)
+                group = obj.vertex_groups.new(name=bone_name)
+                group.add(list(range(len(positions))), 1.0, 'REPLACE')
             palette = mesh_payload.get("joint_palette") or []
             palette_base = int(mesh_payload.get("palette_base") or 0)
             influences = mesh_payload.get("skin_influences") or []
@@ -3131,7 +3137,7 @@ def import_g4_model(
     if native_path is not None and native_path.is_file():
         imported_names = import_native_g4_mesh(
             native_path,
-            custom_normals=apply_styling,
+            custom_normals=apply_styling or "effect" in {part.lower() for part in path.parts},
             target_armature=target_armature,
         )
         import_method = "native"
@@ -3192,7 +3198,7 @@ def import_g4_model(
         effect_source = path.with_suffix(".objbin")
         if event_effects and converted and effect_source.is_file():
             from .shading.effect_animation import (
-                animate_effect_uv_loops, animate_effect_material_phases, animate_effect_geometry_phases,
+                animate_effect_uv_loops,
             )
 
             try:
@@ -3200,15 +3206,27 @@ def import_g4_model(
                     effect_source, list(materials), bpy.context.scene, bpy.context.scene.frame_start
                 )
                 debug.append(f"[effects] animated UV loop curves={curves}")
-                phase_curves = animate_effect_material_phases(path, list(materials), bpy.context.scene)
-                debug.append(f"[effects] animated entry/loop/exit color curves={phase_curves}")
-                armatures = [obj for name in imported_names if (obj := bpy.data.objects.get(name)) is not None
-                             and obj.type == "ARMATURE"]
-                if len(armatures) == 1:
-                    strips = animate_effect_geometry_phases(path, armatures[0], bpy.context.scene)
-                    debug.append(f"[effects] animated geometry phase strips={strips}")
             except (OSError, ValueError) as error:
                 debug.append(f"[effects] Effect animation unavailable: {error}")
+        if event_effects:
+            from .shading.effect_animation import animate_effect_geometry_phases, animate_effect_material_phases, animate_event_texture_clip
+
+            try:
+                curves = animate_effect_material_phases(path, list(materials), bpy.context.scene)
+                debug.append(f"[effects] animated color curves={curves}")
+                curves = animate_event_texture_clip(path, list(materials), records, bpy.context.scene)
+                debug.append(f"[effects] animated event UV curves={curves}")
+            except (OSError, ValueError) as error:
+                debug.append(f"[effects] Effect color animation unavailable: {error}")
+
+            armatures = [obj for name in imported_names if (obj := bpy.data.objects.get(name)) is not None
+                         and obj.type == "ARMATURE"]
+            if len(armatures) == 1:
+                try:
+                    strips = animate_effect_geometry_phases(path, armatures[0], bpy.context.scene)
+                    debug.append(f"[effects] animated geometry strips={strips}")
+                except (OSError, ValueError) as error:
+                    debug.append(f"[effects] Effect geometry animation unavailable: {error}")
         from .shading.particle_nodes import build_particle_geometry
 
         for name in imported_names:

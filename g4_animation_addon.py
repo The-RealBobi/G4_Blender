@@ -2168,7 +2168,7 @@ def configure_event_effect_materials(imported: set[object]) -> list[str]:
             if material is None or material in seen:
                 continue
             seen.add(material)
-            if material.get("g4_effect_preview") in {"T1_STATIC", "T1M1_STATIC", "THRESHOLD_STATIC", "FAKE_PARTICLE"}:
+            if material.get("g4_effect_preview") in {"T1_STATIC", "T1M1_STATIC", "THRESHOLD_STATIC", "T3_THRESHOLD", "FAKE_PARTICLE"}:
                 converted.append(material.name)
                 continue
             name = material.name.lower()

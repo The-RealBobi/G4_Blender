@@ -119,7 +119,96 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         links.new(texture.outputs['Color'], channels.inputs[0])
         return channels.outputs['Red']
 
-    if parameters.threshold is not None:
+    if len(parameters.textures) == 6:
+        p = record['shader_parameters']
+        animated_parameters = {}
+        for index in (1, 2):
+            node = nodes.new('ShaderNodeValue')
+            node.name = f'Effect Parameter {index} Y'
+            node.outputs[0].default_value = p[index][1]
+            animated_parameters[index] = node.outputs[0]
+        controls = nodes.new('ShaderNodeVertexColor')
+        controls.layer_name = 'G4 Particle Color'
+        channels = nodes.new('ShaderNodeSeparateColor')
+        links.new(controls.outputs['Color'], channels.inputs[0])
+
+        def vector(x, y):
+            node = nodes.new('ShaderNodeCombineXYZ')
+            for socket, value in zip(node.inputs, (x, y, 1.0)):
+                if isinstance(value, (int, float)):
+                    socket.default_value = value
+                else:
+                    links.new(value, socket)
+            return node.outputs[0]
+
+        def uv(slot):
+            node = nodes.new('ShaderNodeUVMap')
+            node.uv_map = 'UVMap' if slot == 0 else f'UVMap{slot}'
+            return node.outputs[0]
+
+        def affine(slot, coordinates):
+            result = []
+            for axis, row in enumerate(parameters.textures[slot].uv_rows):
+                dot = nodes.new('ShaderNodeVectorMath')
+                dot.operation = 'DOT_PRODUCT'
+                dot.name = f'Effect UV {slot} Row {axis}'
+                links.new(coordinates, dot.inputs[0])
+                dot.inputs[1].default_value = row
+                result.append(dot.outputs['Value'])
+            return vector(*result)
+
+        def displace(coordinates, direction, amount):
+            split = nodes.new('ShaderNodeSeparateXYZ')
+            links.new(coordinates, split.inputs[0])
+            return vector(*(math('ADD', split.outputs[i], math('MULTIPLY', direction[i], amount)) for i in range(2)))
+
+        def flow_direction(texture):
+            split = nodes.new('ShaderNodeSeparateColor')
+            links.new(texture.outputs['Color'], split.inputs[0])
+            # Flipping the native UV origin also flips its negative-Y displacement.
+            return tuple(math('SUBTRACT', math('MULTIPLY', split.outputs[i], 2.0), 1.0) for i in range(2))
+
+        flow = flow_direction(sample_texture(5, parameters.textures[5], affine(5, displace(uv(5), (0.0, 0.0), 0.0))))
+        mask_uv = displace(affine(3, displace(uv(3), (0.0, 0.0), 0.0)), flow,
+                           math('MULTIPLY', controls.outputs['Alpha'], p[5][0]))
+        mask = sample_texture(3, parameters.textures[3], mask_uv)
+        direction = flow_direction(mask)
+        color_uv = displace(uv(0), flow, math('MULTIPLY', controls.outputs['Alpha'], p[4][3]))
+        color_uv = affine(0, displace(color_uv, direction, p[4][1]))
+        coverage_uv = displace(uv(4), direction, p[4][2])
+        coverage_uv = affine(4, displace(coverage_uv, flow, math('MULTIPLY', controls.outputs['Alpha'], p[5][1])))
+        coverage = red(sample_texture(4, parameters.textures[4], coverage_uv))
+        geometry = nodes.new('ShaderNodeNewGeometry')
+        dot = nodes.new('ShaderNodeVectorMath')
+        dot.operation = 'DOT_PRODUCT'
+        links.new(geometry.outputs['Normal'], dot.inputs[0])
+        links.new(geometry.outputs['Incoming'], dot.inputs[1])
+        facing_range = min(max(p[5][3] + p[6][0], 0.0), 1.0)
+        facing = math('MINIMUM', math('DIVIDE', math('ABSOLUTE', dot.outputs['Value'], 0.0), facing_range), 1.0) if facing_range else 1.0
+        facing = math('MAXIMUM', math('DIVIDE', math('SUBTRACT', facing, p[6][0]), 1.0-p[6][0]), 0.0)
+        threshold_alpha = math('ADD', 1.0, math('MULTIPLY', p[2][2], math('SUBTRACT', vertex.outputs['Alpha'], 1.0)))
+        amount = math('MULTIPLY', mask.outputs['Alpha'], math('MULTIPLY', facing, math('MULTIPLY', threshold_alpha, animated_parameters[2])))
+        weights = []
+        for i, boundary in enumerate((2.0-p[0][1], math('SUBTRACT', 2.0, animated_parameters[1]), 1.0)):
+            threshold = math('SUBTRACT', boundary, math('MULTIPLY', amount, channels.outputs[i]))
+            weights.append(saturate(math('DIVIDE', math('SUBTRACT', coverage, threshold), min(max(1.0-p[i][0], .01), 1.0))))
+        samples = [sample_texture(i, parameters.textures[i], color_uv) for i in range(3)]
+        first = nodes.new('ShaderNodeMixRGB')
+        links.new(weights[0], first.inputs[0])
+        links.new(samples[1].outputs['Color'], first.inputs[1])
+        links.new(samples[0].outputs['Color'], first.inputs[2])
+        second = nodes.new('ShaderNodeMixRGB')
+        links.new(weights[1], second.inputs[0])
+        links.new(samples[2].outputs['Color'], second.inputs[1])
+        links.new(first.outputs[0], second.inputs[2])
+        texture_color = second.outputs[0]
+        def lerp(a, b, weight):
+            return math('ADD', a, math('MULTIPLY', math('SUBTRACT', b, a), weight))
+        opacity = lerp(vertex.outputs['Alpha'], 1.0, p[2][2])
+        alpha = lerp(samples[1].outputs['Alpha'], samples[0].outputs['Alpha'], weights[0])
+        alpha = lerp(samples[2].outputs['Alpha'], alpha, weights[1])
+        alpha = math('MULTIPLY', alpha, math('MULTIPLY', weights[2], math('MULTIPLY', opacity, diffuse[3])))
+    elif parameters.threshold is not None:
         vectors = []
         for index, values in enumerate(parameters.threshold):
             sockets = {}
@@ -173,10 +262,12 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         if len(parameters.textures) == 2:
             mask = sample_texture(1, parameters.textures[1], None)
             alpha = math('MULTIPLY', alpha, red(mask))
+    if len(parameters.textures) != 6:
+        texture_color = texture.outputs['Color']
     product = nodes.new('ShaderNodeMixRGB')
     product.blend_type = 'MULTIPLY'
     product.inputs[0].default_value = 1.0
-    links.new(texture.outputs['Color'], product.inputs[1])
+    links.new(texture_color, product.inputs[1])
     links.new(color.outputs[0], product.inputs[2])
     emission = nodes.new('ShaderNodeEmission')
     links.new(color_transfer(nodes, links, product.outputs[0], encode=False), emission.inputs['Color'])
@@ -197,5 +288,5 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         material.surface_render_method = 'BLENDED'
     else:
         material.blend_method = 'BLEND'
-    material['g4_effect_preview'] = {1: 'T1_STATIC', 2: 'T1M1_STATIC', 3: 'THRESHOLD_STATIC'}[len(parameters.textures)]
+    material['g4_effect_preview'] = {1: 'T1_STATIC', 2: 'T1M1_STATIC', 3: 'THRESHOLD_STATIC', 6: 'T3_THRESHOLD'}[len(parameters.textures)]
     return True
