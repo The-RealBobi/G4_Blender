@@ -2719,6 +2719,8 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         {cut: slots for cut, _, _, slots in keyed}, sort_keys=True
     )
     scene["g4_event_light_count"] = len(light_keys)
+    from .shading.character_lighting import optimize_event_lighting
+    optimize_event_lighting(scene)
     return light_objects[0] if light_objects else None
 
 

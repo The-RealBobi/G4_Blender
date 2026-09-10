@@ -15,6 +15,11 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
+Version 1.9.4 moves imported event character lighting animation to scene
+attributes, avoiding per-frame shader-tree updates while retaining cut colors
+and thresholds. Existing event scenes are optimized when opened. Custom curves,
+NLA animation and materials shared between scenes are left unchanged.
+
 Version 1.9.3 restores character shader construction on Blender 4.1 and adds
 Game outlines to Material Preview and Rendered viewports. Character parameters
 use fewer geometry attribute buffers to avoid a Metal shader resource limit;

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 9, 3),
+    "version": (1, 9, 4),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -3045,6 +3045,9 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
 def refresh_level5_outlines_on_load(_unused) -> None:
     viewport_outline.unregister()
     g4_animation_addon.migrate_event_light_visibility(bpy.context.scene)
+    from .shading.character_lighting import optimize_event_lighting
+    for scene in bpy.data.scenes:
+        optimize_event_lighting(scene)
     if bpy.data.node_groups.get("Level-5 Character Parameters") is not None:
         character_parameter_node_group()
         for material in bpy.data.materials:
