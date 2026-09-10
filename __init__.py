@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 9, 4),
+    "version": (1, 9, 5),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -3046,8 +3046,10 @@ def refresh_level5_outlines_on_load(_unused) -> None:
     viewport_outline.unregister()
     g4_animation_addon.migrate_event_light_visibility(bpy.context.scene)
     from .shading.character_lighting import optimize_event_lighting
+    from .shading.effect_animation import optimize_effect_animation
     for scene in bpy.data.scenes:
         optimize_event_lighting(scene)
+        optimize_effect_animation(scene)
     if bpy.data.node_groups.get("Level-5 Character Parameters") is not None:
         character_parameter_node_group()
         for material in bpy.data.materials:
@@ -3262,6 +3264,9 @@ def import_g4_model(
                 debug.append(f"[effects] animated color curves={curves}")
                 curves = animate_event_texture_clip(path, list(materials), records, bpy.context.scene)
                 debug.append(f"[effects] animated event UV curves={curves}")
+                from .shading.effect_animation import optimize_effect_animation
+                optimized = optimize_effect_animation(bpy.context.scene)
+                debug.append(f"[effects] optimized material actions={optimized}")
             except (OSError, ValueError) as error:
                 debug.append(f"[effects] Effect color animation unavailable: {error}")
 

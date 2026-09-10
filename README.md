@@ -15,6 +15,13 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
+Version 1.9.5 also moves supported VFX color, threshold and UV animation from
+material node trees to shared scene attributes. This avoids rebuilding more
+than one hundred animated effect shaders per frame in large events while
+preserving the imported curves. Existing event scenes are optimized when opened.
+Custom curves, NLA animation and materials shared between scenes remain editable
+and are left unchanged.
+
 Version 1.9.4 moves imported event character lighting animation to scene
 attributes, avoiding per-frame shader-tree updates while retaining cut colors
 and thresholds. Existing event scenes are optimized when opened. Custom curves,

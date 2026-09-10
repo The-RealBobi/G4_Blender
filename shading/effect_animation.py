@@ -416,3 +416,19 @@ def animate_event_texture_clip(model: Path, materials: list[bpy.types.Material],
                         curve.update()
                         count += 1
     return count
+
+
+def optimize_effect_animation(scene: bpy.types.Scene) -> int:
+    from .scene_animation import migrate_material_animation
+
+    paths = {f'nodes["Effect Diffuse {component}"].outputs[0].default_value' for component in "RGBA"}
+    paths.update(f'nodes["Effect Parameter {index} {component}"].outputs[0].default_value'
+                 for index in range(8) for component in "XYZW")
+    paths.update(f'nodes["Effect UV {index} Row {row}"].inputs[1].default_value'
+                 for index in range(8) for row in range(2))
+    materials = {slot.material for obj in scene.objects for slot in obj.material_slots
+                 if slot.material and slot.material.get("g4_effect_preview")}
+    materials = {material for material in materials if material.node_tree
+                 and material.node_tree.animation_data and material.node_tree.animation_data.action
+                 and material.node_tree.animation_data.action.get("g4_effect_animation")}
+    return migrate_material_animation(scene, materials, paths, {"CONSTANT", "LINEAR"})

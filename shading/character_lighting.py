@@ -4,23 +4,12 @@ The two white gradient rows carry shadow coverage in alpha. Their RGB is not
 an albedo tint. EEVEE supplies signed scene lighting in place of the game's
 character light direction and shadow atlas; see docs/CHARACTER_RENDERDOC.md.
 """
-import hashlib
-import json
-
 import bpy
 
 
 def optimize_event_lighting(scene: bpy.types.Scene) -> int:
     """Move imported cut lighting off animated shader trees onto scene attributes."""
-    from ..g4_animation_addon import action_fcurves
-
     if scene.library or not scene.get("g4_event_light_parameters"):
-        return 0
-    scene_animation = scene.animation_data
-    if scene_animation and (
-        scene_animation.nla_tracks or scene_animation.action_blend_type != "REPLACE"
-        or scene_animation.action_influence != 1
-    ):
         return 0
     paths = {
         f'nodes["{name}"].outputs[0].default_value'
@@ -33,81 +22,10 @@ def optimize_event_lighting(scene: bpy.types.Scene) -> int:
         f'nodes["{name}"].inputs[2].default_value'
         for name in ("G4 Highlight", "G4 Under Light")
     }
-    materials = {slot.material for obj in scene.objects for slot in obj.material_slots if slot.material}
-    # A shared material must not start reading properties absent from another scene.
-    shared = {
-        slot.material for other in bpy.data.scenes if other != scene
-        for obj in other.objects for slot in obj.material_slots if slot.material
-    }
-    migrated = 0
-    for material in materials - shared:
-        tree = material.node_tree
-        animation = tree.animation_data if tree else None
-        if material.library or (tree and tree.library):
-            continue
-        if not material.get("g4_level5_toon") or not animation or not animation.action:
-            continue
-        if animation.drivers or animation.nla_tracks or animation.action_blend_type != "REPLACE" or animation.action_influence != 1:
-            continue
-        curves = action_fcurves(animation.action)
-        if len({(curve.data_path, curve.array_index) for curve in curves}) != len(curves):
-            continue
-        # User-edited interpolation, modifiers and unrelated animation stay untouched.
-        if not curves or any(
-            curve.data_path not in paths or curve.modifiers or curve.sampled_points
-            or curve.mute or (curve.group and curve.group.mute)
-            or curve.extrapolation != "CONSTANT" or not curve.keyframe_points
-            or any(point.interpolation != "CONSTANT" for point in curve.keyframe_points)
-            for curve in curves
-        ):
-            continue
-        grouped = {}
-        for curve in curves:
-            grouped.setdefault(curve.data_path, []).append(curve)
-        for path, channels in grouped.items():
-            socket = tree.path_resolve(path.rsplit(".", 1)[0])
-            value = socket.default_value
-            is_color = socket.type == "RGBA"
-            initial = list(value) if is_color else value
-            signature = json.dumps((path, initial, [
-                (curve.array_index, [tuple(point.co) for point in curve.keyframe_points])
-                for curve in sorted(channels, key=lambda curve: curve.array_index)
-            ]))
-            key = "g4_cut_light_" + hashlib.sha256(signature.encode("utf-8")).hexdigest()[:24]
-            if key not in scene:
-                scene[key] = initial
-                for curve in channels:
-                    for point in curve.keyframe_points:
-                        if is_color:
-                            scene[key][curve.array_index] = point.co.y
-                        else:
-                            scene[key] = point.co.y
-                        scene.keyframe_insert(
-                            data_path=f'["{key}"]', frame=point.co.x,
-                            index=curve.array_index if is_color else -1,
-                        )
-            attribute = next((node for node in tree.nodes if node.get("g4_event_lighting_socket") == path), None)
-            if attribute is None:
-                attribute = tree.nodes.new("ShaderNodeAttribute")
-                attribute.name = "G4 Event " + socket.node.name
-                attribute["g4_event_lighting_socket"] = path
-                attribute.attribute_type = "VIEW_LAYER"
-                output = attribute.outputs["Color" if is_color else "Fac"]
-                if socket.is_output:
-                    for link in tuple(socket.links):
-                        tree.links.new(output, link.to_socket)
-                else:
-                    tree.links.new(output, socket)
-            attribute.attribute_name = key
-        tree.animation_data_clear()
-        migrated += 1
-    if migrated:
-        for curve in action_fcurves(scene.animation_data.action):
-            if curve.data_path.startswith('["g4_cut_light_'):
-                for point in curve.keyframe_points:
-                    point.interpolation = "CONSTANT"
-        scene.frame_set(scene.frame_current, subframe=scene.frame_subframe)
-    return migrated
+    from .scene_animation import migrate_material_animation
+    materials = {slot.material for obj in scene.objects for slot in obj.material_slots
+                 if slot.material and slot.material.get("g4_level5_toon")}
+    return migrate_material_animation(scene, materials, paths, {"CONSTANT"})
 
 
 def color_transfer(nodes: bpy.types.Nodes, links: bpy.types.NodeLinks, source: bpy.types.NodeSocket, *, encode: bool) -> bpy.types.NodeSocket:
