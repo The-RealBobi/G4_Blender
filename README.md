@@ -15,6 +15,14 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
+Version 1.9.6 reads PTLB particle-node blocks during event discovery and keeps
+their emitter phases, lifetime, motion and interval as inspectable metadata.
+When a particle model has exactly one emitter and no authored G4TP clock, its
+texture simulation now uses the PTLB phase-plus-lifetime window instead of
+stretching over the complete cut. Saved event scenes receive the same upgrade
+when their original PTLB remains available. Multi-emitter libraries are parsed
+but left unchanged until their node-to-mesh bindings can be established.
+
 Version 1.9.5 also moves supported VFX color, threshold and UV animation from
 material node trees to shared scene attributes. This avoids rebuilding more
 than one hundred animated effect shaders per frame in large events while

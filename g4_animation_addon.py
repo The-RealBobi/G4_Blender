@@ -33,6 +33,7 @@ try:
     from .g4mt_motion import decode_motion, simplify_motion_samples
     from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
+    from .effects.particle_library import particle_library_metadata, read_particle_library
     from .g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
         load_event_actor_models, load_event_actor_points,
@@ -46,6 +47,7 @@ except ImportError:
     from g4mt_motion import decode_motion, simplify_motion_samples
     from g4ma_motion import decode_material_motion, material_animation_paths
     from g4cm_camera import decode_camera, parse_g4cm
+    from effects.particle_library import particle_library_metadata, read_particle_library
     from g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
         load_event_actor_models, load_event_actor_points,
@@ -2096,6 +2098,13 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
         for model in model_paths:
             asset_directory = model.parent
             particle = next(asset_directory.glob("*.ptlb"), None)
+            particle_library = None
+            particle_library_error = ""
+            if particle is not None:
+                try:
+                    particle_library = read_particle_library(particle)
+                except (OSError, ValueError) as error:
+                    particle_library_error = str(error)
             objbin_cfg = next(asset_directory.glob("*.objbin.cfg"), None)
             material_animations = material_animation_paths(
                 model, Path(tempfile.gettempdir()) / "level5_g4ma_blender"
@@ -2121,6 +2130,8 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
                 "name": asset_directory.name,
                 "model": str(model) if model else "",
                 "particle": str(particle) if particle else "",
+                "particle_library": particle_library,
+                "particle_library_error": particle_library_error,
                 "objbin_cfg": str(objbin_cfg) if objbin_cfg else "",
                 "material_animations": [str(path) for path in material_animations],
                 "shader_params": shader_params,
@@ -2275,7 +2286,20 @@ def import_event_effect_models(
             effect_materials = configure_event_effect_materials(imported)
             root["g4_event_effect_model"] = str(model_path)
             root["g4_event_effect_cut"] = cut
+            root["g4_event_effect_start_frame"] = cut_starts[cut]
+            root["g4_event_effect_end_frame"] = end_frame - 1
             root["g4_event_effect_particle"] = candidate.get("particle", "")
+            particle_library = candidate.get("particle_library")
+            if particle_library is not None:
+                root["g4_event_effect_particle_emitters"] = json.dumps(
+                    particle_library_metadata(particle_library)
+                )
+                from .shading.particle_nodes import apply_particle_library_clock
+                root["g4_event_effect_particle_clocks"] = apply_particle_library_clock(
+                    imported, particle_library, cut_starts[cut], scene
+                )
+            elif candidate.get("particle_library_error"):
+                root["g4_event_effect_particle_error"] = candidate["particle_library_error"]
             root["g4_event_effect_shaders"] = json.dumps(candidate.get("shaders") or [])
             root["g4_event_effect_objbin_cfg"] = candidate.get("objbin_cfg", "")
             root["g4_event_effect_g4ma"] = json.dumps(candidate.get("material_animations") or [])

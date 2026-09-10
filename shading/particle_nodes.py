@@ -8,6 +8,71 @@ from .effect_nodes import effect_data_image
 from .character_lighting import color_transfer
 
 
+def apply_particle_library_clock(objects, library, start_frame: float, scene: bpy.types.Scene) -> int:
+    """Use an unambiguous PTLB lifetime when no G4TP animation supplies a clock."""
+    if len(library.emitters) != 1:
+        return 0
+    emitter = library.emitters[0]
+    duration = emitter.preview_duration_seconds
+    scene_fps = scene.render.fps / scene.render.fps_base
+    if duration <= 0 or scene_fps <= 0:
+        return 0
+    end_frame = start_frame + duration * scene_fps
+    applied = 0
+    seen = set()
+    for obj in objects:
+        for modifier in obj.modifiers:
+            group = modifier.node_group if modifier.type == 'NODES' else None
+            if (group is None or group in seen or not group.get('g4_particle_geometry')
+                    or group.get('g4_particle_clock')):
+                continue
+            inputs = {item.name: item for item in group.interface.items_tree
+                      if item.item_type == 'SOCKET' and item.in_out == 'INPUT'}
+            if 'Preview Start' not in inputs or 'Preview End' not in inputs:
+                continue
+            inputs['Preview Start'].default_value = start_frame
+            inputs['Preview End'].default_value = end_frame
+            group['g4_particle_clock'] = 'PTLB'
+            group['g4_particle_node'] = emitter.node_name
+            group['g4_particle_emission_interval_seconds'] = emitter.emission_interval_seconds
+            group['g4_particle_phase_seconds'] = emitter.phase_durations_seconds
+            group['g4_particle_lifetime_seconds'] = emitter.lifetime_seconds
+            seen.add(group)
+            applied += 1
+    return applied
+
+
+def migrate_particle_library_clocks(scene: bpy.types.Scene) -> int:
+    """Upgrade saved event imports that still use the full-cut preview range."""
+    from ..effects.particle_library import read_particle_library
+
+    applied = 0
+    for root in scene.objects:
+        source = root.get('g4_event_effect_particle')
+        if not source:
+            continue
+        start_frame = root.get('g4_event_effect_start_frame')
+        if start_frame is None and root.animation_data:
+            starts = [strip.frame_start for track in root.animation_data.nla_tracks
+                      if track.name == 'Event Effect Placement' for strip in track.strips]
+            start_frame = min(starts) if starts else None
+        if start_frame is None:
+            continue
+        path = Path(source)
+        if not path.is_file():
+            continue
+        try:
+            library = read_particle_library(path)
+        except (OSError, ValueError) as error:
+            root['g4_event_effect_particle_error'] = str(error)
+            continue
+        count = apply_particle_library_clock(root.children_recursive, library, start_frame, scene)
+        if count:
+            root['g4_event_effect_particle_clocks'] = count
+            applied += count
+    return applied
+
+
 def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.types.Scene) -> bool:
     if record.get('shader_hash') != 3792297829 or obj.type != 'MESH':
         return False
@@ -244,6 +309,7 @@ def refresh_particle_cameras(scene, *unused) -> None:
 def load_particle_cameras(*unused) -> None:
     for scene in bpy.data.scenes:
         refresh_particle_cameras(scene)
+        migrate_particle_library_clocks(scene)
 
 
 def register() -> None:
