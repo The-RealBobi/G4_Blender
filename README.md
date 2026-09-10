@@ -15,6 +15,12 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
+Version 1.9.7 uses a lightweight toon output while the timeline plays, then
+restores the complete Game material when playback stops or a render starts.
+It preserves the base texture, alpha and authored occlusion shading, and uses
+frame dropping during playback so heavy event scenes remain responsive. The
+option is enabled by default and can be disabled under Fast Game Playback.
+
 Version 1.9.6 reads PTLB particle-node blocks during event discovery and keeps
 their emitter phases, lifetime, motion and interval as inspectable metadata.
 When a particle model has exactly one emitter and no authored G4TP clock, its

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 9, 6),
+    "version": (1, 9, 7),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -133,6 +133,7 @@ if __package__:
     from .shading.map_nodes import apply_map_surface_nodes
     from .shading.character_lighting import build_character_lighting, color_transfer
     from .shading import viewport_outline
+    from .shading import playback
     from .shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 else:
     import g4_port_addon
@@ -147,6 +148,7 @@ else:
     from shading.map_nodes import apply_map_surface_nodes
     from shading.character_lighting import build_character_lighting, color_transfer
     from shading import viewport_outline
+    from shading import playback
     from shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 
 if __package__:
@@ -269,6 +271,7 @@ def addon_preferences() -> "G4ImporterPreferences":
         apply_bone_orientation = True
         outline_mode = "SCREEN"
         viewport_outlines = False
+        fast_game_playback = True
 
     return Defaults()
 
@@ -416,6 +419,11 @@ class G4ImporterPreferences(AddonPreferences):
         default=False,
         update=outline_mode_changed,
     )
+    fast_game_playback: BoolProperty(
+        name="Fast Game Playback",
+        description="Use a lightweight toon material while the timeline plays; paused views and renders keep the full Game shader",
+        default=True,
+    )
     outline_thickness: FloatProperty(
         name="Outline Thickness",
         description="Main character silhouette thickness in render pixels; internal lines scale proportionally",
@@ -479,6 +487,7 @@ class G4ImporterPreferences(AddonPreferences):
         import_box.prop(self, "apply_bone_orientation")
         import_box.prop(self, "outline_mode")
         import_box.prop(self, "viewport_outlines")
+        import_box.prop(self, "fast_game_playback")
         thickness_row = import_box.row()
         thickness_row.enabled = self.outline_mode != "OFF"
         thickness_row.prop(self, "outline_thickness")
@@ -1853,6 +1862,7 @@ def apply_level5_toon_shader(
     material["g4_line_informative"] = line_informative
     material["g4_toon_scene_gradient"] = "in_texGrd: chrGrd_01 UNORM alpha rows 254/250; capture 16"
     annotate_current_toon_material(material, variants)
+    playback.ensure_playback_output(material)
     if debug is not None:
         debug.append(
             f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
@@ -5236,12 +5246,15 @@ def register():
     g4_port_addon.register()
     from .shading import particle_nodes
     particle_nodes.register()
+    playback.ADDON_ID = ADDON_ID
+    playback.register()
     if refresh_level5_outlines_on_load not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(refresh_level5_outlines_on_load)
 
 
 def unregister():
     viewport_outline.unregister()
+    playback.unregister()
     from .shading import particle_nodes
     particle_nodes.unregister()
     if refresh_level5_outlines_on_load in bpy.app.handlers.load_post:
