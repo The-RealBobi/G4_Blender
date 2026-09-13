@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 9, 7),
+    "version": (1, 12, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -420,8 +420,8 @@ class G4ImporterPreferences(AddonPreferences):
         update=outline_mode_changed,
     )
     fast_game_playback: BoolProperty(
-        name="Fast Game Playback",
-        description="Use a lightweight toon material while the timeline plays; paused views and renders keep the full Game shader",
+        name="Responsive Timeline",
+        description="Drop timeline frames when necessary while keeping the complete Game shader active",
         default=True,
     )
     outline_thickness: FloatProperty(
@@ -802,6 +802,9 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
                     offset = loop.vertex_index * 4
                     controls.data[loop.index].color = flat_colors[offset:offset + 4]
             mesh.color_attributes.active_color = mesh.color_attributes.get("G4 Outline Parameters") or colors1
+
+        if flat_colors and not flat_colors1:
+            g4_port_addon.import_native_outline_marks(mesh)
 
         if custom_normals:
             apply_custom_vertex_normals(mesh, mesh_payload.get("normals") or [], len(positions))
@@ -1789,15 +1792,12 @@ def apply_level5_toon_shader(
     wet_diffuse.blend_type = "MULTIPLY"
     wet_diffuse.inputs[2].default_value = (0.82, 0.85, 0.88, 1.0)
     wet_diffuse.location = (1160, 250)
-    wet_glossy = nodes.new("ShaderNodeBsdfGlossy")
-    wet_glossy.inputs["Roughness"].default_value = 0.16
-    wet_glossy.location = (800, -610)
+    wet_facing = nodes.new("ShaderNodeLayerWeight")
+    wet_facing.name = "G4 Wet Facing"
+    wet_facing.inputs["Blend"].default_value = 0.18
+    wet_facing.location = (980, -610)
     if surface_normal is not None:
-        links.new(surface_normal, wet_glossy.inputs["Normal"])
-    wet_glossy_rgb = nodes.new("ShaderNodeShaderToRGB")
-    wet_glossy_rgb.location = (980, -610)
-    wet_glossy_bw = nodes.new("ShaderNodeRGBToBW")
-    wet_glossy_bw.location = (1160, -610)
+        links.new(surface_normal, wet_facing.inputs["Normal"])
     wet_glossy_ramp = nodes.new("ShaderNodeValToRGB")
     wet_glossy_ramp.name = "G4 Wet Specular"
     wet_glossy_ramp.color_ramp.interpolation = "CONSTANT"
@@ -1811,9 +1811,7 @@ def apply_level5_toon_shader(
     wet_add.location = (1520, 250)
     links.new(wetness.outputs[0], wet_diffuse.inputs[0])
     links.new(color_output, wet_diffuse.inputs[1])
-    links.new(wet_glossy.outputs["BSDF"], wet_glossy_rgb.inputs["Shader"])
-    links.new(wet_glossy_rgb.outputs["Color"], wet_glossy_bw.inputs["Color"])
-    links.new(wet_glossy_bw.outputs["Val"], wet_glossy_ramp.inputs["Fac"])
+    links.new(wet_facing.outputs["Facing"], wet_glossy_ramp.inputs["Fac"])
     links.new(wetness.outputs[0], wet_add.inputs[0])
     links.new(wet_diffuse.outputs["Color"], wet_add.inputs[1])
     links.new(wet_glossy_ramp.outputs["Color"], wet_add.inputs[2])
@@ -1862,7 +1860,6 @@ def apply_level5_toon_shader(
     material["g4_line_informative"] = line_informative
     material["g4_toon_scene_gradient"] = "in_texGrd: chrGrd_01 UNORM alpha rows 254/250; capture 16"
     annotate_current_toon_material(material, variants)
-    playback.ensure_playback_output(material)
     if debug is not None:
         debug.append(
             f"[toon] {material.name}: oc={occlusion_path and occlusion_path.name} "
@@ -3055,6 +3052,7 @@ def refresh_existing_level5_outlines(mode: str | None = None) -> bool:
 def refresh_level5_outlines_on_load(_unused) -> None:
     viewport_outline.unregister()
     g4_animation_addon.migrate_event_light_visibility(bpy.context.scene)
+    g4_animation_addon.configure_event_camera_clipping()
     from .shading.character_lighting import optimize_event_lighting
     from .shading.effect_animation import optimize_effect_animation
     for scene in bpy.data.scenes:
@@ -3065,6 +3063,11 @@ def refresh_level5_outlines_on_load(_unused) -> None:
         for material in bpy.data.materials:
             connect_character_parameter_material(material)
     refresh_existing_level5_outlines()
+
+    for scene in bpy.data.scenes:
+        props = getattr(scene, "level5_g4_port", None)
+        if props is not None:
+            viewport_outline.configure_authored(scene, props.preview_authored_outlines)
 
 
 def configure_viewport_outlines(

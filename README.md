@@ -15,11 +15,27 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
-Version 1.9.7 uses a lightweight toon output while the timeline plays, then
-restores the complete Game material when playback stops or a render starts.
-It preserves the base texture, alpha and authored occlusion shading, and uses
-frame dropping during playback so heavy event scenes remain responsive. The
-option is enabled by default and can be disabled under Fast Game Playback.
+Version 1.12.0 updates custom outline parameters automatically, recovers native
+COLOR seam guides for Edit Mode, and adds custom Stroke Width (0.2x–4x).
+
+Version 1.11.2 replaces interpolated custom outline colors with narrow surface
+bands. Every exported triangle has constant COLOR, preventing the previous
+triangle-shaped gradients. Native-game appearance remains experimental.
+
+Version 1.11.0 separates PORT, OUTLINE and EXPRESSION into independent panels.
+Marked outline edges appear immediately in red and support open strokes.
+The native-game appearance of authored regions remains experimental.
+
+Version 1.9.8 stops FakeParticle billboard geometry outside its PTLB or preview
+window, so expired effects no longer remain in the dependency graph for the rest
+of a cut. Imported G4 cameras and their 3D viewports use a 100,000-unit far clip.
+The optional wet highlight also avoids an extra Shader to RGB pass that could
+exceed Metal resource limits in complex Blender 5.2 character materials.
+
+Version 1.9.7 introduced responsive timeline playback. Version 1.9.8 keeps its
+frame-dropping behavior but always uses the complete Game material, including
+its authored lighting and texture maps. The option is enabled by default and
+can be disabled under Responsive Timeline.
 
 Version 1.9.6 reads PTLB particle-node blocks during event discovery and keeps
 their emitter phases, lifetime, motion and interval as inspectable metadata.
@@ -170,6 +186,39 @@ The exporter:
 * Copies or rebuilds `G4TX` archives from the native base.
 * Handles Nintendo Switch `NXTCH` texture payloads, with automatic `dx11` to `nx` fallback.
 * Builds port settings from the selected original model rather than using model-specific bone presets.
+
+### Custom outline edges
+
+The **Level-5** sidebar contains separate **PORT**, **OUTLINE** and **EXPRESSION**
+panels. Expression atlas preparation and facial previews are in **EXPRESSION**.
+
+In **OUTLINE**, select edges on one mesh in Edit Mode and choose **Mark Outline**.
+Marked edges immediately appear in red, even after deselection. Parameters
+refresh automatically on Mark/Clear and when loading authored meshes; export
+always rebuilds the bands. **Stroke Width** changes the custom band width and
+is saved with the scene and port configuration. **Clear Outline**
+removes marks; **Select Outlines** selects them again. UV seams remain independent.
+**Preview Outlines** toggles the red guide. It is an editing guide, not an exact
+preview of the game's line width or visibility.
+
+Open strokes and individual surface edges are supported without enclosing a
+region. Marking enables **Authored Outlines** for export. Export creates narrow
+bands along marked edges with constant COLOR per triangle, and matches the new
+cuts on adjacent faces. UVs and skin weights are interpolated in the exported
+copy; the editable mesh remains unchanged. The red guide shows the marked edge;
+the exported band has a small width relative to its incident triangles. Loose edges without faces
+cannot produce surface outlines. Disable **Align Forward to Y Axis** for this
+export path. Other meshes retain the constant custom fallback.
+
+The authored channel values remain experimental: Blender preview and parameter
+transport are validated, but native-game appearance still needs testing. The red
+guide is a viewport overlay and does not appear in F12 renders.
+
+Native imports recover detectable green-COLOR discontinuities, including seams
+between duplicated vertices. These inferred guides appear in Edit Mode without
+changing native colors or enabling authored export. They are not a complete list
+of view-dependent outlines: the native edge2 silhouette remains shader-driven.
+Marking or clearing an original mesh opts that mesh into custom authoring.
 
 ### Texture replacement
 

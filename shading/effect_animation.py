@@ -294,6 +294,7 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
     from ..g4ma_motion import texture_animation_paths
     from ..g4mt_motion import sample_channel, encoding_step
     from ..g4_animation_addon import action_fcurve_new
+    from .particle_nodes import remove_particle_preview_window
 
     hashes = record.get('uv_animation_hashes', [])
     if len(hashes) != 3:
@@ -347,6 +348,7 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
             tree['g4_particle_clock'] = 'G4TP stand'
             tree['g4_particle_source_fps'] = clip['fps']
             # The native action replaces the diagnostic range completely.
+            remove_particle_preview_window(tree)
             for item in list(tree.interface.items_tree):
                 if item.item_type == 'SOCKET' and item.name in ('Preview Start', 'Preview End'):
                     tree.interface.remove(item)

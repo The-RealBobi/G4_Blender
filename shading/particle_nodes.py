@@ -8,6 +8,144 @@ from .effect_nodes import effect_data_image
 from .character_lighting import color_transfer
 
 
+PARTICLE_GEOMETRY_SCHEMA = 3
+PARTICLE_WINDOW_NODES = (
+    'Particle Start Limit',
+    'Particle After Start',
+    'Particle End Limit',
+    'Particle Before End',
+    'Particle Active Window',
+)
+
+
+def ensure_particle_preview_window(group: bpy.types.GeometryNodeTree) -> bool:
+    """Stop billboard generation outside the explicit preview lifetime."""
+    inputs = {
+        item.name: item for item in group.interface.items_tree
+        if item.item_type == 'SOCKET' and item.in_out == 'INPUT'
+    }
+    points = next((node for node in group.nodes if node.bl_idname == 'GeometryNodeMeshToPoints'), None)
+    source = next((node for node in group.nodes if node.bl_idname == 'NodeGroupInput'), None)
+    scene_time = next((node for node in group.nodes if node.bl_idname == 'GeometryNodeInputSceneTime'), None)
+    if (points is None or source is None or scene_time is None
+            or 'Preview Start' not in inputs or 'Preview End' not in inputs):
+        return False
+    if group.nodes.get('Particle Active Window') is not None:
+        group['g4_particle_geometry_schema'] = PARTICLE_GEOMETRY_SCHEMA
+        return False
+
+    start_limit = group.nodes.new('ShaderNodeMath')
+    start_limit.name = 'Particle Start Limit'
+    start_limit.operation = 'SUBTRACT'
+    start_limit.inputs[1].default_value = 0.5
+    group.links.new(source.outputs['Preview Start'], start_limit.inputs[0])
+
+    after_start = group.nodes.new('ShaderNodeMath')
+    after_start.name = 'Particle After Start'
+    after_start.operation = 'GREATER_THAN'
+    group.links.new(scene_time.outputs['Frame'], after_start.inputs[0])
+    group.links.new(start_limit.outputs[0], after_start.inputs[1])
+
+    end_limit = group.nodes.new('ShaderNodeMath')
+    end_limit.name = 'Particle End Limit'
+    end_limit.operation = 'ADD'
+    end_limit.inputs[1].default_value = 0.5
+    group.links.new(source.outputs['Preview End'], end_limit.inputs[0])
+
+    before_end = group.nodes.new('ShaderNodeMath')
+    before_end.name = 'Particle Before End'
+    before_end.operation = 'LESS_THAN'
+    group.links.new(scene_time.outputs['Frame'], before_end.inputs[0])
+    group.links.new(end_limit.outputs[0], before_end.inputs[1])
+
+    active = group.nodes.new('ShaderNodeMath')
+    active.name = 'Particle Active Window'
+    active.operation = 'MULTIPLY'
+    group.links.new(after_start.outputs[0], active.inputs[0])
+    group.links.new(before_end.outputs[0], active.inputs[1])
+    for link in list(points.inputs['Selection'].links):
+        group.links.remove(link)
+    group.links.new(active.outputs[0], points.inputs['Selection'])
+    group['g4_particle_geometry_schema'] = PARTICLE_GEOMETRY_SCHEMA
+    return True
+
+
+def remove_particle_preview_window(group: bpy.types.GeometryNodeTree) -> None:
+    points = next((node for node in group.nodes if node.bl_idname == 'GeometryNodeMeshToPoints'), None)
+    if points is not None:
+        for link in list(points.inputs['Selection'].links):
+            if link.from_node.name in PARTICLE_WINDOW_NODES:
+                group.links.remove(link)
+    for name in PARTICLE_WINDOW_NODES:
+        node = group.nodes.get(name)
+        if node is not None:
+            group.nodes.remove(node)
+
+
+def ensure_particle_gpu_instances(group: bpy.types.GeometryNodeTree) -> bool:
+    """Keep billboards instanced instead of rebuilding an equivalent mesh each frame."""
+    nodes = group.nodes
+    instances = next((node for node in nodes if node.bl_idname == 'GeometryNodeInstanceOnPoints'), None)
+    realize = next((node for node in nodes if node.bl_idname == 'GeometryNodeRealizeInstances'), None)
+    assign = next((node for node in nodes if node.bl_idname == 'GeometryNodeSetMaterial'), None)
+    output = next((node for node in nodes if node.bl_idname == 'NodeGroupOutput'), None)
+    if (instances is None or realize is None or assign is None or output is None
+            or not instances.inputs['Instance'].is_linked
+            or not output.inputs['Geometry'].is_linked):
+        return False
+    local = output.inputs['Geometry'].links[0].from_node
+    if (local.bl_idname != 'GeometryNodeTransform'
+            or not assign.inputs['Geometry'].is_linked
+            or assign.inputs['Geometry'].links[0].from_node != realize
+            or not realize.inputs[0].is_linked
+            or realize.inputs[0].links[0].from_node != instances
+            or not local.inputs['Geometry'].is_linked
+            or local.inputs['Geometry'].links[0].from_node != assign):
+        return False
+
+    source_instance = instances.inputs['Instance'].links[0].from_socket
+    for socket in (assign.inputs['Geometry'], instances.inputs['Instance'], local.inputs['Geometry']):
+        for link in list(socket.links):
+            group.links.remove(link)
+    group.links.new(source_instance, assign.inputs['Geometry'])
+    group.links.new(assign.outputs['Geometry'], instances.inputs['Instance'])
+    group.links.new(instances.outputs['Instances'], local.inputs['Geometry'])
+    nodes.remove(realize)
+    group['g4_particle_geometry_schema'] = PARTICLE_GEOMETRY_SCHEMA
+    return True
+
+
+def upgrade_particle_preview_windows(scene: bpy.types.Scene) -> int:
+    upgraded = 0
+    seen = set()
+    for obj in scene.objects:
+        for modifier in obj.modifiers:
+            group = modifier.node_group if modifier.type == 'NODES' else None
+            if group is None or not group.get('g4_particle_geometry'):
+                continue
+            if group not in seen:
+                seen.add(group)
+                upgraded += int(ensure_particle_preview_window(group))
+                upgraded += int(ensure_particle_gpu_instances(group))
+            if group.get('g4_particle_clock') == 'PTLB':
+                inputs = {
+                    item.name: item for item in group.interface.items_tree
+                    if item.item_type == 'SOCKET' and item.in_out == 'INPUT'
+                }
+                for name in ('Preview Start', 'Preview End'):
+                    socket = inputs.get(name)
+                    if socket is not None:
+                        set_particle_modifier_input(modifier, socket, socket.default_value)
+    return upgraded
+
+
+def set_particle_modifier_input(modifier, socket, value: float) -> None:
+    if bpy.app.version >= (5, 0, 0):
+        getattr(modifier.properties.inputs, socket.identifier).value = value
+    else:
+        modifier[socket.identifier] = value
+
+
 def apply_particle_library_clock(objects, library, start_frame: float, scene: bpy.types.Scene) -> int:
     """Use an unambiguous PTLB lifetime when no G4TP animation supplies a clock."""
     if len(library.emitters) != 1:
@@ -32,6 +170,8 @@ def apply_particle_library_clock(objects, library, start_frame: float, scene: bp
                 continue
             inputs['Preview Start'].default_value = start_frame
             inputs['Preview End'].default_value = end_frame
+            set_particle_modifier_input(modifier, inputs['Preview Start'], start_frame)
+            set_particle_modifier_input(modifier, inputs['Preview End'], end_frame)
             group['g4_particle_clock'] = 'PTLB'
             group['g4_particle_node'] = emitter.node_name
             group['g4_particle_emission_interval_seconds'] = emitter.emission_interval_seconds
@@ -250,6 +390,8 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
     links.new(assign.outputs[0], local.inputs['Geometry'])
     links.new(inverse.outputs['Matrix'], local.inputs['Transform'])
     links.new(local.outputs[0], node('NodeGroupOutput').inputs['Geometry'])
+    ensure_particle_gpu_instances(group)
+    ensure_particle_preview_window(group)
     modifier = obj.modifiers.new('Particle texture preview', 'NODES')
     modifier.node_group = group
     return True
@@ -308,6 +450,7 @@ def refresh_particle_cameras(scene, *unused) -> None:
 @persistent
 def load_particle_cameras(*unused) -> None:
     for scene in bpy.data.scenes:
+        upgrade_particle_preview_windows(scene)
         refresh_particle_cameras(scene)
         migrate_particle_library_clocks(scene)
 

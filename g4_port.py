@@ -12,15 +12,17 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:
     from g4_model_probe import dds_format, dds_to_nxtch
     from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+    from outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
 except ImportError:
     from .g4_model_probe import dds_format, dds_to_nxtch
     from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+    from .outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
 
 
 DEFAULT_RAW_ROOT = Path(os.environ.get("LEVEL5_G4_RAW_ROOT", "data"))
@@ -35,9 +37,9 @@ NON_FACE_NAME_INDEX = 95
 FACE_NAME_INDEX = 96
 EYE_NAME_INDEX = 97
 G4_PORT_CONVERTER_MARKER = "expression-face-v9-json-marker-3"
-G4_PORT_SCRIPT_VERSION = "1.0.5"
-STABLE_CUSTOM_VERTEX_COLOR = (255, 153, 191, 127)
-VERTEX_COLOR_MODES = {"native", "constant"}
+G4_PORT_SCRIPT_VERSION = "1.0.10"
+STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
+VERTEX_COLOR_MODES = {"native", "constant", "authored"}
 
 
 @dataclass
@@ -979,6 +981,60 @@ def dae_geometry_instance_names(root: ET.Element) -> dict[str, str]:
     return names
 
 
+def interpolate_outline_vertex(vertices: list[Vertex], barycentric: tuple[float, float, float]) -> Vertex:
+    weights: dict[str, float] = {}
+    samples = [(v, factor) for v, factor in zip(vertices, barycentric) if factor > 0.0]
+    for vertex, factor in samples:
+        for joint, weight in vertex.influences:
+            weights[joint] = weights.get(joint, 0.0) + weight * factor
+    return Vertex(
+        tuple(sum(v.position[i] * f for v, f in samples) for i in range(3)),
+        tuple(sum(v.normal[i] * f for v, f in samples) for i in range(3)),
+        tuple(sum(v.uv[i] * f for v, f in samples) for i in range(2)),
+        tuple(sorted(weights.items())),
+        tuple(sum(v.tangent[i] * f for v, f in samples) for i in range(3))
+        if all(v.tangent is not None for v, _ in samples) else None,
+        tuple(sum(v.bitangent[i] * f for v, f in samples) for i in range(3))
+        if all(v.bitangent is not None for v, _ in samples) else None,
+        STABLE_OUTLINE_COLOR, True,
+    )
+
+
+def refine_outline_meshes(
+    meshes: list[Mesh], source_indices: list[list[int]], seams: set[tuple[int, int]],
+    width: float = OUTLINE_BAND_FRACTION,
+) -> None:
+    """Encode narrow, flat-COLOR bands after loading source skin weights."""
+    faces = []
+    samples = []
+    owners = []
+    for owner, (mesh, sources) in enumerate(zip(meshes, source_indices)):
+        for offset in range(0, len(mesh.indices), 3):
+            indices = mesh.indices[offset:offset + 3]
+            faces.append(tuple(sources[i] for i in indices))
+            samples.append([mesh.vertices[i] for i in indices])
+            owners.append(owner)
+    bands = outline_triangle_bands(faces, seams, width)
+    output_vertices: list[list[Vertex]] = [[] for _ in meshes]
+    output_indices: list[list[int]] = [[] for _ in meshes]
+    caches: list[dict[tuple, int]] = [{} for _ in meshes]
+    for owner, vertices, triangles in zip(owners, samples, bands):
+        for barycentrics, color in triangles:
+            for barycentric in barycentrics:
+                vertex = replace(interpolate_outline_vertex(vertices, barycentric), color=color)
+                key = (vertex.position, vertex.normal, vertex.uv, vertex.influences,
+                       vertex.tangent, vertex.bitangent, color)
+                index = caches[owner].get(key)
+                if index is None:
+                    index = len(output_vertices[owner])
+                    caches[owner][key] = index
+                    output_vertices[owner].append(vertex)
+                output_indices[owner].append(index)
+    for mesh, vertices, indices in zip(meshes, output_vertices, output_indices):
+        mesh.vertices = vertices
+        mesh.indices = indices
+
+
 def parse_dae(
     path: Path,
     model_stem: str,
@@ -986,6 +1042,7 @@ def parse_dae(
     weight_sidecar: Path | None = None,
     generate_tangents: bool = False,
     apply_bind_shape: bool = False,
+    authored_colors: bool = False,
 ) -> list[Mesh]:
     root = ET.parse(path).getroot()
     skins = parse_dae_skin(root)
@@ -1006,6 +1063,10 @@ def parse_dae(
         if mesh_node is None:
             continue
 
+        outline_node = geometry.find(".//" + ns_name(root, "technique") + "[@profile='G4_OUTLINE']/" + ns_name(root, "seams")) if authored_colors else None
+        geometry_mesh_start = len(meshes)
+        geometry_source_indices: list[list[int]] = []
+        outline_seams: set[tuple[int, int]] = set()
         vertices_map: dict[str, str] = {}
         for vertices in mesh_node.findall(ns_name(mesh_node, "vertices")):
             position_input = vertices.find(ns_name(vertices, "input") + "[@semantic='POSITION']")
@@ -1014,6 +1075,11 @@ def parse_dae(
 
         position_sources = list(vertices_map.values())
         position_count = len(parse_float_source(root, position_sources[0], 3)) if position_sources else 0
+        if outline_node is not None:
+            values = [int(value) for value in (outline_node.text or "").split()]
+            if len(values) % 2 or any(value < 0 or value >= position_count for value in values):
+                raise ValueError(f"Invalid outline edge indices in {geometry_id}")
+            outline_seams = {tuple(values[index:index + 2]) for index in range(0, len(values), 2)}
         sidecar_mesh = sidecar_mesh_for_geometry(
             sidecar_meshes,
             geometry,
@@ -1033,7 +1099,7 @@ def parse_dae(
                     source = source_ref(input_node.attrib.get("source", ""))
                     if semantic == "VERTEX":
                         source = vertices_map.get(source, source)
-                    texcoord_set = int(input_node.attrib.get("set", "0")) if semantic.startswith("TEXCOORD") else 0
+                    texcoord_set = int(input_node.attrib.get("set", "0")) if semantic.startswith("TEXCOORD") or semantic == "COLOR" else 0
                     inputs.append((semantic, source, int(input_node.attrib.get("offset", "0")), texcoord_set))
                 stride = max((item[2] for item in inputs), default=0) + 1
                 data_node = primitive.find(ns_name(primitive, "p"))
@@ -1057,9 +1123,11 @@ def parse_dae(
                         2 if semantic.startswith("TEXCOORD") else 3 if semantic in {"VERTEX", "POSITION", "NORMAL"} else None,
                     )
                     for semantic, source, _, _ in inputs
+                    if semantic != "COLOR" or authored_colors
                 }
                 vertices: list[Vertex] = []
                 indices: list[int] = []
+                vertex_source_indices: list[int] = []
                 vertex_cache: dict[tuple, int] = {}
                 cursor = 0
                 for vcount in vcounts:
@@ -1070,10 +1138,20 @@ def parse_dae(
                         pos = (0.0, 0.0, 0.0)
                         uv = (0.5, 0.5)
                         normal = None
+                        color = None
                         for semantic, source, offset, texcoord_set in inputs:
                             index = packed[offset]
                             values = sources.get(source, [])
-                            if semantic in {"VERTEX", "POSITION"} and index < len(values) and len(values[index]) >= 3:
+                            if authored_colors and semantic == "COLOR" and texcoord_set == 0:
+                                if index < 0 or index >= len(values) or len(values[index]) not in (3, 4):
+                                    raise ValueError(f"Invalid COLOR entry {index} in {geometry_id}")
+                                components = tuple(values[index])
+                                if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in components):
+                                    raise ValueError(f"COLOR must contain finite values in 0..1 in {geometry_id}")
+                                if len(components) == 3:
+                                    components += (1.0,)
+                                color = tuple(round(value * 255) for value in components)
+                            elif semantic in {"VERTEX", "POSITION"} and index < len(values) and len(values[index]) >= 3:
                                 pos = transform_point(geometry_transform, tuple(values[index][:3]))  # type: ignore[arg-type]
                             elif semantic == "NORMAL" and index < len(values) and len(values[index]) >= 3:
                                 normal = transform_normal(geometry_transform, tuple(values[index][:3]))  # type: ignore[arg-type]
@@ -1086,7 +1164,7 @@ def parse_dae(
                                 uv = (values[index][0], values[index][1])
                         position_index = packed[next((offset for semantic, _, offset, _ in inputs if semantic in {"VERTEX", "POSITION"}), 0)]
                         influences = skin_influences[position_index] if position_index < len(skin_influences) else ()
-                        face_indices.append((pos, normal, uv, influences))
+                        face_indices.append((pos, normal, uv, influences, color, position_index))
                     if len(face_indices) < 3:
                         continue
                     for tri in range(1, len(face_indices) - 1):
@@ -1099,14 +1177,14 @@ def parse_dae(
                         )
                         tangent, bitangent = triangle_tangent_space(tri_vertices) if generate_tangents else (None, None)
                         tri_indices = []
-                        for pos, normal, uv, influences in tri_vertices:
+                        for pos, normal, uv, influences, color, position_index in tri_vertices:
                             vertex_normal = vector_normalize(normal or fallback_normal)
                             vertex_tangent, vertex_bitangent = (
                                 vertex_tangent_space(vertex_normal, tangent, bitangent)
                                 if tangent is not None and bitangent is not None
                                 else (None, None)
                             )
-                            vertex = Vertex(pos, vertex_normal, uv, influences, vertex_tangent, vertex_bitangent)
+                            vertex = Vertex(pos, vertex_normal, uv, influences, vertex_tangent, vertex_bitangent, color, color is not None)
                             key = (
                                 vertex.position,
                                 vertex.normal,
@@ -1114,12 +1192,16 @@ def parse_dae(
                                 vertex.influences,
                                 vertex.tangent,
                                 vertex.bitangent,
+                                vertex.color,
                             )
+                            if outline_node is not None:
+                                key += (position_index,)
                             vertex_index = vertex_cache.get(key)
                             if vertex_index is None:
                                 vertex_index = len(vertices)
                                 vertex_cache[key] = vertex_index
                                 vertices.append(vertex)
+                                vertex_source_indices.append(position_index)
                             tri_indices.append(vertex_index)
                         indices.extend(tri_indices)
 
@@ -1135,6 +1217,10 @@ def parse_dae(
                     )
                     source_names = (sidecar_source_name,) if sidecar_source_name else ()
                     meshes.append(Mesh(mesh_name, vertices, indices, material_indices[material_name], material_name, source_names))
+                    geometry_source_indices.append(vertex_source_indices)
+        if outline_node is not None:
+            refine_outline_meshes(meshes[geometry_mesh_start:], geometry_source_indices, outline_seams,
+                                  float(outline_node.get("width", str(OUTLINE_BAND_FRACTION))))
     return meshes or calibration_mesh()
 
 
@@ -1400,13 +1486,11 @@ def apply_vertex_color_policy(
     mode: str,
     color: tuple[int, int, int, int] = STABLE_CUSTOM_VERTEX_COLOR,
 ) -> int:
-    """Apply the explicit COLOR policy after native color transfer.
+    """Keep explicit authored COLOR or apply the stable custom fallback.
 
-    Metal rejects the variable edge2 values produced by the custom Toru port,
-    while the same geometry is stable with the constant COLOR used by a
-    working custom model.  Keep native transfer available for diagnostic and
-    untouched exports, but make the safe custom value authoritative when the
-    preset requests it.
+    Native nearest-position transfer produced artifacts in earlier custom
+    ports, including experiments changing only R/G. Authored mode never keeps
+    that transfer on vertices without source COLOR.
     """
     mode = str(mode).lower()
     if mode not in VERTEX_COLOR_MODES:
@@ -1420,6 +1504,8 @@ def apply_vertex_color_policy(
     changed = 0
     for mesh in meshes:
         for vertex in mesh.vertices:
+            if mode == "authored" and vertex.color_from_source:
+                continue
             if vertex.color != color or vertex.color_from_source:
                 changed += 1
             vertex.color = color
@@ -3034,6 +3120,7 @@ def prepare_port_geometry(
             weight_sidecar=weight_sidecar,
             generate_tangents=config.generate_tangents,
             apply_bind_shape=config.apply_bind_shape,
+            authored_colors=config.vertex_color_mode == "authored",
         )
         if source_dae
         else calibration_mesh()

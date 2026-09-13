@@ -1713,6 +1713,35 @@ def lens_from_vertical_fov(camera_data, fov: float) -> float:
     return camera_data.sensor_height / (2.0 * math.tan(safe_fov * 0.5))
 
 
+EVENT_CAMERA_CLIP_END = 100_000.0
+
+
+def configure_event_camera_clipping() -> int:
+    """Extend clipping only in scenes containing imported G4 cameras."""
+    cameras = [
+        obj for obj in bpy.data.objects
+        if obj.type == "CAMERA" and obj.get("g4cm_source")
+    ]
+    if not cameras:
+        return 0
+
+    changed = 0
+    for camera in cameras:
+        if camera.data.clip_end < EVENT_CAMERA_CLIP_END:
+            camera.data.clip_end = EVENT_CAMERA_CLIP_END
+            changed += 1
+
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for space in area.spaces:
+                if space.type == "VIEW_3D" and space.clip_end < EVENT_CAMERA_CLIP_END:
+                    space.clip_end = EVENT_CAMERA_CLIP_END
+                    changed += 1
+    return changed
+
+
 def create_camera_animation(
     path: Path,
     motion: dict,
@@ -1723,6 +1752,7 @@ def create_camera_animation(
     name = f"{path.stem}_{clip['name']}"
     camera_data = bpy.data.cameras.new(name=name)
     camera_data.sensor_fit = "VERTICAL"
+    camera_data.clip_end = EVENT_CAMERA_CLIP_END
     camera_object = bpy.data.objects.new(name=name, object_data=camera_data)
     collection.objects.link(camera_object)
     camera_object.rotation_mode = "QUATERNION"

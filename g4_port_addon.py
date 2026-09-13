@@ -15,6 +15,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 import bpy
+import bmesh
 from mathutils import Matrix, Vector
 from bpy.props import (
     BoolProperty,
@@ -30,8 +31,18 @@ from bpy_extras.io_utils import ImportHelper
 
 try:
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
+    from .shading import viewport_outline
+    from .outline_regions import (
+        OUTLINE_AUTHORED_KEY, OUTLINE_COLOR_ATTRIBUTE, OUTLINE_SEAM_ATTRIBUTE,
+        STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, native_outline_edges,
+    )
 except ImportError:
     from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
+    from shading import viewport_outline
+    from outline_regions import (
+        OUTLINE_AUTHORED_KEY, OUTLINE_COLOR_ATTRIBUTE, OUTLINE_SEAM_ATTRIBUTE,
+        STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, native_outline_edges,
+    )
 
 try:
     from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
@@ -53,8 +64,8 @@ EXPRESSION_PREVIEW_SOURCE_UV_KEY = "g4_expression_preview_source_uv"
 ATLAS_GUTTER_PIXELS = 2
 G4_PORT_ADDON_MARKER = "expression-face-v9-json-marker-3"
 G4_BLENDER_PLUGIN_VERSION_FALLBACK = (1, 4, 7)
-G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.5"
-STABLE_CUSTOM_VERTEX_COLOR = (255, 153, 191, 127)
+G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.6"
+STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 
 
 def g4_blender_plugin_version() -> str:
@@ -428,6 +439,181 @@ def export_mesh_matrix(source: bpy.types.Object) -> Matrix:
     return reference.matrix_world.inverted_safe() @ source.matrix_world
 
 
+def refresh_authored_outline_mesh(mesh: bpy.types.Mesh) -> None:
+    color = tuple(value / 255 for value in STABLE_OUTLINE_COLOR)
+    if mesh.is_editmode:
+        bm = bmesh.from_edit_mesh(mesh)
+        old = bm.loops.layers.color.get(OUTLINE_COLOR_ATTRIBUTE)
+        if old is not None:
+            bm.loops.layers.color.remove(old)
+        layer = bm.loops.layers.float_color.get(OUTLINE_COLOR_ATTRIBUTE)
+        if layer is None:
+            layer = bm.loops.layers.float_color.new(OUTLINE_COLOR_ATTRIBUTE)
+        for face in bm.faces:
+            for loop in face.loops:
+                loop[layer] = color
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+    else:
+        attribute = mesh.attributes.get(OUTLINE_COLOR_ATTRIBUTE)
+        if attribute is not None and (attribute.domain != "CORNER" or attribute.data_type != "FLOAT_COLOR"):
+            mesh.attributes.remove(attribute)
+            attribute = None
+        if attribute is None:
+            attribute = mesh.color_attributes.new(name=OUTLINE_COLOR_ATTRIBUTE, type="FLOAT_COLOR", domain="CORNER")
+        attribute.data.foreach_set("color", color * len(mesh.loops))
+        mesh.update()
+
+
+def import_native_outline_marks(mesh: bpy.types.Mesh) -> None:
+    if mesh.attributes.get(OUTLINE_SEAM_ATTRIBUTE) is not None or mesh.get(OUTLINE_AUTHORED_KEY):
+        return
+    if mesh.is_editmode:
+        bm = bmesh.from_edit_mesh(mesh)
+        layer = bm.loops.layers.float_color.get(OUTLINE_COLOR_ATTRIBUTE)
+        if layer is None:
+            layer = bm.loops.layers.color.get(OUTLINE_COLOR_ATTRIBUTE)
+        if layer is None:
+            return
+        bm.verts.index_update()
+        positions = [tuple(vertex.co) for vertex in bm.verts]
+        faces = [tuple(loop.vert.index for loop in face.loops) for face in bm.faces]
+        greens = [[loop[layer][1] for loop in face.loops] for face in bm.faces]
+        recovered = native_outline_edges(positions, faces, greens)
+        marks = bm.edges.layers.int.new(OUTLINE_SEAM_ATTRIBUTE)
+        for edge in bm.edges:
+            edge[marks] = int(tuple(sorted(v.index for v in edge.verts)) in recovered)
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+    else:
+        colors = mesh.color_attributes.get(OUTLINE_COLOR_ATTRIBUTE)
+        if colors is None or colors.domain != "CORNER":
+            return
+        recovered = native_outline_edges(
+            [tuple(v.co) for v in mesh.vertices], [tuple(face.vertices) for face in mesh.polygons],
+            [[colors.data[i].color[1] for i in face.loop_indices] for face in mesh.polygons])
+        marks = mesh.attributes.new(OUTLINE_SEAM_ATTRIBUTE, "INT", "EDGE")
+        for edge in mesh.edges:
+            marks.data[edge.index].value = int(tuple(sorted(edge.vertices)) in recovered)
+    mesh["g4_outline_native"] = True
+    if recovered:
+        bpy.context.scene.level5_g4_port.preview_authored_outlines = True
+
+
+def authored_outline_colors(mesh: bpy.types.Mesh) -> list[list[tuple[int, int, int, int]]]:
+    marks = mesh.attributes.get(OUTLINE_SEAM_ATTRIBUTE)
+    if marks is None or marks.domain != "EDGE" or marks.data_type != "INT":
+        raise ValueError("Outline marks are missing; mark the edges again or disable Authored Outlines")
+    seams = {
+        tuple(edge.vertices) for edge in mesh.edges if marks.data[edge.index].value
+    }
+    surface_edges = {tuple(sorted((a, b))) for face in mesh.polygons
+                     for a, b in zip(face.vertices, tuple(face.vertices[1:]) + (face.vertices[0],))}
+    if {tuple(sorted(edge)) for edge in seams} - surface_edges:
+        raise ValueError("Outline marks require surface faces; remove marks from loose edges")
+    # The red overlay shows authoring marks; export builds the narrow bands.
+    return [[STABLE_OUTLINE_COLOR] * len(face.vertices) for face in mesh.polygons]
+
+
+class LEVEL5_G4PORT_OT_mark_outline(Operator):
+    bl_idname = "level5_g4_port.mark_outline"
+    bl_label = "Mark Outline"
+    bl_description = "Mark selected surface edges for outline export, independently of UV seams"
+    bl_options = {"REGISTER", "UNDO"}
+
+    clear: BoolProperty(name="Clear", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == "EDIT_MESH" and len(context.objects_in_mode_unique_data) == 1
+
+    def execute(self, context):
+        mesh = context.edit_object.data
+        bm = bmesh.from_edit_mesh(mesh)
+        if not any(edge.select and not edge.hide for edge in bm.edges):
+            self.report({"ERROR"}, "Select the edges to mark first")
+            return {"CANCELLED"}
+        layer = bm.edges.layers.int.get(OUTLINE_SEAM_ATTRIBUTE)
+        if layer is None:
+            layer = bm.edges.layers.int.new(OUTLINE_SEAM_ATTRIBUTE)
+        selected = [edge for edge in bm.edges if edge.select and not edge.hide]
+        for edge in selected:
+            edge[layer] = 0 if self.clear else 1
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+        count = len(selected)
+        mesh[OUTLINE_AUTHORED_KEY] = True
+        refresh_authored_outline_mesh(mesh)
+        context.scene.level5_g4_port.use_authored_outlines = True
+        context.scene.level5_g4_port.preview_authored_outlines = True
+        viewport_outline.configure_authored(context.scene, True)
+        self.report({"INFO"}, f"{'Cleared' if self.clear else 'Marked'} {count} outline edges")
+        return {"FINISHED"}
+
+
+class LEVEL5_G4PORT_OT_select_outline(Operator):
+    bl_idname = "level5_g4_port.select_outline"
+    bl_label = "Select Outlines"
+    bl_description = "Select the stored outline boundaries"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return LEVEL5_G4PORT_OT_mark_outline.poll(context)
+
+    def execute(self, context):
+        mesh = context.edit_object.data
+        bm = bmesh.from_edit_mesh(mesh)
+        layer = bm.edges.layers.int.get(OUTLINE_SEAM_ATTRIBUTE)
+        bpy.ops.mesh.select_all(action="DESELECT")
+        bpy.ops.mesh.select_mode(type="EDGE")
+        if layer is not None:
+            for edge in bm.edges:
+                if edge[layer] and not edge.hide:
+                    edge.select_set(True)
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+        return {"FINISHED"}
+
+
+class LEVEL5_G4PORT_OT_apply_outline_regions(Operator):
+    bl_idname = "level5_g4_port.apply_outline_regions"
+    bl_label = "Refresh Outlines"
+    bl_description = "Refresh outline parameters from marked edges"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.active_object is not None and context.active_object.type == "MESH"
+                and (context.mode == "OBJECT" or LEVEL5_G4PORT_OT_mark_outline.poll(context)))
+
+    def execute(self, context):
+        mesh = context.active_object.data
+        edit_mode = context.mode == "EDIT_MESH"
+        if edit_mode:
+            bpy.ops.object.mode_set(mode="OBJECT")
+        try:
+            authored_outline_colors(mesh)
+            mesh[OUTLINE_AUTHORED_KEY] = True
+            refresh_authored_outline_mesh(mesh)
+            context.scene.level5_g4_port.use_authored_outlines = True
+            context.scene.level5_g4_port.preview_authored_outlines = True
+            viewport_outline.configure_authored(context.scene, True)
+        except ValueError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        finally:
+            if edit_mode:
+                bpy.ops.object.mode_set(mode="EDIT")
+        message = "Outline marks applied; preview and authored export enabled"
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
+def update_authored_outline_preview(self, context) -> None:
+    viewport_outline.configure_authored(self.id_data, self.preview_authored_outlines)
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+
+
 def export_collada_internal(path: Path, selected_only: bool, apply_modifiers: bool) -> None:
     """Write the mesh-only Collada subset consumed by g4_port.py.
 
@@ -440,12 +626,18 @@ def export_collada_internal(path: Path, selected_only: bool, apply_modifiers: bo
     if not objects:
         raise RuntimeError("No mesh objects were found to export.")
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    authored = getattr(getattr(bpy.context.scene, "level5_g4_port", None), "use_authored_outlines", False)
     geometries = []
     nodes = []
     for object_index, obj in enumerate(objects):
         evaluated = obj.evaluated_get(depsgraph) if apply_modifiers else obj
         mesh = evaluated.data
         mesh.calc_loop_triangles()
+        face_colors = authored_outline_colors(mesh) if authored and obj.data.get(OUTLINE_AUTHORED_KEY) else []
+        colors = [0.0] * (len(mesh.loops) * 4) if face_colors else []
+        for face, corner_colors in zip(mesh.polygons, face_colors):
+            for loop_index, color in zip(face.loop_indices, corner_colors):
+                colors[loop_index * 4:loop_index * 4 + 4] = [value / 255 for value in color]
         geometry_id = f"g4_{object_index}_{collada_symbol(obj.name, 'mesh')}"
         # Bake the complete object transform into the exported geometry.  The
         # legacy Collada operator treats its transform enum differently across
@@ -472,17 +664,29 @@ def export_collada_internal(path: Path, selected_only: bool, apply_modifiers: bo
             for triangle in triangles:
                 for loop_index in triangle.loops:
                     packed.extend((mesh.loops[loop_index].vertex_index, loop_index, loop_index))
+                    if colors:
+                        packed.append(loop_index)
             material = mesh.materials[material_index] if material_index < len(mesh.materials) else None
             material_name = collada_symbol(material.name if material else f"material_{material_index}", f"material_{material_index}")
+            color_input = f'<input semantic="COLOR" source="#{geometry_id}_colors" offset="3" set="0"/>' if colors else ''
             primitive_xml.append(
                 f'<triangles material="{escape(material_name)}" count="{len(triangles)}">'
                 f'<input semantic="VERTEX" source="#{geometry_id}_vertices" offset="0"/>'
                 f'<input semantic="NORMAL" source="#{geometry_id}_normals" offset="1"/>'
                 f'<input semantic="TEXCOORD" source="#{geometry_id}_uv0" offset="2" set="0"/>'
-                f"<p>{' '.join(map(str, packed))}</p></triangles>"
+                f"{color_input}<p>{' '.join(map(str, packed))}</p></triangles>"
             )
         vertex_count = len(mesh.vertices)
         loop_count = len(mesh.loops)
+        color_source = (
+            f'<source id="{geometry_id}_colors"><float_array id="{geometry_id}_colors_array" count="{len(colors)}">{collada_numbers(colors)}</float_array>'
+            f'<technique_common><accessor source="#{geometry_id}_colors_array" count="{loop_count}" stride="4">'
+            '<param name="R" type="float"/><param name="G" type="float"/><param name="B" type="float"/><param name="A" type="float"/>'
+            '</accessor></technique_common></source>'
+        ) if colors else ''
+        marks = mesh.attributes.get(OUTLINE_SEAM_ATTRIBUTE) if face_colors else None
+        seam_text = " ".join(str(v) for edge in mesh.edges if marks and marks.data[edge.index].value for v in edge.vertices)
+        outline_extra = f'<extra><technique profile="G4_OUTLINE"><seams width="{OUTLINE_BAND_FRACTION * bpy.context.scene.level5_g4_port.outline_width:.9g}">{seam_text}</seams></technique></extra>' if face_colors else ""
         geometries.append(
             f'<geometry id="{geometry_id}" name="{escape(obj.name)}"><mesh>'
             f'<source id="{geometry_id}_positions"><float_array id="{geometry_id}_positions_array" count="{len(positions)}">{collada_numbers(positions)}</float_array>'
@@ -495,7 +699,7 @@ def export_collada_internal(path: Path, selected_only: bool, apply_modifiers: bo
             f'<technique_common><accessor source="#{geometry_id}_uv0_array" count="{loop_count}" stride="2">'
             '<param name="S" type="float"/><param name="T" type="float"/>'
             f'</accessor></technique_common></source><vertices id="{geometry_id}_vertices"><input semantic="POSITION" source="#{geometry_id}_positions"/></vertices>'
-            f"{''.join(primitive_xml)}</mesh></geometry>"
+            f"{color_source}{''.join(primitive_xml)}</mesh>{outline_extra}</geometry>"
         )
         nodes.append(
             f'<node id="{geometry_id}_node" name="{escape(obj.name)}"><matrix>{collada_matrix_values(Matrix.Identity(4))}</matrix>'
@@ -520,6 +724,12 @@ def export_collada(
     bake_current_pose: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    authored = getattr(getattr(bpy.context.scene, "level5_g4_port", None), "use_authored_outlines", False)
+    if authored and align_forward_to_y:
+        raise ValueError("Authored Outlines requires Align Forward to Y Axis to be disabled")
+    if authored:
+        for obj in mesh_objects(selected_only):
+            obj.update_from_editmode()
     kwargs = {
         "filepath": str(path),
         "selected": selected_only,
@@ -547,7 +757,7 @@ def export_collada(
             collada_export = None
 
     def run_export():
-        if bake_current_pose:
+        if bake_current_pose or authored:
             export_collada_internal(path, bool(kwargs["selected"]), bool(kwargs["apply_modifiers"]))
             return
         if collada_export is not None:
@@ -591,6 +801,8 @@ def export_collada(
                     modifier.show_viewport = False
             bpy.context.view_layer.update()
             mesh = bpy.data.meshes.new_from_object(pose_source.evaluated_get(depsgraph), depsgraph=depsgraph)
+            if source.data.get(OUTLINE_AUTHORED_KEY):
+                mesh[OUTLINE_AUTHORED_KEY] = True
             copy = bpy.data.objects.new(source.name, mesh)
             copy.matrix_world = export_mesh_matrix(source)
             collection.objects.link(copy)
@@ -1230,6 +1442,21 @@ class G4PortSceneSettings(PropertyGroup):
         default=False,
         description="Disable the native edge2 outline displacement for every exported record",
     )
+    outline_width: FloatProperty(
+        name="Stroke Width", default=1.0, min=0.2, max=4.0,
+        description="Relative width of custom exported outline bands; native edge2 displacement is unchanged",
+    )
+    use_authored_outlines: BoolProperty(
+        name="Authored Outlines",
+        default=False,
+        description="Export the applied outline regions on custom meshes (experimental game rendering)",
+    )
+    preview_authored_outlines: BoolProperty(
+        name="Preview Outlines",
+        default=False,
+        description="Show applied outline regions in Solid, Material Preview and Rendered viewports",
+        update=update_authored_outline_preview,
+    )
     preserve_native_roundtrip: BoolProperty(
         name="Preserve Untouched Native Import",
         default=True,
@@ -1369,7 +1596,8 @@ class G4PortSceneSettings(PropertyGroup):
             "strict_skinning": self.strict_skinning,
             "uv_flip": [self.global_uv_flip_x, self.global_uv_flip_y],
             "disable_edge2": self.disable_edge2,
-            "vertex_color_mode": "constant" if self.texture_mode == "custom" else "native",
+            "outline_width": self.outline_width,
+            "vertex_color_mode": "authored" if self.use_authored_outlines else "constant" if self.texture_mode == "custom" else "native",
             "vertex_color": list(STABLE_CUSTOM_VERTEX_COLOR),
         }
 
@@ -1399,13 +1627,25 @@ def ensure_scene_defaults(context) -> G4PortSceneSettings:
 @persistent
 def initialize_g4_port_scene_defaults(_dummy=None) -> None:
     """Migrate existing .blend scenes after registration or file load."""
+    for obj in getattr(bpy.data, "objects", ()):
+        if obj.type == "MESH":
+            if obj.data.get(OUTLINE_AUTHORED_KEY):
+                refresh_authored_outline_mesh(obj.data)
+            elif obj.get("g4_native_model_source"):
+                import_native_outline_marks(obj.data)
     for scene in getattr(bpy.data, "scenes", ()):
         props = getattr(scene, "level5_g4_port", None)
         if props is not None:
             ensure_expression_pool(props)
+            viewport_outline.configure_authored(scene, props.preview_authored_outlines)
 
 
 def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
+    width = float(config.get("outline_width", 1.0))
+    if not 0.2 <= width <= 4.0:
+        raise ValueError("Stroke Width must be between 0.2 and 4.0")
+    target.outline_width = width
+    target.use_authored_outlines = config.get("vertex_color_mode") == "authored"
     target.model_rel = config.get("model_rel", target.model_rel)
     target.native_material_names = join_csv(config.get("native_material_names", []))
     replacements = config.get("texture_replacements", {})
@@ -3046,7 +3286,7 @@ def has_unchanged_native_roundtrip(props: G4PortSceneSettings, original_model: P
     """True only when the current assignment is an untouched native import."""
     if not props.preserve_native_roundtrip or original_model.suffix.lower() != ".g4md":
         return False
-    if props.disable_edge2:
+    if props.disable_edge2 or props.use_authored_outlines:
         return False
     if props.texture_mode == "keep":
         return False
@@ -3268,7 +3508,7 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
 
     config = generated_config_path(cache)
     config_data = props.to_config()
-    if props.texture_mode == "custom":
+    if props.texture_mode == "custom" and not props.use_authored_outlines:
         config_data["vertex_color_mode"] = "constant"
         config_data["vertex_color"] = list(STABLE_CUSTOM_VERTEX_COLOR)
     rig_reference = active_rig_reference_model(props, original_model)
@@ -3932,6 +4172,14 @@ def draw_textures_section(layout, context, props: G4PortSceneSettings) -> None:
     box.prop(props, "texture_source_dir")
     draw_texture_replacements(box, props)
 
+    box.prop(props, "generate_png_set_on_export")
+    box.prop(props, "replace_special_textures")
+    row = box.row(align=True)
+    row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
+
+
+def draw_expression_pool(layout, props: G4PortSceneSettings) -> None:
+    box = layout
     face_key = shared_face_texture_key([entry.texture_name for entry in props.texture_entries])
     if face_key:
         expression_box = box.box()
@@ -3957,10 +4205,6 @@ def draw_textures_section(layout, context, props: G4PortSceneSettings) -> None:
                 text=f"Cell {index % FACE_ATLAS_COLUMNS + 1}, row {index // FACE_ATLAS_COLUMNS + 1} (top first)",
             )
 
-    box.prop(props, "generate_png_set_on_export")
-    box.prop(props, "replace_special_textures")
-    row = box.row(align=True)
-    row.operator(LEVEL5_G4PORT_OT_generate_texture_pngs.bl_idname, icon="TEXTURE")
 
 
 def draw_export_settings(layout, props: G4PortSceneSettings) -> None:
@@ -4012,7 +4256,10 @@ def draw_port_workflow(layout, context, include_actions: bool) -> None:
     draw_mapping_section(layout, context, props)
     draw_textures_section(layout, context, props)
     draw_export_settings(layout, props)
-    draw_expression_preview_section(layout, props)
+    if not include_actions:
+        draw_outline_workflow(layout, context)
+        draw_expression_pool(layout, props)
+        draw_expression_preview_section(layout, props)
 
     if include_actions:
         row = layout.row(align=True)
@@ -4020,8 +4267,25 @@ def draw_port_workflow(layout, context, include_actions: bool) -> None:
         row.operator(EXPORT_OT_level5_g4_port.bl_idname, icon="EXPORT")
 
 
+def draw_outline_workflow(layout, context) -> None:
+    props = settings(context)
+    box = layout.box()
+    box.label(text="Outline Edges")
+    row = box.row(align=True)
+    row.operator(LEVEL5_G4PORT_OT_mark_outline.bl_idname, text="Mark Outline")
+    row.operator(LEVEL5_G4PORT_OT_mark_outline.bl_idname, text="Clear Outline").clear = True
+    box.operator(LEVEL5_G4PORT_OT_select_outline.bl_idname)
+    box.prop(props, "outline_width")
+    box.prop(props, "preview_authored_outlines")
+    box.prop(props, "use_authored_outlines")
+    if context.mode == "EDIT_MESH":
+        box.label(text="Red lines show marked outline edges")
+    else:
+        box.label(text="Select edges in Edit Mode to mark outlines")
+
+
 class LEVEL5_G4PORT_PT_panel(Panel):
-    bl_label = "G4 Port"
+    bl_label = "PORT"
     bl_idname = "LEVEL5_G4PORT_PT_panel"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -4029,6 +4293,32 @@ class LEVEL5_G4PORT_PT_panel(Panel):
 
     def draw(self, context):
         draw_port_workflow(self.layout, context, include_actions=True)
+
+
+class LEVEL5_G4PORT_PT_outline(Panel):
+    bl_label = "OUTLINE"
+    bl_idname = "LEVEL5_G4PORT_PT_outline"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Level-5"
+    bl_order = 1
+
+    def draw(self, context):
+        draw_outline_workflow(self.layout, context)
+
+
+class LEVEL5_G4PORT_PT_expression(Panel):
+    bl_label = "EXPRESSION"
+    bl_idname = "LEVEL5_G4PORT_PT_expression"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Level-5"
+    bl_order = 2
+
+    def draw(self, context):
+        props = settings(context)
+        draw_expression_pool(self.layout, props)
+        draw_expression_preview_section(self.layout, props)
 
 
 def menu_func_export(self, context):
@@ -4047,6 +4337,9 @@ classes.extend([
     G4PortExpressionImage,
     G4PortRecord,
     G4PortSceneSettings,
+    LEVEL5_G4PORT_OT_mark_outline,
+    LEVEL5_G4PORT_OT_select_outline,
+    LEVEL5_G4PORT_OT_apply_outline_regions,
     LEVEL5_G4PORT_UL_records,
     LEVEL5_G4PORT_UL_joint_aliases,
     LEVEL5_G4PORT_OT_load_original_model,
@@ -4066,6 +4359,8 @@ classes.extend([
     LEVEL5_G4PORT_OT_analyze,
     EXPORT_OT_level5_g4_port,
     LEVEL5_G4PORT_PT_panel,
+    LEVEL5_G4PORT_PT_outline,
+    LEVEL5_G4PORT_PT_expression,
 ])
 
 
@@ -4096,6 +4391,8 @@ def register():
 
 
 def unregister():
+    for scene in bpy.data.scenes:
+        viewport_outline.configure_authored(scene, False)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     if initialize_g4_port_scene_defaults in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(initialize_g4_port_scene_defaults)
