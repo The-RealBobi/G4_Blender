@@ -13,30 +13,6 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 <img src="img/img_02.png" alt="Imported stadium scene" width="750" />
 
-## What it does
-
-| Area | Capabilities |
-| --- | --- |
-| Models | Import individual assets or folders, create materials, extract textures and assign them automatically. |
-| Characters | Build character rigs, resolve shared skeletons, attach modular body parts and preserve skin weights. |
-| Maps | Reconstruct map placement, transforms and linked instances from world hierarchies. |
-| Rendering | Preserve and extend the existing character Toon shader, with separate map, water, grass and effect profiles. |
-| Effects | Read confirmed G4MA/G4MT/G4CM banks and expose conservative, marked previews for animated material/effect parameters. |
-| Porting | Export edited Blender or DAE geometry to native `G4MD`/`G4MG` pairs and update compatible `G4TX` archives. |
-
-## Supported formats
-
-| Format | Use |
-| --- | --- |
-| `G4MD` | Model files |
-| `G4PKM` | Packed model containers |
-| `G4SK` | Skeletons |
-| `G4TX` | Texture archives |
-| `NXTCH` | Nintendo Switch texture payloads |
-| `G4MA` | Material and effect parameter animation banks |
-| `G4CM` | Camera-animation bank structure |
-| `CfgBin` | Confirmed T2B/RDBNP configuration resources |
-
 ## Installation
 
 Install the release ZIP, or package the `G4_Blender` directory as a ZIP while keeping its folder name and `__init__.py` at the add-on root.
