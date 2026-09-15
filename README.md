@@ -15,66 +15,6 @@ An untouched model imported from its original G4MD is preserved byte-for-byte on
 
 ## What it does
 
-Version 1.12.0 updates custom outline parameters automatically, recovers native
-COLOR seam guides for Edit Mode, and adds custom Stroke Width (0.2x–4x).
-
-Version 1.11.2 replaces interpolated custom outline colors with narrow surface
-bands. Every exported triangle has constant COLOR, preventing the previous
-triangle-shaped gradients. Native-game appearance remains experimental.
-
-Version 1.11.0 separates PORT, OUTLINE and EXPRESSION into independent panels.
-Marked outline edges appear immediately in red and support open strokes.
-The native-game appearance of authored regions remains experimental.
-
-Version 1.9.8 stops FakeParticle billboard geometry outside its PTLB or preview
-window, so expired effects no longer remain in the dependency graph for the rest
-of a cut. Imported G4 cameras and their 3D viewports use a 100,000-unit far clip.
-The optional wet highlight also avoids an extra Shader to RGB pass that could
-exceed Metal resource limits in complex Blender 5.2 character materials.
-
-Version 1.9.7 introduced responsive timeline playback. Version 1.9.8 keeps its
-frame-dropping behavior but always uses the complete Game material, including
-its authored lighting and texture maps. The option is enabled by default and
-can be disabled under Responsive Timeline.
-
-Version 1.9.6 reads PTLB particle-node blocks during event discovery and keeps
-their emitter phases, lifetime, motion and interval as inspectable metadata.
-When a particle model has exactly one emitter and no authored G4TP clock, its
-texture simulation now uses the PTLB phase-plus-lifetime window instead of
-stretching over the complete cut. Saved event scenes receive the same upgrade
-when their original PTLB remains available. Multi-emitter libraries are parsed
-but left unchanged until their node-to-mesh bindings can be established.
-
-Version 1.9.5 also moves supported VFX color, threshold and UV animation from
-material node trees to shared scene attributes. This avoids rebuilding more
-than one hundred animated effect shaders per frame in large events while
-preserving the imported curves. Existing event scenes are optimized when opened.
-Custom curves, NLA animation and materials shared between scenes remain editable
-and are left unchanged.
-
-Version 1.9.4 moves imported event character lighting animation to scene
-attributes, avoiding per-frame shader-tree updates while retaining cut colors
-and thresholds. Existing event scenes are optimized when opened. Custom curves,
-NLA animation and materials shared between scenes are left unchanged.
-
-Version 1.9.3 restores character shader construction on Blender 4.1 and adds
-Game outlines to Material Preview and Rendered viewports. Character parameters
-use fewer geometry attribute buffers to avoid a Metal shader resource limit;
-existing modifier controls and values are preserved when opening saved scenes.
-The viewport caches topology and outline colors while updating deformed positions
-and normals. Final renders retain the compositor outline pass. Alpha-cutout
-occluders are not sampled by the viewport surface pass, so some intersections can
-differ from final renders. Dense animated scenes still incur geometry update cost.
-Viewport Outlines is an independent preference and is off by default. Event
-lights now follow the same cut visibility in the viewport and final render;
-existing imported event-light animation is migrated when reopening a scene.
-Restart Blender after updating.
-
-Event batch import retains the rigid attachment, color, threshold and UV animation
-fixes from 1.9.2. Animated mask atlases and scene-depth fading remain unsupported
-for T3ThresholdF. Legacy-version validation here covers character shading, not all
-particle geometry variants.
-
 | Area | Capabilities |
 | --- | --- |
 | Models | Import individual assets or folders, create materials, extract textures and assign them automatically. |
@@ -94,7 +34,6 @@ particle geometry variants.
 | `G4TX` | Texture archives |
 | `NXTCH` | Nintendo Switch texture payloads |
 | `G4MA` | Material and effect parameter animation banks |
-| `G4MT` | Animation-bank directory and clips |
 | `G4CM` | Camera-animation bank structure |
 | `CfgBin` | Confirmed T2B/RDBNP configuration resources |
 
