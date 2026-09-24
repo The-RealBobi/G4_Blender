@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 12, 0),
+    "version": (1, 12, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export > G4MD / G4PKM",
     "description": "",
@@ -704,9 +704,9 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
     parents = skeleton.get("parent_indices") or []
     bind_matrices = skeleton.get("bind_matrices") or []
     armature = target_armature if target_armature is not None and target_armature.type == "ARMATURE" else None
-    if armature is not None:
+    if armature is not None and not names:
         names = [bone.name for bone in armature.data.bones]
-    elif names and bind_matrices:
+    elif armature is None and names and bind_matrices:
         armature_data = bpy.data.armatures.new("skeleton_root")
         armature = bpy.data.objects.new("skeleton_root", armature_data)
         bpy.context.collection.objects.link(armature)
@@ -1502,7 +1502,7 @@ def apply_level5_toon_shader(
     # then convert the completed color back to Blender's linear emission.
     saturation.inputs["Saturation"].default_value = 1.0
     saturation.inputs["Value"].default_value = 1.0
-    links.new(color_transfer(nodes, links, base.outputs["Color"], encode=True), saturation.inputs["Color"])
+    links.new(color_transfer(nodes, links, base.outputs["Color"], encode=True, approximate=True), saturation.inputs["Color"])
     base_color = saturation.outputs["Color"]
 
     surface_normal = None
@@ -1709,8 +1709,11 @@ def apply_level5_toon_shader(
             specular_mask.name = "G4 Specular Mask"
             specular_mask.image = image
             specular_mask.location = (-420, -760)
-            coordinates = nodes.new("ShaderNodeNewGeometry")
-            coordinates.location = (-660, -980)
+            normal_source = surface_normal
+            if normal_source is None:
+                coordinates = nodes.new("ShaderNodeNewGeometry")
+                coordinates.location = (-660, -980)
+                normal_source = coordinates.outputs["Normal"]
             view_normal = nodes.new("ShaderNodeVectorTransform")
             view_normal.name = "G4 View Normal"
             view_normal.vector_type = "NORMAL"
@@ -1737,7 +1740,6 @@ def apply_level5_toon_shader(
             lit_specular.blend_type = "MULTIPLY"
             lit_specular.inputs[0].default_value = 1.0
             lit_specular.location = (380, -720)
-            normal_source = surface_normal if surface_normal is not None else coordinates.outputs["Normal"]
             links.new(normal_source, view_normal.inputs["Vector"])
             links.new(view_normal.outputs["Vector"], sphere_mapping.inputs["Vector"])
             links.new(sphere_mapping.outputs["Vector"], specular_shape.inputs["Vector"])
@@ -1751,15 +1753,14 @@ def apply_level5_toon_shader(
             spec_multiply.inputs[0].default_value = 0.22
             spec_multiply.inputs[2].default_value = (0.42, 0.42, 0.42, 1.0)
             spec_multiply.location = (560, -680)
-            spec_add = nodes.new("ShaderNodeMixRGB")
+            spec_add = nodes.new("ShaderNodeVectorMath")
             spec_add.name = "G4 Specular Composite"
-            spec_add.blend_type = "ADD"
-            spec_add.inputs[0].default_value = 1.0
+            spec_add.operation = "ADD"
             spec_add.location = (760, 80)
             links.new(lit_specular.outputs["Color"], spec_multiply.inputs[1])
-            links.new(color_output, spec_add.inputs[1])
-            links.new(spec_multiply.outputs["Color"], spec_add.inputs[2])
-            color_output = spec_add.outputs["Color"]
+            links.new(color_output, spec_add.inputs[0])
+            links.new(spec_multiply.outputs["Color"], spec_add.inputs[1])
+            color_output = spec_add.outputs[0]
 
     highlight_add = nodes.new("ShaderNodeMixRGB")
     highlight_add.name = "G4 Highlight"
@@ -1820,7 +1821,7 @@ def apply_level5_toon_shader(
     emission = nodes.new("ShaderNodeEmission")
     emission.location = (820, 180)
     emission.inputs["Strength"].default_value = 1.0
-    links.new(color_transfer(nodes, links, color_output, encode=False), emission.inputs["Color"])
+    links.new(color_transfer(nodes, links, color_output, encode=False, approximate=True), emission.inputs["Color"])
     add_outline_outputs(nodes, links)
     alpha_output = base.outputs.get("Alpha")
     alpha_path = first_variant_path(variants, "alpha_red")
@@ -3053,8 +3054,10 @@ def refresh_level5_outlines_on_load(_unused) -> None:
     viewport_outline.unregister()
     g4_animation_addon.migrate_event_light_visibility(bpy.context.scene)
     g4_animation_addon.configure_event_camera_clipping()
+    from .shading.effect_nodes import disable_effect_transparent_shadows
     from .shading.character_lighting import optimize_event_lighting
     from .shading.effect_animation import optimize_effect_animation
+    disable_effect_transparent_shadows(bpy.data.materials)
     for scene in bpy.data.scenes:
         optimize_event_lighting(scene)
         optimize_effect_animation(scene)
@@ -3351,9 +3354,6 @@ def import_g4_model(
 
 def model_data_roots(path: Path, prefs: G4ImporterPreferences) -> list[Path]:
     roots = []
-    configured = bpy.path.abspath(getattr(prefs, "raw_data_root", "") or "")
-    if configured:
-        roots.append(Path(configured))
     parts = path.parts
     for index in range(len(parts) - 1):
         if parts[index] == "common" and parts[index + 1] in {"chr", "chr_face"}:
@@ -3363,6 +3363,11 @@ def model_data_roots(path: Path, prefs: G4ImporterPreferences) -> list[Path]:
         if parent.name.casefold() == "data" and (parent / "common").is_dir():
             roots.append(parent)
             break
+    # A model's sibling data is authoritative for custom parts; the configured
+    # dump remains a fallback for shared tables and native assets.
+    configured = bpy.path.abspath(getattr(prefs, "raw_data_root", "") or "")
+    if configured:
+        roots.append(Path(configured))
     return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
 
 

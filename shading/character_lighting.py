@@ -28,9 +28,17 @@ def optimize_event_lighting(scene: bpy.types.Scene) -> int:
     return migrate_material_animation(scene, materials, paths, {"CONSTANT"})
 
 
-def color_transfer(nodes: bpy.types.Nodes, links: bpy.types.NodeLinks, source: bpy.types.NodeSocket, *, encode: bool) -> bpy.types.NodeSocket:
+def color_transfer(
+    nodes: bpy.types.Nodes,
+    links: bpy.types.NodeLinks,
+    source: bpy.types.NodeSocket,
+    *,
+    encode: bool,
+    approximate: bool,
+) -> bpy.types.NodeSocket:
     """Convert between Blender linear RGB and the captured UNORM working RGB."""
-    name = "G4 Linear to UNORM" if encode else "G4 UNORM to Linear"
+    suffix = " Approx" if approximate else ""
+    name = ("G4 Linear to UNORM" if encode else "G4 UNORM to Linear") + suffix
     group = bpy.data.node_groups.get(name)
     if group is None:
         group = bpy.data.node_groups.new(name, "ShaderNodeTree")
@@ -39,32 +47,54 @@ def color_transfer(nodes: bpy.types.Nodes, links: bpy.types.NodeLinks, source: b
         ns, ls = group.nodes, group.links
         inp = ns.new("NodeGroupInput")
         out = ns.new("NodeGroupOutput")
-        split = ns.new("ShaderNodeSeparateColor")
-        combine = ns.new("ShaderNodeCombineColor")
-        ls.new(inp.outputs[0], split.inputs[0])
-        for index in range(3):
-            def math(operation, a, b):
-                node = ns.new("ShaderNodeMath")
-                node.operation = operation
-                for socket, value in zip(node.inputs, (a, b)):
-                    if isinstance(value, (int, float)):
-                        socket.default_value = value
-                    else:
-                        ls.new(value, socket)
-                return node.outputs[0]
-            value = math("MAXIMUM", split.outputs[index], 0.0)
-            small = math("LESS_THAN", value, 0.0031308 if encode else 0.04045)
-            low = math("MULTIPLY", value, 12.92 if encode else 1.0 / 12.92)
-            if encode:
-                high = math("POWER", value, 1.0 / 2.4)
-                high = math("SUBTRACT", math("MULTIPLY", high, 1.055), 0.055)
-            else:
-                high = math("DIVIDE", math("ADD", value, 0.055), 1.055)
-                high = math("POWER", high, 2.4)
-            result = math("ADD", math("MULTIPLY", low, small),
-                          math("MULTIPLY", high, math("SUBTRACT", 1.0, small)))
-            ls.new(result, combine.inputs[index])
-        ls.new(combine.outputs[0], out.inputs[0])
+        if approximate:
+            curve_node = ns.new("ShaderNodeRGBCurve")
+            curve = curve_node.mapping.curves[3]
+            # ponytail: a short LUT keeps the viewport shader cheap; add samples only
+            # if a future capture shows a visible transfer-band artifact.
+            points = (0.0, 0.0031308, 0.01, 0.04, 0.08, 0.16, 0.3, 0.5, 0.7, 0.85, 1.0) if encode else (
+                0.0, 0.01, 0.04045, 0.08, 0.16, 0.3, 0.5, 0.7, 0.9, 1.0
+            )
+
+            def transfer(value):
+                if encode:
+                    return 12.92 * value if value <= 0.0031308 else 1.055 * value ** (1.0 / 2.4) - 0.055
+                return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+            curve.points[0].location = (points[0], transfer(points[0]))
+            curve.points[1].location = (points[-1], transfer(points[-1]))
+            for point in points[1:-1]:
+                curve.points.new(point, transfer(point))
+            curve_node.mapping.update()
+            ls.new(inp.outputs[0], curve_node.inputs["Color"])
+            ls.new(curve_node.outputs["Color"], out.inputs[0])
+        else:
+            split = ns.new("ShaderNodeSeparateColor")
+            combine = ns.new("ShaderNodeCombineColor")
+            ls.new(inp.outputs[0], split.inputs[0])
+            for index in range(3):
+                def math(operation, *values):
+                    node = ns.new("ShaderNodeMath")
+                    node.operation = operation
+                    for socket, value in zip(node.inputs, values):
+                        if isinstance(value, (int, float)):
+                            socket.default_value = value
+                        else:
+                            ls.new(value, socket)
+                    return node.outputs[0]
+                value = split.outputs[index] if encode else math("MAXIMUM", split.outputs[index], 0.0)
+                small = math("LESS_THAN", value, 0.0031308 if encode else 0.04045)
+                low = math("MULTIPLY", value, 12.92 if encode else 1.0 / 12.92)
+                if encode:
+                    high = math("POWER", value, 1.0 / 2.4)
+                    high = math("MULTIPLY_ADD", high, 1.055, -0.055)
+                else:
+                    high = math("MULTIPLY_ADD", value, 1.0 / 1.055, 0.055 / 1.055)
+                    high = math("POWER", high, 2.4)
+                result = math("MULTIPLY_ADD", low, small,
+                              math("MULTIPLY", high, math("SUBTRACT", 1.0, small)))
+                ls.new(result, combine.inputs[index])
+            ls.new(combine.outputs[0], out.inputs[0])
     node = nodes.new("ShaderNodeGroup")
     node.node_tree = group
     node.name = name
@@ -109,9 +139,7 @@ def build_character_lighting(nodes, links, base_color, occlusion_channels, surfa
         links.new(direction, diffuse.inputs["Normal"])
         rgb = nodes.new("ShaderNodeShaderToRGB")
         links.new(diffuse.outputs[0], rgb.inputs[0])
-        bw = nodes.new("ShaderNodeRGBToBW")
-        links.new(rgb.outputs[0], bw.inputs[0])
-        intensities.append(bw.outputs[0])
+        intensities.append(rgb.outputs["Color"])
     signed = math("G4 Signed Light", "SUBTRACT", *intensities)
     # Opposing diffuse probes cancel uniform environment light. Character
     # ambient is applied separately, as it is in CBUSE_UB_CHARA_LIGHT_IDX.
@@ -160,16 +188,24 @@ def build_character_lighting(nodes, links, base_color, occlusion_channels, surfa
     luminance.inputs[1].default_value = (.29891, .58661, .11448)
     links.new(base_color, luminance.inputs[0])
     lift = math("G4 Shadow Luminance", "MULTIPLY", luminance.outputs["Value"], .1)
-    shade = mix("G4 Shadow Luminance Composite", "ADD", 1.0, shadows.outputs[0], lift).outputs[0]
+    shade_node = nodes.new("ShaderNodeVectorMath")
+    shade_node.name = "G4 Shadow Luminance Composite"
+    shade_node.operation = "ADD"
+    links.new(shadows.outputs[0], shade_node.inputs[0])
+    links.new(lift, shade_node.inputs[1])
+    shade = shade_node.outputs[0]
     ambient = mix("G4 Character Ambient", "MIX", .04995, base_color, (.924925, .874975, .874975, 1.0))
-    ambient_mul = mix("G4 Character Ambient Multiply", "MULTIPLY", 1.0, ambient.outputs[0], tuple(ambient.inputs[2].default_value))
     # Keep a single editable/animated ambient color for both native terms.
     # RGB sockets are linked via a separate color source by the event adapter.
     ambient_color = nodes.new("ShaderNodeRGB")
     ambient_color.name = "G4 Ambient Color"
     ambient_color.outputs[0].default_value = tuple(ambient.inputs[2].default_value)
     links.new(ambient_color.outputs[0], ambient.inputs[2])
-    links.new(ambient_color.outputs[0], ambient_mul.inputs[2])
+    ambient_mul = nodes.new("ShaderNodeVectorMath")
+    ambient_mul.name = "G4 Character Ambient Multiply"
+    ambient_mul.operation = "MULTIPLY"
+    links.new(ambient.outputs[0], ambient_mul.inputs[0])
+    links.new(ambient_color.outputs[0], ambient_mul.inputs[1])
     add_rate = math("G4 Shadow Add Rate", "MULTIPLY", covers[0], -.1)
     mul_rate = math("G4 Shadow Multiply Rate", "MULTIPLY", covers[0], 1.3)
     def vector(operation, a, b):

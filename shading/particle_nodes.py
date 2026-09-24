@@ -8,7 +8,7 @@ from .effect_nodes import effect_data_image
 from .character_lighting import color_transfer
 
 
-PARTICLE_GEOMETRY_SCHEMA = 3
+PARTICLE_GEOMETRY_SCHEMA = 4
 PARTICLE_WINDOW_NODES = (
     'Particle Start Limit',
     'Particle After Start',
@@ -16,6 +16,77 @@ PARTICLE_WINDOW_NODES = (
     'Particle Before End',
     'Particle Active Window',
 )
+
+
+def _particle_group_signature(group):
+    if group.animation_data is not None:
+        return None
+
+    def value(socket):
+        if socket.is_linked:
+            return None
+        default = getattr(socket, "default_value", None)
+        if isinstance(default, str) or not hasattr(default, "__iter__"):
+            return default
+        return tuple(default)
+
+    nodes = tuple(
+        (
+            node.bl_idname,
+            node.name,
+            getattr(node, "operation", ""),
+            getattr(node, "mode", ""),
+            tuple(value(socket) for socket in node.inputs),
+            str(node.inputs["Image"].default_value.filepath)
+            if node.inputs.get("Image") is not None and node.inputs["Image"].default_value else "",
+        )
+        for node in group.nodes
+    )
+    node_ids = {node.name: index for index, node in enumerate(group.nodes)}
+    links = tuple(sorted(
+        (
+            node_ids[link.from_node.name], link.from_socket.name,
+            node_ids[link.to_node.name], link.to_socket.name,
+        )
+        for link in group.links
+    ))
+    interface = tuple(
+        (
+            item.item_type,
+            item.in_out,
+            item.name,
+            getattr(item, "socket_type", ""),
+            getattr(item, "default_value", None),
+        )
+        for item in group.interface.items_tree
+    )
+    custom = tuple(sorted((key, repr(value)) for key, value in group.items()))
+    return repr((custom, interface, nodes, links))
+
+
+def deduplicate_particle_geometry_groups(scene) -> int:
+    """Share identical, non-animated particle graphs between effect objects."""
+    canonical = {}
+    replaced = 0
+    for obj in scene.objects:
+        for modifier in obj.modifiers:
+            if modifier.type != "NODES" or modifier.node_group is None:
+                continue
+            group = modifier.node_group
+            if not group.get("g4_particle_geometry"):
+                continue
+            signature = _particle_group_signature(group)
+            if signature is None:
+                continue
+            target = canonical.setdefault(signature, group)
+            if target == group:
+                continue
+            modifier.node_group = target
+            replaced += 1
+    for group in tuple(bpy.data.node_groups):
+        if group.get("g4_particle_geometry") and group.users == 0:
+            bpy.data.node_groups.remove(group)
+    return replaced
 
 
 def ensure_particle_preview_window(group: bpy.types.GeometryNodeTree) -> bool:
@@ -301,7 +372,7 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
         result = node('GeometryNodeSampleIndex', data_type=data_type, domain='CORNER')
         links.new(geometry, result.inputs['Geometry'])
         links.new(value, result.inputs['Value'])
-        links.new(math('ADD', corner, offset), result.inputs['Index'])
+        links.new(corner if offset == 0 else math('ADD', corner, offset), result.inputs['Index'])
         return result.outputs['Value']
 
     def attribute(name, data_type):
@@ -309,10 +380,11 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
         result.inputs['Name'].default_value = name
         return sample(result.outputs['Attribute'], data_type, 0)
 
-    position = node('GeometryNodeInputPosition').outputs[0]
-    a, b, c = (sample(position, 'FLOAT_VECTOR', i) for i in range(3))
-    center = vector('SCALE', vector('ADD', vector('ADD', a, b), c), 1 / 3)
-    normal = vector('NORMALIZE', vector('CROSS_PRODUCT', vector('SUBTRACT', b, a), vector('SUBTRACT', c, a)), (0, 0, 0))
+    position_node = node('GeometryNodeInputPosition', name='Particle Face Position')
+    position = position_node.outputs[0]
+    a, b = (sample(position, 'FLOAT_VECTOR', i) for i in range(2))
+    center = position
+    normal = node('GeometryNodeInputNormal', name='Particle Face Normal').outputs[0]
     radial = vector('NORMALIZE', vector('SUBTRACT', a, center), (0, 0, 0))
     tangent = vector('CROSS_PRODUCT', normal, radial)
     time = node('GeometryNodeInputSceneTime').outputs['Frame']
@@ -342,13 +414,14 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
     points = node('GeometryNodeMeshToPoints', mode='FACES')
     links.new(geometry, points.inputs['Mesh'])
     links.new(vector('ADD', center, displacement), points.inputs['Position'])
-    radius = math('MULTIPLY', math('ABSOLUTE', math('MULTIPLY', vector('DISTANCE', a, b), p[0] * .5), 0), textures[1].outputs['Alpha'])
-    tint = vector('MULTIPLY', attribute('G4 Particle Color', 'FLOAT_COLOR'), textures[0].outputs['Color'])
+    radius = math('MULTIPLY', math('MULTIPLY', vector('DISTANCE', a, b), p[0] * .5), textures[1].outputs['Alpha'])
+    particle_color = attribute('G4 Particle Color', 'FLOAT_COLOR')
+    tint = vector('MULTIPLY', particle_color, textures[0].outputs['Color'])
     tint = vector('MULTIPLY', tint, tuple(colors[i] * (1 + colors[4]) for i in range(3)))
     separate0 = node('FunctionNodeSeparateColor', mode='RGB')
     links.new(color0, separate0.inputs[0])
     separate1 = node('FunctionNodeSeparateColor', mode='RGB')
-    links.new(attribute('G4 Particle Color', 'FLOAT_COLOR'), separate1.inputs[0])
+    links.new(particle_color, separate1.inputs[0])
     alpha = math('MULTIPLY', math('MULTIPLY', separate0.outputs['Alpha'], separate1.outputs['Alpha']), math('MULTIPLY', textures[0].outputs['Alpha'], colors[3]))
     # Capture fields on the source faces before replacing the triangle geometry.
     current = geometry
@@ -419,21 +492,27 @@ def _particle_material(material: bpy.types.Material, image: bpy.types.Image, add
     links.new(opacity.outputs['Fac'], alpha.inputs[0])
     links.new(texture.outputs['Alpha'], alpha.inputs[1])
     emission = nodes.new('ShaderNodeEmission')
-    links.new(color_transfer(nodes, links, product.outputs[0], encode=False), emission.inputs[0])
-    transparent = nodes.new('ShaderNodeBsdfTransparent')
-    blend = nodes.new('ShaderNodeAddShader' if additive else 'ShaderNodeMixShader')
+    links.new(color_transfer(nodes, links, product.outputs[0], encode=False, approximate=True), emission.inputs[0])
     if additive:
         links.new(alpha.outputs[0], emission.inputs['Strength'])
+        transparent = nodes.new('ShaderNodeBsdfTransparent')
+        blend = nodes.new('ShaderNodeAddShader')
+        links.new(transparent.outputs[0], blend.inputs[0])
+        links.new(emission.outputs[0], blend.inputs[1])
     else:
+        transparent = nodes.new('ShaderNodeBsdfTransparent')
+        blend = nodes.new('ShaderNodeMixShader')
         links.new(alpha.outputs[0], blend.inputs[0])
-    links.new(transparent.outputs[0], blend.inputs[-2])
-    links.new(emission.outputs[0], blend.inputs[-1])
+        links.new(transparent.outputs[0], blend.inputs[1])
+        links.new(emission.outputs[0], blend.inputs[2])
     output = nodes.new('ShaderNodeOutputMaterial')
     links.new(blend.outputs[0], output.inputs[0])
     if hasattr(material, 'surface_render_method'):
         material.surface_render_method = 'BLENDED'
     else:
         material.blend_method = 'BLEND'
+    if hasattr(material, 'use_transparent_shadow'):
+        material.use_transparent_shadow = False
     material['g4_effect_preview'] = 'FAKE_PARTICLE'
 
 

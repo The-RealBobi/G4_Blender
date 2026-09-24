@@ -34,6 +34,7 @@ try:
     from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
     from .effects.particle_library import particle_library_metadata, read_particle_library
+    from .shading.particle_nodes import deduplicate_particle_geometry_groups
     from .g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
         load_event_actor_models, load_event_actor_points,
@@ -48,6 +49,7 @@ except ImportError:
     from g4ma_motion import decode_material_motion, material_animation_paths
     from g4cm_camera import decode_camera, parse_g4cm
     from effects.particle_library import particle_library_metadata, read_particle_library
+    from shading.particle_nodes import deduplicate_particle_geometry_groups
     from g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
         load_event_actor_models, load_event_actor_points,
@@ -70,6 +72,217 @@ def action_fcurves(action):
             for channelbag in getattr(strip, "channelbags", ()):
                 curves.extend(channelbag.fcurves)
     return tuple(curves)
+
+
+def deduplicate_static_materials(scene) -> int:
+    """Share identical non-animated material trees after an event import."""
+    owners = {}
+    for obj in scene.objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            if slot.material is not None:
+                owners.setdefault(slot.material, []).append(slot)
+
+    signatures = {}
+    merged_slots = 0
+    for material in tuple(bpy.data.materials):
+        tree = material.node_tree
+        if tree is None or material.animation_data is not None:
+            continue
+        tree_animation = tree.animation_data
+        if tree_animation and (tree_animation.action or tree_animation.nla_tracks):
+            continue
+        if not material.get("g4_effect_preview"):
+            continue
+
+        nodes = list(tree.nodes)
+        node_ids = {node: index for index, node in enumerate(nodes)}
+        node_data = []
+        for node in nodes:
+            values = []
+            for socket in node.inputs:
+                value = getattr(socket, "default_value", None)
+                if hasattr(value, "__iter__") and not isinstance(value, str):
+                    value = tuple(value)
+                values.append(value)
+            image = node.image.filepath if node.type == "TEX_IMAGE" and node.image else ""
+            node_data.append((node.type, node.name, getattr(node, "operation", ""),
+                              getattr(node, "blend_type", ""), image, tuple(values)))
+        links = tuple(sorted((node_ids[link.from_node], link.from_socket.name,
+                              node_ids[link.to_node], link.to_socket.name)
+                             for link in tree.links))
+        kind = material.get("g4_effect_preview")
+        source = material.get("g4_source_model", "")
+        signature = repr((kind, source, tuple(node_data), links,
+                          getattr(material, "surface_render_method", None),
+                          getattr(material, "blend_method", None),
+                          getattr(material, "use_transparent_shadow", None)))
+        canonical = signatures.get(signature)
+        if canonical is None:
+            signatures[signature] = material
+            continue
+        for slot in owners.get(material, ()):
+            slot.material = canonical
+            merged_slots += 1
+        if material.users == 0 and not material.use_fake_user:
+            bpy.data.materials.remove(material)
+    return merged_slots
+
+
+def fold_static_material_constants(scene) -> int:
+    """Replace unused constant nodes in material trees after animation migration."""
+    folded = 0
+    for obj in scene.objects:
+        if obj.type != "MESH":
+            continue
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None or not material.get("g4_effect_preview"):
+                continue
+            tree = material.node_tree
+            if tree is None or material.animation_data is not None or tree.animation_data is not None:
+                continue
+            for node in tuple(tree.nodes):
+                if node.bl_idname not in {"ShaderNodeValue", "ShaderNodeRGB"}:
+                    continue
+                output = node.outputs[0]
+                links = tuple(output.links)
+                if not links:
+                    continue
+                value = output.default_value
+                if hasattr(value, "__iter__") and not isinstance(value, str):
+                    value = tuple(value)
+                try:
+                    for link in links:
+                        link.to_socket.default_value = value
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                for link in links:
+                    tree.links.remove(link)
+                tree.nodes.remove(node)
+                folded += 1
+    return folded
+
+
+def fold_static_math_constants(scene) -> int:
+    """Fold constant math chains in non-animated threshold effect trees."""
+    folded = 0
+
+    def value(socket, constants):
+        if socket.is_linked:
+            return constants.get(socket.links[0].from_socket)
+        default = getattr(socket, "default_value", None)
+        return tuple(default) if hasattr(default, "__iter__") and not isinstance(default, str) else default
+
+    def evaluate(node, inputs):
+        operation = node.operation
+        if operation == "ABSOLUTE":
+            result = abs(inputs[0])
+        elif operation == "ADD":
+            result = inputs[0] + inputs[1]
+        elif operation == "SUBTRACT":
+            result = inputs[0] - inputs[1]
+        elif operation == "MULTIPLY":
+            result = inputs[0] * inputs[1]
+        elif operation == "DIVIDE":
+            result = inputs[0] / inputs[1] if inputs[1] else 0.0
+        elif operation == "MULTIPLY_ADD":
+            result = inputs[0] * inputs[1] + inputs[2]
+        elif operation == "MINIMUM":
+            result = min(inputs[0], inputs[1])
+        elif operation == "MAXIMUM":
+            result = max(inputs[0], inputs[1])
+        elif operation == "LESS_THAN":
+            result = float(inputs[0] < inputs[1])
+        elif operation == "GREATER_THAN":
+            result = float(inputs[0] > inputs[1])
+        else:
+            return None
+        return min(max(result, 0.0), 1.0) if node.use_clamp else result
+
+    materials = {slot.material for obj in scene.objects if obj.type == "MESH"
+                 for slot in obj.material_slots if slot.material}
+    materials = {material for material in materials
+                 if material.get("g4_effect_preview") in {"T3_THRESHOLD", "THRESHOLD_STATIC"}
+                 and material.node_tree and material.animation_data is None
+                 and material.node_tree.animation_data is None}
+    for material in materials:
+        tree = material.node_tree
+        constants = {}
+        for _ in range(len(tree.nodes)):
+            progress = False
+            for node in tuple(tree.nodes):
+                if node.bl_idname != "ShaderNodeMath":
+                    continue
+                inputs = [value(socket, constants) for socket in node.inputs]
+                if len(inputs) < 3:
+                    inputs.extend([0.0] * (3 - len(inputs)))
+                if any(item is None for item in inputs):
+                    continue
+                result = evaluate(node, inputs)
+                if result is None:
+                    continue
+                output = node.outputs[0]
+                constants[output] = result
+                links = tuple(output.links)
+                try:
+                    for link in links:
+                        link.to_socket.default_value = result
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                for link in links:
+                    tree.links.remove(link)
+                tree.nodes.remove(node)
+                folded += 1
+                progress = True
+                break
+            if not progress:
+                break
+    return folded
+
+
+def join_event_effect_meshes(scene) -> int:
+    """Join VFX meshes that share one effect rig and visibility interval."""
+    groups = defaultdict(list)
+
+    def visibility_signature(obj):
+        action = obj.animation_data.action if obj.animation_data else None
+        return tuple(
+            (
+                curve.data_path,
+                curve.array_index,
+                tuple((point.co[0], point.co[1], point.interpolation) for point in curve.keyframe_points),
+            )
+            for curve in action_fcurves(action)
+            if curve.data_path in {"hide_viewport", "hide_render"}
+        ) if action else ()
+
+    for obj in scene.objects:
+        if obj.type != "MESH" or not any(
+            material and material.get("g4_effect_preview") for material in obj.data.materials
+        ):
+            continue
+        parent = obj.parent
+        if parent is not None and parent.type == "ARMATURE":
+            groups[(parent, visibility_signature(obj))].append(obj)
+
+    joined = 0
+    current_frame = scene.frame_current
+    for objects in groups.values():
+        if len(objects) < 2:
+            continue
+        bpy.ops.object.select_all(action="DESELECT")
+        active = objects[0]
+        for obj in objects:
+            obj.hide_viewport = False
+            obj.hide_set(False)
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = active
+        bpy.ops.object.join()
+        joined += len(objects) - 1
+    scene.frame_set(current_frame)
+    return joined
 
 
 def action_fcurve_find(action, data_path: str, index: int):
@@ -623,7 +836,7 @@ def extract_event_root_motion(
         return 0
     root_rest = root_pose_bone.bone.matrix_local.copy() if root_pose_bone is not None else rest.copy()
     blender_rest = blender_local_rest_matrix(root_pose_bone) if root_pose_bone is not None else rest
-    basis_correction = rest.inverted_safe() @ blender_rest
+    basis_correction = retarget_basis_correction(rest, blender_rest)
     parent_track = None
     if root_pose_bone is not None and root_pose_bone.parent is not None:
         parent_track = next((item for item in motion["tracks"]
@@ -827,6 +1040,12 @@ def source_matrix(transform: dict) -> Matrix:
     return Matrix.LocRotScale(translation, rotation, scale)
 
 
+def retarget_basis_correction(source_rest: Matrix, target_rest: Matrix) -> Matrix:
+    correction = source_rest.inverted_safe() @ target_rest
+    correction.translation = (0.0, 0.0, 0.0)
+    return correction
+
+
 def clear_pose(armature) -> None:
     for pose_bone in armature.pose.bones:
         pose_bone.location = (0.0, 0.0, 0.0)
@@ -999,7 +1218,7 @@ def append_motion_to_action(
         parent_track = tracks_by_name.get(parent_by_name.get(name))
         primary_pose_bone = next((bone for bone in pose_bones if bone.name == name), pose_bones[0])
         blender_rest = blender_local_rest_matrix(primary_pose_bone)
-        basis_correction = rest.inverted_safe() @ blender_rest
+        basis_correction = retarget_basis_correction(rest, blender_rest)
         locations = []
         rotations = []
         scales = []
@@ -1087,6 +1306,9 @@ def create_action(
     )
     armature.animation_data.action = None
     armature.animation_data.action = action
+    slots = getattr(action, "slots", None)
+    if slots is not None and len(slots):
+        armature.animation_data.action_slot = slots[0]
 
     action["g4_relative_rest_tracks"] = relative_rest_tracks
     return action, keyed_bones
@@ -2175,8 +2397,6 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
 
 
 
-
-
 def decode_event_effect_motions(directory: Path, prefs, temporary_directory: Path) -> dict[str, dict]:
     skeleton = None
     for data_root in candidate_data_roots(directory, getattr(prefs, "raw_data_root", "")):
@@ -2254,6 +2474,8 @@ def configure_event_effect_materials(imported: set[object]) -> list[str]:
                 material.surface_render_method = "DITHERED"
             else:
                 material.blend_method = "HASHED"
+            if hasattr(material, "use_transparent_shadow"):
+                material.use_transparent_shadow = False
             material["g4_effect_shader_family"] = (
                 "threshold" if "threshold" in name else "basic"
             )
@@ -3284,8 +3506,17 @@ def import_event_actor(
                     for row in range(4)
                     for column in range(4)
                 ]
-        substituted_generic = generic_actor and bool(head_model)
-        if substituted_generic:
+        substituted_model = bool(
+            head_model
+            or body_model
+            or shoes_model
+            or accessory_model
+            or gloves_model
+            or armband_model
+            or nameplate_model
+            or manifest_model
+        )
+        if substituted_model:
             remove_nonroot_translation_curves(action, armature)
         cut = clip["name"] or event_cut_name(package) or f"cut_{index:03d}"
         placement_frames = 0
@@ -3325,7 +3556,7 @@ def import_event_actor(
             strip_start,
             duration,
             cut,
-            rotation_only_retarget=substituted_generic,
+            rotation_only_retarget=substituted_model,
         )
         face_materials = animate_event_face_materials(
             armature,
@@ -4032,6 +4263,9 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         write_event_import_log(event_log)
         cut_frames = {}
         camera_object = None
+        effect_roots = []
+        p3lip_controllers = []
+        shared_particle_groups = 0
         try:
             with tempfile.TemporaryDirectory(prefix="level5_g4_event_") as temporary:
                 temporary_directory = Path(temporary)
@@ -4050,7 +4284,6 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 )
                 event_log.append(f"effect_motion_cuts={len(effect_motions)}")
                 write_event_import_log(event_log)
-                p3lip_controllers = []
                 for actor, actor_packages in sorted(packages.items()):
                     actor_parts = dict(character_parts.get(actor) or {})
                     if actor_parts.get("skip"):
@@ -4110,7 +4343,11 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 event_log.append("stage=importing-effects")
                 write_event_import_log(event_log)
                 effect_roots = import_event_effect_models(effect_candidates, effect_motions, cut_starts, frame_end-frame_origin+1)
+                joined_effect_meshes = join_event_effect_meshes(context.scene)
+                shared_particle_groups = deduplicate_particle_geometry_groups(context.scene)
                 event_log.append(f"effect_roots={len(effect_roots)}")
+                event_log.append(f"joined_effect_meshes={joined_effect_meshes}")
+                event_log.append(f"shared_particle_groups={shared_particle_groups}")
                 write_event_import_log(event_log)
                 if camera_paths:
                     camera_object, _ = import_event_camera(
@@ -4120,6 +4357,13 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                         cut_starts,
                         progress,
                     )
+                folded_material_constants = fold_static_material_constants(context.scene)
+                folded_static_math = fold_static_math_constants(context.scene)
+                event_log.append(
+                    f"folded_static_material_constants={folded_material_constants + folded_static_math}"
+                )
+                shared_material_slots = deduplicate_static_materials(context.scene)
+                event_log.append(f"shared_static_material_slots={shared_material_slots}")
 
             scene = context.scene
             scene.frame_start = 1
@@ -4132,8 +4376,16 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 scene.timeline_markers.new(cut, frame=frame)
             scene.frame_set(1)
             scene["g4_event_skipped_actors"] = json.dumps(skipped_actors, sort_keys=True)
-            scene["g4_event_effect_candidates"] = json.dumps(effect_candidates, sort_keys=True)
+            effect_candidate_metadata = []
+            for candidate in effect_candidates:
+                metadata = dict(candidate)
+                particle_library = metadata.get("particle_library")
+                if particle_library is not None:
+                    metadata["particle_library"] = particle_library_metadata(particle_library)
+                effect_candidate_metadata.append(metadata)
+            scene["g4_event_effect_candidates"] = json.dumps(effect_candidate_metadata, sort_keys=True)
             scene["g4_event_effect_count"] = len(effect_roots)
+            scene["g4_event_effect_shared_particle_groups"] = shared_particle_groups
             scene["g4_event_p3lip_count"] = len(p3lip_controllers)
             scene["g4_event_point_packages"] = has_event_point_packages
             scene["g4_event_point_assignment_count"] = len(point_assignments)

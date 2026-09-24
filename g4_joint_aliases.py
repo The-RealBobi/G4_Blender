@@ -24,6 +24,70 @@ def normalize_joint_key(name: str) -> str:
     return _BLENDER_COPY_SUFFIX.sub("", name.strip()).lower().replace("-", "_").replace(" ", "_")
 
 
+def canonical_export_joint(name: str) -> str:
+    """Map Blender helper bones to the compact joints used by G4 resources."""
+    key = normalize_joint_key(name)
+    if not key:
+        return ""
+    if key in {"c_head_1_0", "c_n_1_0"} or key.startswith("c_head_"):
+        return key
+
+    # Hair is authored as part of the head for the separated custom models.
+    # Keeping native hir/twin-tail helpers here lets animation move the hair
+    # independently and recreates the neck/shoulder drift seen in-game.
+    if (
+        "hair" in key
+        or "ponytail" in key
+        or "twintail" in key
+        or "braid" in key
+        or "kami" in key
+        or re.search(r"(^|_)hir", key)
+    ):
+        return "c_head_1_0"
+
+    # Kyoko and similar rigs use separate facial controls, while the game
+    # evaluates this geometry from the head joint alone.
+    if key == "eye" or key.startswith(("eye_", "face_eye", "eyelid", "double_eyelid")):
+        return "c_head_1_0"
+    if key in {"face", "jaw", "face_jaw", "mouth"} or key.startswith(("mouth_", "tooth", "teeth", "brow_")):
+        return "c_head_1_0"
+
+    side = "l" if key.endswith("_l") or key.endswith("l") else "r" if key.endswith("_r") or key.endswith("r") else ""
+    if side:
+        stem = key[:-2] if key.endswith(("_l", "_r")) else key[:-1]
+        if stem.startswith("elbowroll"):
+            return f"{side}_a_1_1"
+
+        finger_match = re.fullmatch(r"f_(thumb|fore|index|middle|mid|ring|medicinal|little|pinky)(\d+)", stem)
+        if finger_match:
+            family, number = finger_match.groups()
+            family_target = {
+                "thumb": "thb", "fore": "idx", "index": "idx", "middle": "mid", "mid": "mid",
+                "ring": "rng", "medicinal": "rng", "little": "pky", "pinky": "pky",
+            }[family]
+            index = max(0, int(number) - 1)
+            return f"{side}_{family_target}_1_{index}"
+
+    if key == "skirt" or key.startswith("skirt_"):
+        if key.startswith(("skirt_mr", "skirt_r", "skirt_rb")):
+            return "r_l_1_0"
+        if key.startswith(("skirt_ml", "skirt_l", "skirt_lb")):
+            return "l_l_1_0"
+        return "c_c_1_0"
+    return ""
+
+
+def canonical_skirt_joint(name: str, lateral_position: float) -> str:
+    """Return the thigh that owns a skirt panel at this vertex position."""
+    key = normalize_joint_key(name)
+    if key == "skirt" or key.startswith(("skirt_f", "skirt_b")):
+        if lateral_position < 0.0:
+            return "r_l_1_0"
+        if lateral_position > 0.0:
+            return "l_l_1_0"
+    return ""
+
+
 def catalog_path() -> Path:
     return Path(__file__).with_name(CATALOG_FILENAME)
 

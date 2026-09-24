@@ -195,3 +195,6 @@ MISSION.md
 /DUMP_*/
 *.dump
 *.dmp
+
+/graphify-out/
+.work/

@@ -7,6 +7,17 @@ from ..effects.materials import static_effect_material
 from .character_lighting import color_transfer
 
 
+def disable_effect_transparent_shadows(materials) -> int:
+    changed = 0
+    for material in materials:
+        if not material or not (material.get('g4_effect_preview') or material.get('g4_effect_shader_family')):
+            continue
+        if hasattr(material, 'use_transparent_shadow') and material.use_transparent_shadow:
+            material.use_transparent_shadow = False
+            changed += 1
+    return changed
+
+
 def effect_data_image(path: str) -> bpy.types.Image:
     source = bpy.data.images.load(path, check_existing=True)
     for image in bpy.data.images:
@@ -74,6 +85,18 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             return texture
         uv = nodes.new('ShaderNodeUVMap')
         uv.uv_map = 'UVMap' if slot == 0 else f'UVMap{slot}'
+        row_u, row_v = settings.uv_rows
+        if (row_u == (1.0, 0.0, 0.0) and row_v == (0.0, 1.0, 0.0)):
+            coordinates = uv.outputs[0]
+            if not native_addressing:
+                split = nodes.new('ShaderNodeSeparateXYZ')
+                links.new(coordinates, split.inputs[0])
+                combined = nodes.new('ShaderNodeCombineXYZ')
+                for index, mode in enumerate(settings.address_modes):
+                    links.new(address_coordinate(split.outputs[index], mode), combined.inputs[index])
+                coordinates = combined.outputs[0]
+            links.new(coordinates, texture.inputs['Vector'])
+            return texture
         split_uv = nodes.new('ShaderNodeSeparateXYZ')
         links.new(uv.outputs[0], split_uv.inputs[0])
         affine_uv = nodes.new('ShaderNodeCombineXYZ')
@@ -97,21 +120,21 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
     vertex = nodes.new('ShaderNodeVertexColor')
     vertex.layer_name = 'G4 Outline Parameters'
     vertex.name = 'Effect Vertex Color'
-    color = nodes.new('ShaderNodeMixRGB')
-    color.blend_type = 'MULTIPLY'
-    color.inputs[0].default_value = 1.0
-    links.new(vertex.outputs['Color'], color.inputs[1])
-    diffuse = []
-    tint = nodes.new('ShaderNodeCombineXYZ')
-    for index, value in enumerate(parameters.diffuse):
-        node = nodes.new('ShaderNodeValue')
-        node.name = f'Effect Diffuse {"RGBA"[index]}'
-        node.outputs[0].default_value = value
-        diffuse.append(node.outputs[0])
-        if index < 3:
-            links.new(math('MULTIPLY', node.outputs[0], parameters.gain), tint.inputs[index])
-    links.new(tint.outputs[0], color.inputs[2])
+    color = nodes.new('ShaderNodeVectorMath')
+    color.operation = 'MULTIPLY'
+    links.new(vertex.outputs['Color'], color.inputs[0])
+    tint = nodes.new('ShaderNodeRGB')
+    tint.name = 'Effect Diffuse Tint'
+    tint.outputs[0].default_value = (*tuple(value * parameters.gain for value in parameters.diffuse[:3]), 1.0)
+    links.new(tint.outputs[0], color.inputs[1])
+    diffuse_alpha = nodes.new('ShaderNodeValue')
+    diffuse_alpha.name = 'Effect Diffuse A'
+    diffuse_alpha.outputs[0].default_value = parameters.diffuse[3]
     def saturate(value):
+        source = getattr(value, 'node', None)
+        if source is not None and source.bl_idname == 'ShaderNodeMath':
+            source.use_clamp = True
+            return value
         return math('MINIMUM', math('MAXIMUM', value, 0.0), 1.0)
 
     def red(texture):
@@ -149,6 +172,8 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             return vector(split.outputs[0], split.outputs[1])
 
         def affine(slot, coordinates):
+            if parameters.textures[slot].uv_rows == ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)):
+                return coordinates
             result = []
             for axis, row in enumerate(parameters.textures[slot].uv_rows):
                 dot = nodes.new('ShaderNodeVectorMath')
@@ -209,7 +234,7 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         opacity = lerp(vertex.outputs['Alpha'], 1.0, p[2][2])
         alpha = lerp(samples[1].outputs['Alpha'], samples[0].outputs['Alpha'], weights[0])
         alpha = lerp(samples[2].outputs['Alpha'], alpha, weights[1])
-        alpha = math('MULTIPLY', alpha, math('MULTIPLY', weights[2], math('MULTIPLY', opacity, diffuse[3])))
+        alpha = math('MULTIPLY', alpha, math('MULTIPLY', weights[2], math('MULTIPLY', opacity, diffuse_alpha.outputs[0])))
     elif parameters.threshold is not None:
         vectors = []
         for index, values in enumerate(parameters.threshold):
@@ -255,31 +280,31 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         links.new(gradient_v, gradient_uv.inputs[1])
         texture = sample_texture(0, parameters.textures[0], gradient_uv.outputs[0])
         coverage = saturate(math('DIVIDE', amount, math('MAXIMUM', math('SUBTRACT', 1.0, p1[0]), 0.005)))
-        alpha = math('MULTIPLY', math('MULTIPLY', coverage, opacity_alpha), diffuse[3])
+        alpha = math('MULTIPLY', math('MULTIPLY', coverage, opacity_alpha), diffuse_alpha.outputs[0])
         alpha = math('MULTIPLY', alpha, texture.outputs['Alpha'])
     else:
         texture = sample_texture(0, parameters.textures[0], None)
-        alpha = math('MULTIPLY', vertex.outputs['Alpha'], diffuse[3])
+        alpha = math('MULTIPLY', vertex.outputs['Alpha'], diffuse_alpha.outputs[0])
         alpha = math('MULTIPLY', texture.outputs['Alpha'], math('MINIMUM', alpha, 1.0))
         if len(parameters.textures) == 2:
             mask = sample_texture(1, parameters.textures[1], None)
             alpha = math('MULTIPLY', alpha, red(mask))
     if len(parameters.textures) != 6:
         texture_color = texture.outputs['Color']
-    product = nodes.new('ShaderNodeMixRGB')
-    product.blend_type = 'MULTIPLY'
-    product.inputs[0].default_value = 1.0
-    links.new(texture_color, product.inputs[1])
-    links.new(color.outputs[0], product.inputs[2])
+    product = nodes.new('ShaderNodeVectorMath')
+    product.operation = 'MULTIPLY'
+    links.new(texture_color, product.inputs[0])
+    links.new(color.outputs[0], product.inputs[1])
     emission = nodes.new('ShaderNodeEmission')
-    links.new(color_transfer(nodes, links, product.outputs[0], encode=False), emission.inputs['Color'])
-    transparent = nodes.new('ShaderNodeBsdfTransparent')
+    links.new(color_transfer(nodes, links, product.outputs[0], encode=False, approximate=True), emission.inputs['Color'])
     if parameters.additive:
         links.new(alpha, emission.inputs['Strength'])
         blend = nodes.new('ShaderNodeAddShader')
+        transparent = nodes.new('ShaderNodeBsdfTransparent')
         links.new(transparent.outputs[0], blend.inputs[0])
         links.new(emission.outputs[0], blend.inputs[1])
     else:
+        transparent = nodes.new('ShaderNodeBsdfTransparent')
         blend = nodes.new('ShaderNodeMixShader')
         links.new(alpha, blend.inputs[0])
         links.new(transparent.outputs[0], blend.inputs[1])
@@ -290,5 +315,7 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         material.surface_render_method = 'BLENDED'
     else:
         material.blend_method = 'BLEND'
+    if hasattr(material, 'use_transparent_shadow'):
+        material.use_transparent_shadow = False
     material['g4_effect_preview'] = {1: 'T1_STATIC', 2: 'T1M1_STATIC', 3: 'THRESHOLD_STATIC', 6: 'T3_THRESHOLD'}[len(parameters.textures)]
     return True

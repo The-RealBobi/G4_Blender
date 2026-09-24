@@ -15,8 +15,10 @@ from xml.sax.saxutils import escape
 
 try:
     from .shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
+    from .formats.cfgbin import CfgBinDocument, parse_cfgbin_file
 except ImportError:
     from shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
+    from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
 
 
 ASCII_RE = re.compile(rb"[A-Za-z0-9_]{3,}(?:_LOD[0-9])?M?")
@@ -1498,37 +1500,132 @@ def is_face_model_path(path: Path) -> bool:
     return "/_face/" in normalized or "/chr_face/" in normalized
 
 
+def chara_model_maps_from_cfg_documents(documents: Iterable[CfgBinDocument]) -> tuple[dict[str, dict], dict[int, dict]]:
+    """Read model-to-body assignments from the CFG resources the game loads."""
+    models: dict[str, dict] = {}
+    bodies: dict[int, dict] = {}
+    for document in documents:
+        for entry in document.entries:
+            values = {index: str(value.value or "") for index, value in enumerate(entry.values)}
+            if entry.name == "CHARA_MODEL_INFO":
+                for index in (1, 10):
+                    model_path = values.get(index, "").replace("\\", "/")
+                    if model_path:
+                        models[model_path] = values
+            elif entry.name == "CHARA_BODY_INFO" and values.get(0):
+                try:
+                    bodies[int(values[0])] = values
+                except ValueError:
+                    continue
+    return models, bodies
+
+
+def chara_model_cfg_maps_for_path(path: Path) -> tuple[dict[str, dict], dict[int, dict], list[Path]]:
+    """Read the active game's character CFG while retaining the configured dump for G4SK files."""
+    roots = [RAW_DATA_ROOT]
+    for parent in path.parents:
+        if parent.name == "data":
+            roots.append(parent)
+            break
+    cfg_paths: list[Path] = []
+    for root in roots:
+        cfg_paths.extend(sorted((root / "common" / "gamedata" / "character").glob("chara_model_*.cfg.bin")))
+    cfg_paths = list(dict.fromkeys(cfg_paths))
+    documents = []
+    for cfg_path in cfg_paths:
+        try:
+            document = parse_cfgbin_file(cfg_path)
+        except (OSError, ValueError):
+            continue
+        if isinstance(document, CfgBinDocument):
+            documents.append(document)
+    models, bodies = chara_model_maps_from_cfg_documents(documents)
+    return models, bodies, cfg_paths
+
+
 def load_chara_model_maps() -> tuple[dict[str, dict], dict[int, dict]]:
     global CHARA_MODEL_MAPS
     if CHARA_MODEL_MAPS is not None:
         return CHARA_MODEL_MAPS
-    if not CHARA_MODEL_XML.exists():
-        CHARA_MODEL_MAPS = ({}, {})
-        return CHARA_MODEL_MAPS
-    root = ET.parse(CHARA_MODEL_XML).getroot()
+    cfg_paths = sorted((RAW_DATA_ROOT / "common" / "gamedata" / "character").glob("chara_model_*.cfg.bin"))
+    cache_path = (
+        SKELETON_CACHE.with_name(f"{SKELETON_CACHE.stem}.model_maps.json")
+        if SKELETON_CACHE is not None
+        else None
+    )
+    xml_signature = None
+    try:
+        xml_stat = CHARA_MODEL_XML.stat()
+        xml_signature = [str(CHARA_MODEL_XML), xml_stat.st_size, xml_stat.st_mtime_ns]
+        if cache_path is not None and cache_path.is_file():
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached.get("version") == 1 and cached.get("xml") == xml_signature:
+                CHARA_MODEL_MAPS = (
+                    {
+                        model_path: {int(key): value for key, value in values.items()}
+                        for model_path, values in cached.get("models", {}).items()
+                    },
+                    {
+                        int(key): {int(index): value for index, value in values.items()}
+                        for key, values in cached.get("bodies", {}).items()
+                    },
+                )
+                return CHARA_MODEL_MAPS
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
     models: dict[str, dict] = {}
     bodies: dict[int, dict] = {}
-    for entry in root.findall("entry"):
-        name = entry.get("name")
-        values_node = entry.find("values")
-        if values_node is None:
+    if CHARA_MODEL_XML.exists():
+        root = ET.parse(CHARA_MODEL_XML).getroot()
+        for entry in root.findall("entry"):
+            name = entry.get("name")
+            values_node = entry.find("values")
+            if values_node is None:
+                continue
+            values = {
+                int(value.get("index")): (value.text or "")
+                for value in values_node.findall("value")
+                if value.get("index") is not None
+            }
+            if name == "CHARA_MODEL_INFO":
+                paths = [values.get(index, "") for index in (1, 10) if values.get(index)]
+                for model_path in paths:
+                    models[model_path.replace("\\", "/")] = values
+            elif name == "CHARA_BODY_INFO" and values.get(0):
+                try:
+                    bodies[int(values[0])] = values
+                except ValueError:
+                    pass
+
+    cfg_documents = []
+    for cfg_path in cfg_paths:
+        try:
+            document = parse_cfgbin_file(cfg_path)
+        except (OSError, ValueError):
             continue
-        values = {
-            int(value.get("index")): (value.text or "")
-            for value in values_node.findall("value")
-            if value.get("index") is not None
-        }
-        if name == "CHARA_MODEL_INFO":
-            paths = [values.get(index, "") for index in (1, 10) if values.get(index)]
-            for model_path in paths:
-                model_path = model_path.replace("\\", "/")
-                models[model_path] = values
-        elif name == "CHARA_BODY_INFO" and values.get(0):
-            try:
-                bodies[int(values[0])] = values
-            except ValueError:
-                pass
+        if isinstance(document, CfgBinDocument):
+            cfg_documents.append(document)
+    cfg_models, cfg_bodies = chara_model_maps_from_cfg_documents(cfg_documents)
+    models.update(cfg_models)
+    bodies.update(cfg_bodies)
     CHARA_MODEL_MAPS = (models, bodies)
+    if cache_path is not None and xml_signature is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "xml": xml_signature,
+                        "models": models,
+                        "bodies": {str(key): value for key, value in bodies.items()},
+                    },
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     return CHARA_MODEL_MAPS
 
 
@@ -1929,6 +2026,31 @@ def resolve_g4sk_info_from_cache(path: Path) -> tuple[dict | None, str | None]:
 
 
 def resolve_g4sk_from_chara_model(path: Path) -> tuple[bytes | None, str | None]:
+    active_models, active_bodies, active_cfgs = chara_model_cfg_maps_for_path(path)
+    if active_models:
+        candidates = set(model_relpath_candidates(path))
+        for parent in path.parents:
+            if parent.name == "data":
+                try:
+                    candidates.add(path.relative_to(parent / "common" / "chr").as_posix())
+                except ValueError:
+                    pass
+                break
+        for candidate in candidates:
+            model_info = active_models.get(candidate)
+            if model_info is None:
+                continue
+            try:
+                body_info = active_bodies.get(int(model_info.get(4, "0")))
+            except ValueError:
+                body_info = None
+            if body_info is None:
+                continue
+            for skeleton_path in skeleton_candidates_from_body_info(body_info, include_crc=False):
+                if skeleton_path.exists():
+                    source = active_cfgs[0] if active_cfgs else CHARA_MODEL_XML
+                    return skeleton_path.read_bytes(), f"{skeleton_path} via {source} ({candidate})"
+
     models, bodies = load_chara_model_maps()
     if models:
         rel_candidates = model_relpath_candidates(path)
@@ -2040,26 +2162,100 @@ def uniform_used_joint_hashes(path: Path) -> set[int]:
     return {u32(data, joint_table + index * 4) for index in indices}
 
 
-def uniform_crc_skeleton_candidates() -> list[tuple[bytes, str, set[int], int]]:
+def uniform_crc_skeleton_candidates(source_marker: str = "") -> list[tuple[bytes, str, set[int], int]]:
     global UNIFORM_CRC_SKELETON_CANDIDATES
     if UNIFORM_CRC_SKELETON_CANDIDATES is not None:
-        return UNIFORM_CRC_SKELETON_CANDIDATES
+        return [
+            candidate
+            for candidate in UNIFORM_CRC_SKELETON_CANDIDATES
+            if not source_marker or source_marker in candidate[1]
+        ]
+
+    face_root = RAW_DATA_ROOT / "common" / "chr" / "_face"
+    index_path = (
+        SKELETON_CACHE.with_name(f"{SKELETON_CACHE.stem}.uniform_crc.json")
+        if SKELETON_CACHE is not None
+        else None
+    )
+    if index_path is not None and index_path.is_file():
+        try:
+            cached = json.loads(index_path.read_text(encoding="utf-8"))
+            # ponytail: root mtime avoids rglob per subprocess; selected file metadata catches in-place edits.
+            root_mtime = face_root.stat().st_mtime_ns if face_root.is_dir() else None
+            if (
+                cached.get("version") == 1
+                and cached.get("raw_data_root") == str(RAW_DATA_ROOT)
+                and cached.get("face_root_mtime_ns") == root_mtime
+            ):
+                candidates = []
+                for row in cached.get("candidates", []):
+                    if source_marker and source_marker not in row["source"]:
+                        continue
+                    source_path = Path(row["path"])
+                    source_stat = source_path.stat()
+                    if row.get("size") != source_stat.st_size or row.get("mtime_ns") != source_stat.st_mtime_ns:
+                        raise ValueError("cached G4SK source is stale")
+                    match = next(
+                        (
+                            (skeleton_data, source)
+                            for skeleton_data, source in g4sk_entries_from_candidate(source_path)
+                            if source == row["source"]
+                        ),
+                        None,
+                    )
+                    if match is None:
+                        raise ValueError("cached G4SK source is missing")
+                    candidates.append((match[0], match[1], set(row["hashes"]), row["joint_count"]))
+                if not source_marker:
+                    UNIFORM_CRC_SKELETON_CANDIDATES = candidates
+                return candidates
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    paths = sorted(face_root.rglob("*.g4sk")) + sorted(face_root.rglob("*.g4pkm")) if face_root.is_dir() else []
 
     candidates: list[tuple[bytes, str, set[int], int]] = []
-    face_root = RAW_DATA_ROOT / "common" / "chr" / "_face"
-    if face_root.is_dir():
-        paths = list(face_root.rglob("*.g4sk")) + list(face_root.rglob("*.g4pkm"))
-        for path in paths:
-            for skeleton_data, source in g4sk_entries_from_candidate(path):
-                try:
-                    names = parse_g4sk(skeleton_data).get("names", [])
-                except (ValueError, struct.error):
-                    continue
-                hashes = {crc32b(name.encode("ascii")) for name in names if name}
-                if hashes:
-                    candidates.append((skeleton_data, source, hashes, len(names)))
-    UNIFORM_CRC_SKELETON_CANDIDATES = candidates
-    return candidates
+    index_rows = []
+    for path in paths:
+        for skeleton_data, source in g4sk_entries_from_candidate(path):
+            try:
+                names = parse_g4sk(skeleton_data).get("names", [])
+            except (ValueError, struct.error):
+                continue
+            hashes = {crc32b(name.encode("ascii")) for name in names if name}
+            if hashes:
+                candidates.append((skeleton_data, source, hashes, len(names)))
+                index_rows.append(
+                    {
+                        "path": str(path),
+                        "source": source,
+                        "size": path.stat().st_size,
+                        "mtime_ns": path.stat().st_mtime_ns,
+                        "hashes": sorted(hashes),
+                        "joint_count": len(names),
+                    }
+                )
+    if index_path is not None:
+        try:
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "raw_data_root": str(RAW_DATA_ROOT),
+                        "face_root_mtime_ns": face_root.stat().st_mtime_ns if face_root.is_dir() else None,
+                        "candidates": index_rows,
+                    },
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    if not source_marker:
+        UNIFORM_CRC_SKELETON_CANDIDATES = candidates
+        return candidates
+    return [candidate for candidate in candidates if source_marker in candidate[1]]
 
 
 def resolve_uniform_generic_g4sk(
@@ -2089,7 +2285,7 @@ def resolve_uniform_generic_g4sk(
                 if used_hashes <= hashes:
                     return skeleton_data, f"{source} via matching uniform ID"
         marker = f"/{character_stem}/{character_stem}."
-        for skeleton_data, source, hashes, _joint_count in uniform_crc_skeleton_candidates():
+        for skeleton_data, source, hashes, _joint_count in uniform_crc_skeleton_candidates(marker):
             if marker in source and used_hashes <= hashes:
                 return skeleton_data, f"{source} via matching uniform ID"
 
@@ -2239,20 +2435,35 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
 
 
 
+def model_texture_data_roots(path: Path) -> list[Path]:
+    roots = []
+    inferred = infer_raw_data_root(path)
+    if inferred is not None:
+        roots.append(inferred)
+    if RAW_DATA_ROOT.is_dir():
+        roots.append(RAW_DATA_ROOT)
+    return list(dict.fromkeys(root.resolve() for root in roots if root.is_dir()))
+
+
 def find_texture_for_model(path: Path) -> Path | None:
     stem = path.stem
     candidates = []
+    for data_root in model_texture_data_roots(path):
+        try:
+            rel = path.resolve().relative_to(data_root)
+        except ValueError:
+            continue
+        parts = list(rel.parts)
+        if parts and parts[0] in {"common", "dx11", "nx"}:
+            for root in ("dx11", "nx"):
+                alt = data_root.joinpath(root, *parts[1:]).with_suffix(".g4tx")
+                candidates.append(alt)
+        break
+
     try:
         rel = path.relative_to(RAW_DATA_ROOT)
     except ValueError:
         rel = None
-
-    if rel is not None:
-        parts = list(rel.parts)
-        if parts and parts[0] in {"common", "dx11", "nx"}:
-            for root in ("dx11", "nx"):
-                alt = RAW_DATA_ROOT.joinpath(root, *parts[1:]).with_suffix(".g4tx")
-                candidates.append(alt)
 
     xml_texture = resolve_texture_from_chara_model(path)
     if xml_texture is not None:
@@ -4683,7 +4894,7 @@ def choose_uniform_joint_palette(
         direct_score = palette_spatial_error(positions, influences, joint_palette, target_skeleton)
         if remap_count and refined_score < direct_score:
             candidates.append((palette, remap_count, "physical target G4SK indices + arm centroid refinement"))
-    if joint_palette and min(joint_palette) > 0 and max(joint_palette) <= len(ASSIGNED_SKELETON_JOINT_NAMES):
+    if joint_palette_uses_assigned_indices(joint_palette, target_skeleton):
         remapped, changed = remap_compact_assigned_joint_palette(joint_palette, target_skeleton)
         candidates.append((remapped, changed, "shared uniform skeleton indices"))
     for source_skeleton, source in source_skeletons:
@@ -5100,6 +5311,21 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
             palette_spatial_score = palette_spatial_error(
                 position_tuples, skin_influences, joint_palette, skeleton_info
             )
+        elif (
+            hash_palette is not None
+            and all(index >= 0 for index in hash_palette)
+            and (
+                not assigned_skeleton
+                or "actor skeleton override" in (skeleton_source or "")
+            )
+        ):
+            # A model-local G4SK is authored with this G4MD.  Its CRC palette
+            # is the binding contract; compact shared-palette heuristics are
+            # only for uniforms attached to an external actor skeleton.
+            joint_palette = hash_palette
+            palette_remap_count = hash_remap_count
+            palette_remap_source = "G4MD CRC32 joint table (model-local G4SK)"
+            palette_spatial_score = hash_palette_score
         # A G4MD can contain a full CRC32 skeleton-name table while some of
         # its submeshes still use physical G4SK indices.  This is common in
         # bodies and shoes, so keep a geometrically better physical palette.

@@ -16,12 +16,32 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:
-    from g4_model_probe import dds_format, dds_to_nxtch
-    from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+    from g4_model_probe import (
+        dds_format,
+        dds_to_nxtch,
+        matrix_mul,
+        rigid_matrix_inverse,
+    )
+    from g4_joint_aliases import (
+        canonical_export_joint,
+        load_joint_alias_catalog,
+        normalize_joint_key,
+        resolve_catalog_alias,
+    )
     from outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
 except ImportError:
-    from .g4_model_probe import dds_format, dds_to_nxtch
-    from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+    from .g4_model_probe import (
+        dds_format,
+        dds_to_nxtch,
+        matrix_mul,
+        rigid_matrix_inverse,
+    )
+    from .g4_joint_aliases import (
+        canonical_export_joint,
+        load_joint_alias_catalog,
+        normalize_joint_key,
+        resolve_catalog_alias,
+    )
     from .outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
 
 
@@ -90,6 +110,7 @@ class PortConfig:
     joint_position_offsets: dict[str, tuple[float, float, float]] | None = None
     joint_position_transforms: dict[str, tuple[float, ...]] | None = None
     source_joint_position_transforms: dict[str, tuple[float, ...]] | None = None
+    local_g4sk_bind_translations: dict[str, tuple[float, float, float]] | None = None
     producer_plugin_version: str = ""
     producer_expected_script_version: str = ""
     producer_marker: str = ""
@@ -312,6 +333,11 @@ def load_config(path: Path | None) -> PortConfig:
             str(name): tuple(float(component) for component in value)
             for name, value in dict(data.get("source_joint_position_transforms", {})).items()
             if isinstance(value, (list, tuple)) and len(value) == 12
+        },
+        local_g4sk_bind_translations={
+            str(name): tuple(float(component) for component in value)
+            for name, value in dict(data.get("local_g4sk_bind_translations", {})).items()
+            if isinstance(value, (list, tuple)) and len(value) == 3
         },
         producer_plugin_version=str(data.get("g4_blender_plugin_version", "")),
         producer_expected_script_version=str(data.get("g4_port_script_version_expected", "")),
@@ -872,6 +898,19 @@ def identity_matrix() -> tuple[float, ...]:
     return (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
 
+def dae_up_axis_transform(root: ET.Element) -> tuple[float, ...]:
+    axis_node = root.find(".//" + ns_name(root, "up_axis"))
+    axis = (axis_node.text or "Y_UP").strip().upper() if axis_node is not None else "Y_UP"
+    transforms = {
+        "X_UP": (0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        "Y_UP": identity_matrix(),
+        "Z_UP": (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+    }
+    if axis not in transforms:
+        raise ValueError(f"Unsupported COLLADA up axis: {axis!r}")
+    return transforms[axis]
+
+
 def matrix_multiply(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(sum(a[row * 4 + k] * b[k * 4 + column] for k in range(4)) for row in range(4) for column in range(4))
 
@@ -1049,13 +1088,17 @@ def parse_dae(
     sidecar_meshes = load_weight_sidecar(weight_sidecar)
     used_sidecar_indices: set[int] = set()
     geometry_transforms = dae_geometry_transforms(root)
+    up_axis_transform = dae_up_axis_transform(root)
     geometry_instance_names = dae_geometry_instance_names(root)
     bind_shapes = parse_dae_bind_shapes(root)
     meshes: list[Mesh] = []
     material_indices: dict[str, int] = {}
     for geometry in root.findall(".//" + ns_name(root, "geometry")):
         geometry_id = geometry.attrib.get("id", "")
-        geometry_transform = geometry_transforms.get(geometry_id, identity_matrix())
+        geometry_transform = matrix_multiply(
+            up_axis_transform,
+            geometry_transforms.get(geometry_id, identity_matrix()),
+        )
         if apply_bind_shape and geometry_id in bind_shapes:
             geometry_transform = matrix_multiply(geometry_transform, bind_shapes[geometry_id])
         skin_influences = skins.get(geometry_id, [])
@@ -1570,6 +1613,11 @@ def compact_joint_index(
         return alias
     if isinstance(alias, str) and alias != name:
         return compact_joint_index(alias, aliases, visited, native_joint_indices)
+    if native_joint_indices and name in native_joint_indices:
+        return native_joint_indices[name]
+    canonical = canonical_export_joint(name)
+    if canonical and canonical != name:
+        return compact_joint_index(canonical, aliases, visited, native_joint_indices)
     catalog = load_joint_alias_catalog()
     target = resolve_catalog_alias(name, catalog)
     if not target:
@@ -1788,6 +1836,11 @@ def configured_record_palettes(
                 compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
                 if compatible is not None:
                     resolved = compatible
+                elif native_joint_indices and resolved not in native_joint_indices.values():
+                    # A compact name that is absent from the native hash table
+                    # cannot be represented by merely appending its compact
+                    # ordinal to a physical G4MD palette.
+                    continue
                 if resolved is not None:
                     used_joints.add(resolved)
         return used_joints
@@ -3229,6 +3282,99 @@ def analyze_port(
     }
 
 
+def write_local_g4sk(
+    template_path: Path,
+    output_path: Path,
+    translations: dict[str, tuple[float, float, float]],
+) -> int:
+    """Write a model-local G4SK with the exported armature's bind positions."""
+    data = bytearray(template_path.read_bytes())
+    skeleton = parse_g4sk(template_path)
+    names = skeleton["names"]
+    section_offsets = [0x40 + struct.unpack_from("<H", data, 0x24 + index * 2)[0] * 4 for index in range(8)]
+    joint_count = skeleton["joint_count"]
+    bind_matrices = [
+        list(struct.unpack_from("<12f", data, 0x40 + index * 0x30)) + [0.0, 0.0, 0.0, 1.0]
+        for index in range(joint_count)
+    ]
+    parents = [
+        struct.unpack_from("<H", data, section_offsets[3] + index * 2)[0]
+        for index in range(joint_count)
+    ]
+    changed = 0
+    for name, translation in translations.items():
+        try:
+            index = names.index(name)
+        except ValueError:
+            continue
+        matrix = bind_matrices[index]
+        matrix[3], matrix[7], matrix[11] = translation
+        bind_matrices[index] = matrix
+        changed += 1
+
+    if not changed:
+        return 0
+
+    for index, matrix in enumerate(bind_matrices):
+        struct.pack_into("<12f", data, 0x40 + index * 0x30, *matrix[:12])
+        inverse = rigid_matrix_inverse(matrix)
+        struct.pack_into("<12f", data, section_offsets[0] + index * 0x30, *inverse[:12])
+        parent = parents[index] if index < len(parents) else len(bind_matrices)
+        local = (
+            matrix_mul(rigid_matrix_inverse(bind_matrices[parent]), matrix)
+            if parent < len(bind_matrices) and parent != index
+            else matrix
+        )
+        struct.pack_into(
+            "<3f",
+            data,
+            section_offsets[1] + index * 0x30 + 0x20,
+            local[3],
+            local[7],
+            local[11],
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(data)
+    return changed
+
+
+def write_character_object_config(
+    raw_root: Path,
+    objbin_path: Path,
+    clobin_path: Path,
+    character_stem: str,
+) -> None:
+    """Clone the native character object config and bind it to a local G4SK."""
+    if (len(character_stem) != len("c11010010")
+            or not character_stem.startswith("c")
+            or not character_stem[1:].isdigit()):
+        raise ValueError(f"unsupported character model stem {character_stem!r}")
+
+    template_dir = raw_root / "common/chr/_face/11_VICTORY/c11010010"
+    template_objbin = template_dir / "c11010010.objbin"
+    template_clobin = template_dir / "c11010010.clobin"
+    if not template_objbin.is_file() or not template_clobin.is_file():
+        raise FileNotFoundError(f"c11010010 object config template is missing under {template_dir}")
+
+    source_stem = b"c11010010"
+    replacement = character_stem.encode("ascii")
+    data = template_objbin.read_bytes()
+    skeleton_ref = b"common/chr/_face/11_VICTORY/c11010010/c11010010.g4sk"
+    collision_ref = b"common/chr/_face/11_VICTORY/c11010010/c11010010.clobin"
+    if skeleton_ref not in data or collision_ref not in data:
+        raise ValueError("c11010010 object config has unexpected skeleton or collision references")
+    data = data.replace(source_stem, replacement)
+    generated_skeleton_ref = f"common/chr/_face/11_VICTORY/{character_stem}/{character_stem}.g4sk".encode("ascii")
+    generated_collision_ref = f"common/chr/_face/11_VICTORY/{character_stem}/{character_stem}.clobin".encode("ascii")
+    if generated_skeleton_ref not in data or generated_collision_ref not in data:
+        raise ValueError("generated object config did not retain its character-local resource references")
+
+    objbin_path.parent.mkdir(parents=True, exist_ok=True)
+    clobin_path.parent.mkdir(parents=True, exist_ok=True)
+    objbin_path.write_bytes(data)
+    shutil.copyfile(template_clobin, clobin_path)
+
+
 def write_port(
     source_dae: Path | None,
     raw_root: Path,
@@ -3316,6 +3462,19 @@ def write_port(
         raise ValueError(f"unsupported texture mode {texture_mode!r}")
     common_out.write_bytes(g4md)
     mg_out.write_bytes(g4mg)
+    local_bind = config.local_g4sk_bind_translations or {}
+    local_g4sk_out = None
+    objbin_out = None
+    clobin_out = None
+    if skeleton_path is not None and local_bind:
+        local_g4sk_out = common_out.with_suffix(".g4sk")
+        changed_joints = write_local_g4sk(skeleton_path, local_g4sk_out, local_bind)
+        if not changed_joints:
+            raise ValueError("the exported armature did not match any joints in the assigned G4SK")
+        if "_face" in config.model_rel.parts and re.fullmatch(r"c\d{8}", config.model_rel.stem):
+            objbin_out = common_out.with_suffix(".objbin")
+            clobin_out = common_out.with_suffix(".clobin")
+            write_character_object_config(raw_root, objbin_out, clobin_out, config.model_rel.stem)
 
     model_stem = Path(config.model_rel).name
     for source in texture_template.parent.glob("*.g4tx"):
@@ -3365,6 +3524,9 @@ def write_port(
         },
         "g4md": str(common_out),
         "g4mg": str(mg_out),
+        "g4sk": str(local_g4sk_out) if local_g4sk_out is not None else None,
+        "objbin": str(objbin_out) if objbin_out is not None else None,
+        "clobin": str(clobin_out) if clobin_out is not None else None,
         "g4tx": str(texture_out),
         "texture_platform": texture_rel.parts[0],
     }

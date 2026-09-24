@@ -45,10 +45,22 @@ except ImportError:
     )
 
 try:
-    from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+    from .g4_joint_aliases import (
+        canonical_export_joint,
+        canonical_skirt_joint,
+        load_joint_alias_catalog,
+        normalize_joint_key,
+        resolve_catalog_alias,
+    )
     from .g4_blender_contracts import resolve_effective_joint_mappings
 except ImportError:
-    from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key, resolve_catalog_alias
+    from g4_joint_aliases import (
+        canonical_export_joint,
+        canonical_skirt_joint,
+        load_joint_alias_catalog,
+        normalize_joint_key,
+        resolve_catalog_alias,
+    )
     from g4_blender_contracts import resolve_effective_joint_mappings
 
 
@@ -256,7 +268,11 @@ def mesh_weights(obj: bpy.types.Object) -> dict:
     influences = []
     for vertex in obj.data.vertices:
         weights = [
-            [group_names[item.group], item.weight]
+            [
+                canonical_skirt_joint(group_names[item.group], vertex.co.x)
+                or group_names[item.group],
+                item.weight,
+            ]
             for item in vertex.groups
             if item.group in group_names and item.weight > 0.0
         ]
@@ -1160,6 +1176,17 @@ def target_mesh_items(self, context):
 
 def guess_joint_alias(group_name: str, allowed_joints: set[str] | None = None) -> str:
     key = normalize_joint_key(group_name)
+    if allowed_joints is not None:
+        exact = next((name for name in allowed_joints if name.casefold() == key), None)
+        if exact:
+            return exact
+    canonical = canonical_export_joint(group_name)
+    if canonical and (
+        allowed_joints is None
+        or canonical in allowed_joints
+        or canonical == "c_head_1_0"
+    ):
+        return canonical
     try:
         catalog = load_joint_alias_catalog()
     except ValueError as exc:
@@ -1169,13 +1196,7 @@ def guess_joint_alias(group_name: str, allowed_joints: set[str] | None = None) -
         target = resolve_catalog_alias(group_name, catalog, allowed_joints)
         if target:
             return target
-    if key.startswith("l_") and "hair" in key:
-        target = "l_hir1_1_0"
-    elif key.startswith("r_") and "hair" in key:
-        target = "r_hir1_1_0"
-    elif "hair" in key:
-        target = "c_hir1_1_0"
-    elif "head" in key:
+    if "head" in key:
         target = "c_head_1_0"
     elif "neck" in key:
         target = "c_n_1_0"
@@ -1953,17 +1974,33 @@ def active_rig_reference_model(props: "G4PortSceneSettings", original_model: Pat
 def active_rig_skeleton_path(props: "G4PortSceneSettings", original_model: Path) -> Path | None:
     """Return the on-disk G4SK used for rest conversion and validation."""
     try:
-        from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model
+        from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, g4sk_entries_from_candidate
     except ImportError:
-        from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model
+        from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, g4sk_entries_from_candidate
 
     reference = active_rig_reference_model(props, original_model)
     configure_raw_data_root_from_path(reference)
     _data, source = find_skeleton_for_model(reference)
     if not source:
         return None
-    path = Path(source.split(" via ", 1)[0])
-    return path if path.is_file() and path.suffix.casefold() == ".g4sk" else None
+    source = source.split(" via ", 1)[0]
+    if "::" not in source:
+        path = Path(source)
+        return path if path.is_file() and path.suffix.casefold() == ".g4sk" else None
+    pack_name, entry_name = source.rsplit("::", 1)
+    pack_path = Path(pack_name)
+    if not pack_path.is_file():
+        return None
+    cache = Path(tempfile.gettempdir()) / "level5_g4sk_blender"
+    cache.mkdir(parents=True, exist_ok=True)
+    destination = cache / f"{hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]}.g4sk"
+    for skeleton_data, candidate_source in g4sk_entries_from_candidate(pack_path):
+        if candidate_source.rsplit("::", 1)[-1] != entry_name:
+            continue
+        if not destination.is_file() or destination.read_bytes() != skeleton_data:
+            destination.write_bytes(skeleton_data)
+        return destination
+    return None
 
 
 def native_rest_corrections(props: "G4PortSceneSettings", original_model: Path) -> dict[str, list[float]]:
@@ -2007,6 +2044,80 @@ def native_rest_corrections(props: "G4PortSceneSettings", original_model: Path) 
     return corrections
 
 
+def counter_rotated_rest_translations(props: "G4PortSceneSettings", original_model: Path) -> dict[str, list[float]]:
+    """Keep authored vertices in the G4SK rest space.
+
+    The assigned G4SK bind matrices are the runtime authority.  Rebasing each
+    source vertex from Blender bone heads changes the authored arm and hair
+    positions before skinning, which breaks event animation on separated parts.
+    """
+    return {}
+
+
+def local_g4sk_bind_translations(props: "G4PortSceneSettings", original_model: Path) -> dict[str, list[float]]:
+    """Export the armature rest heads in G4 space for a model-local G4SK."""
+    armature = export_armature()
+    skeleton_path = active_rig_skeleton_path(props, original_model)
+    if armature is None or skeleton_path is None:
+        return {}
+    try:
+        from .g4_model_probe import parse_g4sk
+    except ImportError:
+        from g4_model_probe import parse_g4sk
+    skeleton = parse_g4sk(skeleton_path.read_bytes())
+    target_names = set(skeleton.get("names") or ())
+    if not target_names:
+        return {}
+    g4_from_blender = Matrix.Rotation(-math.pi / 2.0, 4, "X")
+    aliases = effective_joint_aliases(props)
+    source_by_target: dict[str, list[str]] = {}
+    for source_name, target_name in aliases.items():
+        source_by_target.setdefault(target_name, []).append(source_name)
+    preferred_sources = {
+        "c_c_1_0": ("WAIST",),
+        "c_c_1_1": ("SPINE3", "SPINE2", "SPINE1"),
+        "c_n_1_0": ("NECK",),
+        "c_head_1_0": ("HEAD",),
+        "l_s_1_0": ("CLAVICLE_L",),
+        "l_a_1_0": ("SHOULDER_L",),
+        "l_a_1_1": ("ELBOW_L",),
+        "l_w_1_0": ("WRIST_L",),
+        "r_s_1_0": ("CLAVICLE_R",),
+        "r_a_1_0": ("SHOULDER_R",),
+        "r_a_1_1": ("ELBOW_R",),
+        "r_w_1_0": ("WRIST_R",),
+        "l_l_1_0": ("THIGH_L",),
+        "l_l_1_1": ("CLANK_L",),
+        "l_foot_1_0": ("TOE1_L",),
+        "l_foot_1_1": ("TOE2_L",),
+        "r_l_1_0": ("THIGH_R",),
+        "r_l_1_1": ("CLANK_R",),
+        "r_foot_1_0": ("TOE1_R",),
+        "r_foot_1_1": ("TOE2_R",),
+    }
+    translations: dict[str, list[float]] = {}
+    for target_name, sources in source_by_target.items():
+        if target_name not in target_names or target_name.startswith(("eye_", "mouth_")):
+            continue
+        candidates = preferred_sources.get(target_name, ())
+        source_name = next((name for name in candidates if name in sources), None)
+        if source_name is None:
+            source_name = sources[0] if sources else None
+        bone = armature.data.bones.get(source_name) if source_name else None
+        if bone is None:
+            continue
+        matrix = g4_from_blender @ armature.matrix_world @ bone.matrix_local
+        translations.setdefault(
+            target_name,
+            [
+                float(matrix[0][3]),
+                float(matrix[1][3]),
+                float(matrix[2][3]),
+            ],
+        )
+    return translations
+
+
 def armature_joint_parents(armature) -> dict[str, str | None]:
     if armature is None or armature.type != "ARMATURE":
         return {}
@@ -2016,14 +2127,67 @@ def armature_joint_parents(armature) -> dict[str, str | None]:
     }
 
 
+def contextual_joint_aliases(names: set[str]) -> dict[str, str]:
+    """Resolve unambiguous chains whose generic names otherwise collide."""
+    by_key = {name.casefold(): name for name in names}
+    required = {"clavicle_l", "shoulder_l", "clavicle_r", "shoulder_r"}
+    if not required <= set(by_key):
+        return {}
+    targets = {
+        "shoulder_l": "l_a_1_0", "elbow_l": "l_a_1_1", "wrist_l": "l_w_1_0",
+        "shoulder_r": "r_a_1_0", "elbow_r": "r_a_1_1", "wrist_r": "r_w_1_0",
+        "thigh_l": "l_l_1_0", "clank_l": "l_l_1_1", "toe1_l": "l_foot_1_0", "toe2_l": "l_foot_1_1",
+        "thigh_r": "r_l_1_0", "clank_r": "r_l_1_1", "toe1_r": "r_foot_1_0", "toe2_r": "r_foot_1_1",
+    }
+    return {by_key[name]: target for name, target in targets.items() if name in by_key}
+
+
 def effective_joint_aliases(props: "G4PortSceneSettings") -> dict[str, str]:
     explicit = {
         alias.source_group: alias.target_joint
         for alias in props.joint_aliases
         if alias.source_group and alias.target_joint
     }
-    inherited = resolve_effective_joint_mappings(armature_joint_parents(export_armature()), explicit)
-    return {**explicit, **{name: target for name, target in inherited.items() if target}}
+    explicit_user_sources = set(explicit)
+    parents = armature_joint_parents(export_armature())
+    catalog = load_joint_alias_catalog()
+    allowed = configured_target_joints(props)
+    # Auxiliary deform bones can be siblings of the joint they follow. Resolve
+    # known anatomy before parent inheritance, including blanks in saved scenes.
+    for name in parents:
+        canonical = canonical_export_joint(name)
+        if (
+            canonical == "c_head_1_0"
+            and name in allowed
+            and (name not in explicit_user_sources or explicit[name] == name)
+        ):
+            explicit[name] = name
+            continue
+        if canonical and canonical != name and (
+            name not in explicit_user_sources
+            or canonical == "c_head_1_0"
+            or name.casefold() in {"eye", "face", "face_jaw", "mouth", "jaw"}
+        ):
+            explicit[name] = canonical
+            continue
+        if name not in explicit:
+            target = resolve_catalog_alias(name, catalog, allowed)
+            if target:
+                explicit[name] = target
+    for name, target in contextual_joint_aliases(set(parents)).items():
+        # Exact anatomy names are stronger than a persisted auto-detected
+        # alias.  Older scenes saved SHOULDER_L as the clavicle slot, which
+        # shifts the arm root before the elbow chain is even evaluated.
+        if name not in explicit_user_sources or name.casefold() in {
+            "shoulder_l", "elbow_l", "wrist_l", "shoulder_r", "elbow_r", "wrist_r",
+            "thigh_l", "clank_l", "toe1_l", "toe2_l", "thigh_r", "clank_r", "toe1_r", "toe2_r",
+        }:
+            explicit[name] = target
+    inherited = resolve_effective_joint_mappings(parents, explicit)
+    # Direct anatomy aliases must win over parent inheritance.  Otherwise a
+    # lower-leg group inherits the thigh target and the runtime collapses the
+    # knee; the same mistake puts the arm root on the clavicle.
+    return {**{name: target for name, target in inherited.items() if target}, **explicit}
 
 
 def detect_joint_aliases(props: G4PortSceneSettings, selected_only: bool = False) -> int:
@@ -3513,10 +3677,16 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         config_data["vertex_color"] = list(STABLE_CUSTOM_VERTEX_COLOR)
     rig_reference = active_rig_reference_model(props, original_model)
     rig_skeleton = active_rig_skeleton_path(props, original_model)
-    # G4's runtime applies its own skin matrices after loading the G4MG.  A
-    # pre-transform based solely on G4SK bind data double-applies that space
-    # for animated models, so positions stay in the authored mesh space.
-    port_log(None, f"Using {rig_reference.name} to validate skinning; leaving authored rest positions unchanged")
+    local_bind_translations = local_g4sk_bind_translations(props, original_model)
+    if local_bind_translations:
+        config_data["local_g4sk_bind_translations"] = local_bind_translations
+        port_log(None, f"Writing {len(local_bind_translations)} local G4SK bind translations")
+    rest_translations = counter_rotated_rest_translations(props, original_model)
+    if rest_translations:
+        config_data["source_joint_position_transforms"] = rest_translations
+        port_log(None, f"Translated {len(rest_translations)} source joints onto {rig_reference.name} rest space")
+    else:
+        port_log(None, f"Using {rig_reference.name} to validate skinning; leaving authored rest positions unchanged")
     config_data["rig_reference_model"] = str(rig_reference)
     config_data["g4_blender_plugin_version"] = g4_blender_plugin_version()
     config_data["g4_port_script_version_expected"] = G4_PORT_SCRIPT_VERSION_EXPECTED
