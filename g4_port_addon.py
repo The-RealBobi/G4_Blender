@@ -12,7 +12,6 @@ import tempfile
 import time
 from array import array
 from pathlib import Path
-from xml.sax.saxutils import escape
 
 import bpy
 import bmesh
@@ -74,9 +73,9 @@ FACE_ATLAS_SLOTS = FACE_ATLAS_COLUMNS * FACE_ATLAS_ROWS
 EXPRESSION_PREVIEW_BACKUP_UV = "__G4ExpressionPreviewUV"
 EXPRESSION_PREVIEW_SOURCE_UV_KEY = "g4_expression_preview_source_uv"
 ATLAS_GUTTER_PIXELS = 2
-G4_PORT_ADDON_MARKER = "expression-face-v9-json-marker-3"
+G4_PORT_ADDON_MARKER = "mesh-json-v1-handoff"
 G4_BLENDER_PLUGIN_VERSION_FALLBACK = (1, 4, 7)
-G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.6"
+G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.11"
 STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 
 
@@ -407,17 +406,9 @@ def export_pose_armature(source: bpy.types.Object, collection, rig_copies: dict)
     return rig
 
 
-def collada_symbol(value: str, fallback: str) -> str:
+def mesh_symbol(value: str, fallback: str) -> str:
     symbol = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
     return symbol or fallback
-
-
-def collada_numbers(values) -> str:
-    return " ".join(f"{float(value):.9g}" for value in values)
-
-
-def collada_matrix_values(matrix: Matrix) -> str:
-    return collada_numbers(matrix[row][column] for column in range(4) for row in range(4))
 
 
 def modular_reference_armature(source: bpy.types.Object):
@@ -630,109 +621,64 @@ def update_authored_outline_preview(self, context) -> None:
                 area.tag_redraw()
 
 
-def export_collada_internal(path: Path, selected_only: bool, apply_modifiers: bool) -> None:
-    """Write the mesh-only Collada subset consumed by g4_port.py.
-
-    Blender 5 removed the legacy Collada operator.  Skinning is exported by the
-    authoritative weights sidecar, so this writer intentionally serializes the
-    evaluated mesh attributes and object transforms rather than reimplementing
-    Blender's retired DAE armature exporter.
-    """
+def export_port_meshes(path: Path, selected_only: bool, apply_modifiers: bool) -> None:
     objects = mesh_objects(selected_only)
     if not objects:
         raise RuntimeError("No mesh objects were found to export.")
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    authored = getattr(getattr(bpy.context.scene, "level5_g4_port", None), "use_authored_outlines", False)
+    settings = getattr(bpy.context.scene, "level5_g4_port", None)
+    authored = getattr(settings, "use_authored_outlines", False)
     geometries = []
-    nodes = []
     for object_index, obj in enumerate(objects):
+        source_name = str(obj.get("g4_source_mesh_name", obj.name))
         evaluated = obj.evaluated_get(depsgraph) if apply_modifiers else obj
         mesh = evaluated.data
         mesh.calc_loop_triangles()
         face_colors = authored_outline_colors(mesh) if authored and obj.data.get(OUTLINE_AUTHORED_KEY) else []
-        colors = [0.0] * (len(mesh.loops) * 4) if face_colors else []
+        colors = [None] * len(mesh.loops)
         for face, corner_colors in zip(mesh.polygons, face_colors):
             for loop_index, color in zip(face.loop_indices, corner_colors):
-                colors[loop_index * 4:loop_index * 4 + 4] = [value / 255 for value in color]
-        geometry_id = f"g4_{object_index}_{collada_symbol(obj.name, 'mesh')}"
-        # Bake the complete object transform into the exported geometry.  The
-        # legacy Collada operator treats its transform enum differently across
-        # Blender versions, and a later G4 importer/runtime may ignore a node
-        # matrix.  Vertex and normal space are now unambiguous, including
-        # object, parent and armature-derived scale.
+                colors[loop_index] = [value / 255 for value in color]
         object_matrix = obj.matrix_world.copy()
         normal_matrix = object_matrix.to_3x3().inverted_safe().transposed()
-        transformed_positions = [object_matrix @ vertex.co for vertex in mesh.vertices]
-        transformed_normals = []
+        positions = [list(object_matrix @ vertex.co) for vertex in mesh.vertices]
+        normals = []
         for loop in mesh.loops:
             normal = normal_matrix @ loop.normal
-            transformed_normals.append(normal.normalized() if normal.length_squared else loop.normal)
-        positions = [component for vertex in transformed_positions for component in vertex]
-        normals = [component for normal in transformed_normals for component in normal]
+            normals.append(list(normal.normalized() if normal.length_squared else loop.normal))
         uv_layer = mesh.uv_layers.active
-        texcoords = [component for loop in mesh.loops for component in (uv_layer.data[loop.index].uv if uv_layer else (0.0, 0.0))]
         triangles_by_material = {}
         for triangle in mesh.loop_triangles:
             triangles_by_material.setdefault(triangle.material_index, []).append(triangle)
-        primitive_xml = []
+        primitives = []
         for material_index, triangles in sorted(triangles_by_material.items()):
-            packed = []
+            corners = []
             for triangle in triangles:
                 for loop_index in triangle.loops:
-                    packed.extend((mesh.loops[loop_index].vertex_index, loop_index, loop_index))
-                    if colors:
-                        packed.append(loop_index)
+                    corners.append({
+                        "vertex": mesh.loops[loop_index].vertex_index,
+                        "normal": normals[loop_index],
+                        "uv": list(uv_layer.data[loop_index].uv) if uv_layer else [0.0, 0.0],
+                        "color": colors[loop_index],
+                    })
             material = mesh.materials[material_index] if material_index < len(mesh.materials) else None
-            material_name = collada_symbol(material.name if material else f"material_{material_index}", f"material_{material_index}")
-            color_input = f'<input semantic="COLOR" source="#{geometry_id}_colors" offset="3" set="0"/>' if colors else ''
-            primitive_xml.append(
-                f'<triangles material="{escape(material_name)}" count="{len(triangles)}">'
-                f'<input semantic="VERTEX" source="#{geometry_id}_vertices" offset="0"/>'
-                f'<input semantic="NORMAL" source="#{geometry_id}_normals" offset="1"/>'
-                f'<input semantic="TEXCOORD" source="#{geometry_id}_uv0" offset="2" set="0"/>'
-                f"{color_input}<p>{' '.join(map(str, packed))}</p></triangles>"
-            )
-        vertex_count = len(mesh.vertices)
-        loop_count = len(mesh.loops)
-        color_source = (
-            f'<source id="{geometry_id}_colors"><float_array id="{geometry_id}_colors_array" count="{len(colors)}">{collada_numbers(colors)}</float_array>'
-            f'<technique_common><accessor source="#{geometry_id}_colors_array" count="{loop_count}" stride="4">'
-            '<param name="R" type="float"/><param name="G" type="float"/><param name="B" type="float"/><param name="A" type="float"/>'
-            '</accessor></technique_common></source>'
-        ) if colors else ''
+            primitives.append({
+                "material": mesh_symbol(material.name if material else f"material_{material_index}", f"material_{material_index}"),
+                "corners": corners,
+            })
         marks = mesh.attributes.get(OUTLINE_SEAM_ATTRIBUTE) if face_colors else None
-        seam_text = " ".join(str(v) for edge in mesh.edges if marks and marks.data[edge.index].value for v in edge.vertices)
-        outline_extra = f'<extra><technique profile="G4_OUTLINE"><seams width="{OUTLINE_BAND_FRACTION * bpy.context.scene.level5_g4_port.outline_width:.9g}">{seam_text}</seams></technique></extra>' if face_colors else ""
-        geometries.append(
-            f'<geometry id="{geometry_id}" name="{escape(obj.name)}"><mesh>'
-            f'<source id="{geometry_id}_positions"><float_array id="{geometry_id}_positions_array" count="{len(positions)}">{collada_numbers(positions)}</float_array>'
-            f'<technique_common><accessor source="#{geometry_id}_positions_array" count="{vertex_count}" stride="3">'
-            '<param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>'
-            f'</accessor></technique_common></source><source id="{geometry_id}_normals"><float_array id="{geometry_id}_normals_array" count="{len(normals)}">{collada_numbers(normals)}</float_array>'
-            f'<technique_common><accessor source="#{geometry_id}_normals_array" count="{loop_count}" stride="3">'
-            '<param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>'
-            f'</accessor></technique_common></source><source id="{geometry_id}_uv0"><float_array id="{geometry_id}_uv0_array" count="{len(texcoords)}">{collada_numbers(texcoords)}</float_array>'
-            f'<technique_common><accessor source="#{geometry_id}_uv0_array" count="{loop_count}" stride="2">'
-            '<param name="S" type="float"/><param name="T" type="float"/>'
-            f'</accessor></technique_common></source><vertices id="{geometry_id}_vertices"><input semantic="POSITION" source="#{geometry_id}_positions"/></vertices>'
-            f"{color_source}{''.join(primitive_xml)}</mesh>{outline_extra}</geometry>"
-        )
-        nodes.append(
-            f'<node id="{geometry_id}_node" name="{escape(obj.name)}"><matrix>{collada_matrix_values(Matrix.Identity(4))}</matrix>'
-            f'<instance_geometry url="#{geometry_id}" name="{escape(obj.name)}"/></node>'
-        )
-    dae = (
-        '<?xml version="1.0" encoding="utf-8"?>\n'
-        '<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">'
-        '<asset><contributor><authoring_tool>Level-5 G4 Blender Tools internal exporter</authoring_tool></contributor>'
-        '<unit name="meter" meter="1"/><up_axis>Z_UP</up_axis></asset>'
-        f"<library_geometries>{''.join(geometries)}</library_geometries>"
-        f'<library_visual_scenes><visual_scene id="Scene" name="Scene">{"".join(nodes)}</visual_scene></library_visual_scenes>'
-        '<scene><instance_visual_scene url="#Scene"/></scene></COLLADA>\n'
-    )
-    path.write_text(dae, encoding="utf-8", newline="\n")
+        seams = [list(edge.vertices) for edge in mesh.edges if marks and marks.data[edge.index].value]
+        geometries.append({
+            "id": f"g4_{object_index}_{mesh_symbol(source_name, 'mesh')}",
+            "name": source_name,
+            "positions": positions,
+            "primitives": primitives,
+            "seams": seams,
+            "outline_width": OUTLINE_BAND_FRACTION * settings.outline_width if settings else OUTLINE_BAND_FRACTION,
+        })
+    path.write_text(json.dumps({"format": "g4-blender-port-meshes", "version": 1, "meshes": geometries}), encoding="utf-8")
 
-def export_collada(
+def export_port_meshes_from_scene(
     path: Path,
     selected_only: bool,
     align_forward_to_y: bool,
@@ -746,40 +692,8 @@ def export_collada(
     if authored:
         for obj in mesh_objects(selected_only):
             obj.update_from_editmode()
-    kwargs = {
-        "filepath": str(path),
-        "selected": selected_only,
-        "apply_modifiers": apply_modifiers,
-        "triangulate": True,
-        # Preserve object/armature scaling in Collada-capable Blender builds.
-        # The internal exporter already writes the same matrix explicitly.
-        "export_object_transformation_type_selection": "matrix",
-    }
-    if align_forward_to_y:
-        kwargs.update(
-            {
-                "apply_global_orientation": True,
-                "export_global_forward_selection": "Y",
-                "export_global_up_selection": "Z",
-            }
-        )
-    collada_export = getattr(bpy.ops.wm, "collada_export", None)
-    if collada_export is not None:
-        try:
-            collada_export.get_rna_type()
-        except (AttributeError, KeyError, RuntimeError):
-            # Blender 5 keeps the dynamic Python wrapper even though the
-            # legacy Collada operator is no longer registered.
-            collada_export = None
-
     def run_export():
-        if bake_current_pose or authored:
-            export_collada_internal(path, bool(kwargs["selected"]), bool(kwargs["apply_modifiers"]))
-            return
-        if collada_export is not None:
-            collada_export(**kwargs)
-        else:
-            export_collada_internal(path, bool(kwargs["selected"]), bool(kwargs["apply_modifiers"]))
+        export_port_meshes(path, selected_only, apply_modifiers)
 
     if not bake_current_pose:
         run_export()
@@ -820,6 +734,7 @@ def export_collada(
             if source.data.get(OUTLINE_AUTHORED_KEY):
                 mesh[OUTLINE_AUTHORED_KEY] = True
             copy = bpy.data.objects.new(source.name, mesh)
+            copy["g4_source_mesh_name"] = source.name
             copy.matrix_world = export_mesh_matrix(source)
             collection.objects.link(copy)
             copies.append(copy)
@@ -828,9 +743,7 @@ def export_collada(
         for copy in copies:
             copy.select_set(True)
         bpy.context.view_layer.objects.active = copies[0]
-        kwargs["selected"] = True
-        kwargs["apply_modifiers"] = False
-        run_export()
+        export_port_meshes(path, True, False)
     finally:
         for obj in tuple(bpy.context.selected_objects):
             obj.select_set(False)
@@ -1263,12 +1176,12 @@ class G4PortPreferences(AddonPreferences):
         name="Export Cache",
         subtype="DIR_PATH",
         default=default_cache_dir(),
-        description="Temporary folder for DAE, weights, generated presets and reports",
+        description="Temporary folder for mesh data, weights, generated presets and reports",
     )
     keep_temporary_files: BoolProperty(
         name="Keep Temporary Files",
         default=False,
-        description="Keep generated DAE/config/weights files after export",
+        description="Keep generated mesh data/config/weights files after export",
     )
 
     def draw(self, context):
@@ -1488,7 +1401,7 @@ class G4PortSceneSettings(PropertyGroup):
     align_forward_to_y: BoolProperty(
         name="Align Forward to Y Axis",
         default=False,
-        description="Rotate the exported DAE so Blender forward points along the game Y axis",
+        description="Rotate exported geometry so Blender forward points along the game Y axis",
     )
     analyze_only: BoolProperty(name="Analyze Only", default=False)
     generate_tangents: BoolProperty(name="Generate Tangents", default=True)
@@ -2235,8 +2148,8 @@ def generated_config_path(cache: Path) -> Path:
     return cache / "generated_port_config.json"
 
 
-def prepare_custom_textures(props: G4PortSceneSettings, dae_path: Path) -> Path:
-    custom_dir = dae_path.parent / "customTextures"
+def prepare_custom_textures(props: G4PortSceneSettings, mesh_data_path: Path) -> Path:
+    custom_dir = mesh_data_path.parent / "customTextures"
     custom_dir.mkdir(parents=True, exist_ok=True)
     for record in props.records:
         if not record.texture_file:
@@ -3311,7 +3224,7 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
         if entry.texture_name in generated:
             entry.replacement_path = str(output_dir / generated[entry.texture_name])
     # Preparing an atlas is an explicit request for custom texture export. Keep
-    # that intent for the following Export action so its DAE and G4TX use the
+    # that intent for the following Export action so its geometry and G4TX use the
     # same atlas layout.
     props.generate_png_set_on_export = True
     port_log(log_path, f"Generate PNG set finished; replacements={len(replacements)}")
@@ -3613,7 +3526,7 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     cache = resolve_file(getattr(prefs, "cache_dir", ""), default_cache_dir())
     cache.mkdir(parents=True, exist_ok=True)
 
-    dae_path = cache / "scene_export.dae"
+    mesh_data_path = cache / "scene_export.json"
     weights_path = cache / "scene_weights.json"
     report_path = cache / ("analyze_report.json" if props.analyze_only else "export_report.json")
     output_root = package_root / "data"
@@ -3657,14 +3570,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     # All generated atlases must exist before this copy.  Previously the
     # expression pool was built afterwards, so a fresh c*_10 atlas could miss
     # the G4TX replacement directory entirely.
-    prepare_custom_textures(props, dae_path)
+    prepare_custom_textures(props, mesh_data_path)
 
-    export_collada(
-        dae_path,
-        props.selected_only,
-        props.align_forward_to_y,
-        True,  # always apply modifiers
-        True,  # always bake current pose
+    export_port_meshes_from_scene(
+        mesh_data_path, props.selected_only, props.align_forward_to_y, True, True
     )
     mesh_count = write_weights_json(weights_path, props.selected_only)
     if mesh_count == 0:
@@ -3781,7 +3690,7 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     command = [
         export_python(prefs, needs_pillow),
         str(resolve_port_script(prefs)),
-        str(dae_path),
+        str(mesh_data_path),
         "--raw-root",
         str(raw_root),
         "--config",
@@ -3819,13 +3728,13 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         raise RuntimeError(f"Could not read export report: {report_path}") from exc
 
     if not getattr(prefs, "keep_temporary_files", False):
-        for path in (dae_path, weights_path, generated_config_path(cache)):
+        for path in (mesh_data_path, weights_path, generated_config_path(cache)):
             if path.exists():
                 try:
                     path.unlink()
                 except OSError:
                     pass
-        shutil.rmtree(dae_path.parent / "customTextures", ignore_errors=True)
+        shutil.rmtree(mesh_data_path.parent / "customTextures", ignore_errors=True)
     report["package_root"] = str(package_root)
     report["data_root"] = str(output_root)
     return report, report_path

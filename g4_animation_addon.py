@@ -31,6 +31,7 @@ try:
     from .g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
     from .g4mt_motion import decode_motion, simplify_motion_samples
+    from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
     from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
     from .effects.particle_library import particle_library_metadata, read_particle_library
@@ -46,6 +47,7 @@ except ImportError:
     from g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
     from g4mt_probe import parse_g4mt, read_g4sk_data
     from g4mt_motion import decode_motion, simplify_motion_samples
+    from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
     from g4ma_motion import decode_material_motion, material_animation_paths
     from g4cm_camera import decode_camera, parse_g4cm
     from effects.particle_library import particle_library_metadata, read_particle_library
@@ -675,13 +677,39 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
         if name is not None:
             track["target_name"] = name
             resolved += 1
+    bone_names_by_source = {name: [] for name in track_bone_names(motion)}
+    explicit_names = {name: [] for name in bone_names_by_source}
+    for bone in armature.data.bones:
+        source_name = str(bone.get("g4_animation_source_joint", "")).strip()
+        if source_name in explicit_names:
+            explicit_names[source_name].append(bone.name)
+    catalog = load_joint_alias_catalog()
+    alias_targets: dict[str, list[str]] = defaultdict(list)
+    for bone in armature.data.bones:
+        target_name = catalog.aliases.get(normalize_joint_key(bone.name), "")
+        if target_name in bone_names_by_source:
+            alias_targets[target_name].append(bone.name)
+    for source_name in bone_names_by_source:
+        exact = armature.data.bones.get(source_name)
+        if explicit_names[source_name]:
+            bone_names_by_source[source_name] = explicit_names[source_name]
+        elif exact is not None:
+            bone_names_by_source[source_name] = [exact.name]
+        elif len(alias_targets.get(source_name, ())) == 1:
+            bone_names_by_source[source_name] = alias_targets[source_name]
+    for track in motion["tracks"]:
+        name = track.get("target_name")
+        if name:
+            track["armature_bone_names"] = bone_names_by_source.get(name, ())
     return resolved
 
 
 def armature_score(obj, names: set[str]) -> int:
     if obj is None or obj.type != "ARMATURE":
         return -1
-    return sum(name in obj.data.bones for name in names)
+    motion = {"tracks": [{"target_name": name} for name in names]}
+    resolve_track_names_from_armature(motion, obj)
+    return sum(bool(track.get("armature_bone_names")) for track in motion["tracks"])
 
 
 def best_armature(objects, names: set[str]):
@@ -1197,7 +1225,8 @@ def append_motion_to_action(
                 progress_callback(track_index, track_count)
             continue
         rest = rest_by_name.get(name)
-        pose_bones = [armature.pose.bones[name]] if name and name in armature.pose.bones else []
+        target_names = track.get("armature_bone_names") or (name,)
+        pose_bones = [armature.pose.bones[target] for target in target_names if target in armature.pose.bones]
         if not pose_bones:
             if progress_callback is not None:
                 progress_callback(track_index, track_count)
@@ -1311,7 +1340,264 @@ def create_action(
         armature.animation_data.action_slot = slots[0]
 
     action["g4_relative_rest_tracks"] = relative_rest_tracks
+    mapping = {
+        track["target_name"]: list(track.get("armature_bone_names") or (track["target_name"],))
+        for track in motion["tracks"]
+        if track.get("target_name")
+        and (track.get("armature_bone_names") or track["target_name"] in armature.data.bones)
+    }
+    action["g4_retarget_mapping"] = json.dumps(mapping, ensure_ascii=False, sort_keys=True)
+    action["g4_retarget_unmapped_targets"] = json.dumps(
+        sorted(track["target_name"] for track in motion["tracks"]
+               if track.get("target_name") and track["target_name"] not in mapping),
+        ensure_ascii=False,
+    )
     return action, keyed_bones
+
+
+def create_motion_armature(motion: dict):
+    skeleton = motion.get("skeleton") or {}
+    names = skeleton.get("names") or []
+    parents = skeleton.get("parents") or []
+    rest_local = motion_rest_matrices(motion)
+    if not names or len(parents) != len(names) or any(name not in rest_local for name in names):
+        raise ValueError("G4 animation skeleton has incomplete rest transforms or parent indices")
+    if len(set(names)) != len(names):
+        raise ValueError("G4 animation skeleton contains duplicate joint names")
+
+    global_rest = {}
+    resolving = set()
+
+    def resolve(index):
+        name = names[index]
+        if name in global_rest:
+            return global_rest[name]
+        if name in resolving:
+            raise ValueError(f"G4 animation skeleton contains a parent cycle at {name}")
+        resolving.add(name)
+        parent = parents[index]
+        local = rest_local[name]
+        if 0 <= parent < len(names) and parent != index:
+            matrix = resolve(parent) @ local
+        else:
+            matrix = local.copy()
+        resolving.remove(name)
+        global_rest[name] = matrix
+        return matrix
+
+    children = {name: [] for name in names}
+    for index, parent in enumerate(parents):
+        if 0 <= parent < len(names) and parent != index:
+            children[names[parent]].append(names[index])
+    for index in range(len(names)):
+        resolve(index)
+
+    armature_data = bpy.data.armatures.new("G4 Motion Skeleton")
+    armature = bpy.data.objects.new("G4 Motion Skeleton", armature_data)
+    bpy.context.collection.objects.link(armature)
+    previous_active = bpy.context.view_layer.objects.active
+    previous_selected = tuple(bpy.context.selected_objects)
+    previous_mode = previous_active.mode if previous_active is not None else "OBJECT"
+    if previous_mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for obj in previous_selected:
+        obj.select_set(False)
+    bpy.context.view_layer.objects.active = armature
+    armature.select_set(True)
+    try:
+        bpy.ops.object.mode_set(mode="EDIT")
+        edit_bones = {name: armature_data.edit_bones.new(name) for name in names}
+        for index, name in enumerate(names):
+            parent = parents[index]
+            if 0 <= parent < len(names) and parent != index:
+                edit_bones[name].parent = edit_bones[names[parent]]
+
+        def bone_depth(name):
+            depth = 0
+            parent = parents[names.index(name)]
+            while 0 <= parent < len(names) and parent != names.index(name):
+                depth += 1
+                name = names[parent]
+                parent = parents[names.index(name)]
+            return depth
+
+        for name in sorted(names, key=bone_depth):
+            bone = edit_bones[name]
+            bone.head = global_rest[name].translation
+            bone.tail = global_rest[name].translation + global_rest[name].to_3x3() @ Vector((0.0, 0.05, 0.0))
+            bone.matrix = global_rest[name]
+            lengths = [
+                (global_rest[child].translation - global_rest[name].translation).length
+                for child in children[name]
+            ]
+            bone.length = max((length for length in lengths if length > 1e-4), default=0.05)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        armature.matrix_world = Matrix.Rotation(math.pi / 2.0, 4, "X")
+    except Exception:
+        if bpy.context.object is not None and bpy.context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.data.objects.remove(armature, do_unlink=True)
+        bpy.data.armatures.remove(armature_data)
+        raise
+    finally:
+        if armature.name in bpy.data.objects:
+            armature.select_set(False)
+        for obj in previous_selected:
+            if obj.name in bpy.context.view_layer.objects:
+                obj.select_set(True)
+        if previous_active is not None:
+            bpy.context.view_layer.objects.active = previous_active
+            if previous_mode != "OBJECT":
+                bpy.ops.object.mode_set(mode=previous_mode)
+    return armature
+
+
+def requires_semantic_retarget(motion: dict, armature) -> bool:
+    if armature.get("g4_character_model_source") or armature.get("g4_character_skeleton_source"):
+        return False
+    return any(
+        track.get("target_name")
+        and any(name != track["target_name"] for name in track.get("armature_bone_names") or ())
+        for track in motion["tracks"]
+    )
+
+
+def create_retargeted_action(armature, motion: dict, frame_origin: int):
+    source_armature = create_motion_armature(motion)
+    source_motion = dict(motion)
+    source_motion["tracks"] = [dict(track) for track in motion["tracks"]]
+    resolve_track_names_from_armature(source_motion, source_armature)
+    source_action = None
+    scene = bpy.context.scene
+    previous_frame = scene.frame_current
+    action = None
+    try:
+        source_action, source_keyed = create_action(source_armature, source_motion, frame_origin)
+        if source_keyed == 0:
+            raise ValueError("G4 animation has no tracks on its source skeleton")
+
+        source_to_target = {
+            track["target_name"]: tuple(track.get("armature_bone_names") or ())
+            for track in motion["tracks"]
+            if track.get("target_name") and track.get("armature_bone_names")
+        }
+        target_to_source = {}
+        for source_name, target_names in source_to_target.items():
+            for target_name in target_names:
+                previous_source = target_to_source.get(target_name)
+                if previous_source is not None and previous_source != source_name:
+                    raise ValueError(f"Target bone {target_name} is assigned to multiple G4 joints")
+                target_to_source[target_name] = source_name
+
+        target_bones = list(armature.data.bones)
+
+        def depth(bone):
+            value = 0
+            parent = bone.parent
+            while parent is not None:
+                value += 1
+                parent = parent.parent
+            return value
+
+        target_bones.sort(key=depth)
+        rest_local = {
+            bone.name: bone.parent.matrix_local.inverted_safe() @ bone.matrix_local
+            if bone.parent else bone.matrix_local.copy()
+            for bone in target_bones
+        }
+        source_world_rotation = source_armature.matrix_world.to_quaternion()
+        target_world_rotation = armature.matrix_world.to_quaternion()
+        target_inverse_rotation = target_world_rotation.inverted()
+        source_points = [source_armature.matrix_world @ bone.matrix_local.translation for bone in source_armature.data.bones]
+        target_points = [armature.matrix_world @ bone.matrix_local.translation for bone in target_bones]
+        source_height = max(point.z for point in source_points) - min(point.z for point in source_points)
+        target_height = max(point.z for point in target_points) - min(point.z for point in target_points)
+        translation_scale = target_height / source_height if source_height > 1e-6 else 1.0
+        source_rest_world = {
+            source_name: source_world_rotation @ source_armature.data.bones[source_name].matrix_local.to_quaternion()
+            for source_name in target_to_source.values()
+            if source_armature.data.bones.get(source_name) is not None
+        }
+
+        action = bpy.data.actions.new(name=motion["clip"]["name"] or "G4 Retargeted Animation")
+        action.use_fake_user = True
+        action.use_frame_range = True
+        action.frame_start = source_action.frame_start
+        action.frame_end = source_action.frame_end
+        armature.animation_data_create()
+        armature.animation_data.action = action
+        action_frames = range(round(source_action.frame_start), round(source_action.frame_end) + 1)
+        for frame in action_frames:
+            scene.frame_set(frame)
+            bpy.context.view_layer.update()
+            pose_matrices = {}
+            for bone in target_bones:
+                local_rest = rest_local[bone.name]
+                parent_pose = pose_matrices.get(bone.parent.name) if bone.parent else None
+                inherited = parent_pose @ local_rest if parent_pose is not None else local_rest.copy()
+                source_name = target_to_source.get(bone.name)
+                source_pose = source_armature.pose.bones.get(source_name) if source_name else None
+                if source_pose is not None and source_name in source_rest_world:
+                    source_pose_world = source_world_rotation @ source_pose.matrix.to_quaternion()
+                    target_rest_world = target_world_rotation @ bone.matrix_local.to_quaternion()
+                    desired_world = source_pose_world @ source_rest_world[source_name].inverted() @ target_rest_world
+                    desired_local = target_inverse_rotation @ desired_world
+                    location, _rotation, scale = inherited.decompose()
+                    source_bone = source_armature.data.bones[source_name]
+                    source_parent = source_bone.parent
+                    if source_parent is not None:
+                        source_parent_pose = source_armature.pose.bones[source_parent.name]
+                        source_local_pose = source_parent_pose.matrix.inverted_safe() @ source_pose.matrix
+                        source_local_rest = source_parent.matrix_local.inverted_safe() @ source_bone.matrix_local
+                        source_parent_world = source_world_rotation @ source_parent_pose.matrix.to_quaternion()
+                    else:
+                        source_local_pose = source_pose.matrix
+                        source_local_rest = source_bone.matrix_local
+                        source_parent_world = source_world_rotation
+                    source_translation_delta = source_local_pose.translation - source_local_rest.translation
+                    target_translation_delta = target_inverse_rotation @ (source_parent_world @ source_translation_delta)
+                    location += target_translation_delta * translation_scale
+                    pose_matrix = Matrix.LocRotScale(location, desired_local, scale)
+                else:
+                    pose_matrix = inherited
+                pose_matrices[bone.name] = pose_matrix
+                if source_pose is None or source_name not in source_rest_world:
+                    continue
+                parent_pose = pose_matrices.get(bone.parent.name) if bone.parent else None
+                local_pose = parent_pose.inverted_safe() @ pose_matrix if parent_pose is not None else pose_matrix
+                basis = local_rest.inverted_safe() @ local_pose
+                location, rotation, scale = basis.decompose()
+                pose_bone = armature.pose.bones[bone.name]
+                pose_bone.location = location
+                pose_bone.rotation_mode = "QUATERNION"
+                pose_bone.rotation_quaternion = rotation
+                pose_bone.scale = scale
+                for data_path in ("location", "rotation_quaternion", "scale"):
+                    pose_bone.keyframe_insert(data_path=data_path, frame=frame, group=bone.name)
+
+        action["g4_retarget_mapping"] = json.dumps(
+            {name: list(targets) for name, targets in source_to_target.items()},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        action["g4_retarget_unmapped_targets"] = json.dumps(
+            sorted(track["target_name"] for track in motion["tracks"]
+                   if track.get("target_name") and track["target_name"] not in source_to_target),
+            ensure_ascii=False,
+        )
+        return action, len(target_to_source)
+    except Exception:
+        if action is not None and action.name in bpy.data.actions:
+            bpy.data.actions.remove(action, do_unlink=True)
+        raise
+    finally:
+        scene.frame_set(previous_frame)
+        if source_action is not None and source_action.name in bpy.data.actions:
+            bpy.data.actions.remove(source_action, do_unlink=True)
+        armature_data = source_armature.data
+        bpy.data.objects.remove(source_armature, do_unlink=True)
+        if armature_data.name in bpy.data.armatures:
+            bpy.data.armatures.remove(armature_data)
 
 
 def g4mt_import_settings(operator) -> str:
@@ -1614,7 +1900,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
     reuse_selected_armature: BoolProperty(
         name="Reuse Selected Armature",
         default=True,
-        description="Animate the selected armature when its bone names match the G4MT targets",
+        description="Use exact joint names, unambiguous catalog aliases, and bone-level source-joint overrides",
     )
     set_scene_fps: BoolProperty(
         name="Set Scene FPS",
@@ -1638,6 +1924,8 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         if self.import_camera:
             layout.prop(self, "set_active_camera")
         layout.prop(self, "reuse_selected_armature")
+        if self.reuse_selected_armature:
+            layout.label(text="For a manual map, set bone property g4_animation_source_joint to a G4 joint name.")
         layout.prop(self, "set_scene_fps")
 
     def execute(self, context):
@@ -1793,6 +2081,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
 
             track_count = len(motion["tracks"])
             part_count = len(character_part_armatures(armature))
+            semantic_retarget = requires_semantic_retarget(motion, armature)
             progress_total = max(1, track_count * (1 + part_count))
 
             def update_progress(completed, total, offset=0):
@@ -1800,12 +2089,15 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 percent = 30 + round(70 * current / progress_total)
                 refresh_progress(percent, f"Importing animation: {current}/{progress_total} bone tracks")
 
-            action, keyed_bones = create_action(
-                armature,
-                motion,
-                frame_origin,
-                lambda completed, total: update_progress(completed, total),
-            )
+            if semantic_retarget:
+                action, keyed_bones = create_retargeted_action(armature, motion, frame_origin)
+            else:
+                action, keyed_bones = create_action(
+                    armature,
+                    motion,
+                    frame_origin,
+                    lambda completed, total: update_progress(completed, total),
+                )
             if keyed_bones == 0:
                 bpy.data.actions.remove(action)
                 raise RuntimeError("The animation contains no matching bone tracks")
@@ -1832,7 +2124,14 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                         refresh_progress(95, f"Importing animation {imported_clip_count + 1}/{len(clips)}")
                         extra_motion = decode_motion(g4mt_path, str(clip["index"]), skeleton_hint)
                         resolve_track_names_from_armature(extra_motion, armature)
-                        extra_action, extra_keyed = create_action(armature, extra_motion)
+                        if semantic_retarget:
+                            extra_action, extra_keyed = create_retargeted_action(
+                                armature,
+                                extra_motion,
+                                clip["start_frame"],
+                            )
+                        else:
+                            extra_action, extra_keyed = create_action(armature, extra_motion)
                         if extra_keyed == 0:
                             bpy.data.actions.remove(extra_action)
                             raise RuntimeError(f"Animation {clip['name']} has no matching bone tracks")
@@ -1841,7 +2140,8 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                         extra_action["g4mt_clip_name"] = clip["name"]
                         if package_entry_name is not None:
                             extra_action["g4pk_entry"] = package_entry_name
-                        animate_character_parts(armature, extra_motion, clip["start_frame"])
+                        if not semantic_retarget:
+                            animate_character_parts(armature, extra_motion, clip["start_frame"])
                         imported_clip_count += 1
                 finally:
                     armature.animation_data.action = action

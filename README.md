@@ -91,12 +91,12 @@ Auxiliary shadow and culling objects are hidden automatically. Models absent fro
 
 ## Porting edited models
 
-The port exporter writes edited Blender or DAE geometry into a native `G4MD`/`G4MG` pair. Start from a compatible original model from a complete legal game dump; that base defines the record structure, materials, palettes and texture archive the exporter can safely patch.
+The port exporter writes edited Blender geometry directly into a native `G4MD`/`G4MG` pair. DAE files remain supported as Blender-importable source models in Blender builds with the Collada importer (verified with Blender 4.5.10). Start from a compatible original model from a complete legal game dump; that base defines the record structure, materials, palettes and texture archive the exporter can safely patch.
 
 The exporter:
 
 * Preserves native layouts, material references, hashes and record structure where possible.
-* Resolves Collada skin controllers and Blender-exported weight sidecars.
+* Reads weights from Blender vertex groups and from supported Collada skin controllers.
 * Validates generated records, palettes, indices and packed-weight sums before writing packages.
 * Copies or rebuilds `G4TX` archives from the native base.
 * Handles Nintendo Switch `NXTCH` texture payloads, with automatic `dx11` to `nx` fallback.

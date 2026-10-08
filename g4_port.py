@@ -56,8 +56,8 @@ NOSE_MESH_NAMES = {"nose_mesh", "nose_mesh_001"}
 NON_FACE_NAME_INDEX = 95
 FACE_NAME_INDEX = 96
 EYE_NAME_INDEX = 97
-G4_PORT_CONVERTER_MARKER = "expression-face-v9-json-marker-3"
-G4_PORT_SCRIPT_VERSION = "1.0.10"
+G4_PORT_CONVERTER_MARKER = "mesh-json-v1-handoff"
+G4_PORT_SCRIPT_VERSION = "1.0.11"
 STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 VERTEX_COLOR_MODES = {"native", "constant", "authored"}
 
@@ -1264,6 +1264,102 @@ def parse_dae(
         if outline_node is not None:
             refine_outline_meshes(meshes[geometry_mesh_start:], geometry_source_indices, outline_seams,
                                   float(outline_node.get("width", str(OUTLINE_BAND_FRACTION))))
+    return meshes or calibration_mesh()
+
+
+def parse_port_meshes(
+    path: Path,
+    weight_sidecar: Path | None = None,
+    authored_colors: bool = False,
+) -> list[Mesh]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("format") != "g4-blender-port-meshes" or data.get("version") != 1:
+        raise ValueError(f"Unsupported Blender mesh interchange format: {path}")
+    geometries = data.get("meshes")
+    if not isinstance(geometries, list):
+        raise ValueError("Blender mesh interchange must contain a meshes array")
+    sidecar = load_weight_sidecar(weight_sidecar)
+    used_sidecar: set[int] = set()
+    meshes: list[Mesh] = []
+    material_indices: dict[str, int] = {}
+    for geometry in geometries:
+        if not isinstance(geometry, dict):
+            raise ValueError("Blender mesh interchange contains an invalid mesh entry")
+        positions = geometry.get("positions")
+        if not isinstance(positions, list) or any(
+            not isinstance(position, list) or len(position) != 3
+            or any(not math.isfinite(float(value)) for value in position)
+            for position in positions
+        ):
+            raise ValueError(f"Invalid positions in Blender mesh {geometry.get('name', '')!r}")
+        sidecar_mesh = next((
+            item for item in sidecar
+            if item["_sidecar_index"] not in used_sidecar
+            and clean_symbol(str(item.get("name", ""))) == clean_symbol(str(geometry.get("name", "")))
+        ), None)
+        influences = None
+        if sidecar_mesh is not None:
+            used_sidecar.add(sidecar_mesh["_sidecar_index"])
+            if int(sidecar_mesh.get("vertex_count", -1)) == len(positions):
+                influences = sidecar_influences(sidecar_mesh, len(positions))
+        source_name = str(sidecar_mesh.get("name", "")) if sidecar_mesh is not None else ""
+        source_indices_by_primitive = []
+        geometry_mesh_start = len(meshes)
+        seams = {tuple(edge) for edge in geometry.get("seams", [])}
+        primitives = geometry.get("primitives")
+        if not isinstance(primitives, list):
+            raise ValueError(f"Invalid primitives in Blender mesh {geometry.get('name', '')!r}")
+        for primitive in primitives:
+            if not isinstance(primitive, dict):
+                raise ValueError(f"Invalid primitive in Blender mesh {geometry.get('name', '')!r}")
+            corners = primitive.get("corners", [])
+            if not isinstance(corners, list) or not corners or len(corners) % 3:
+                raise ValueError(f"Invalid triangle corners in Blender mesh {geometry.get('name', '')!r}")
+            vertices: list[Vertex] = []
+            indices: list[int] = []
+            source_indices: list[int] = []
+            cache: dict[tuple, int] = {}
+            for corner in corners:
+                if not isinstance(corner, dict):
+                    raise ValueError(f"Invalid corner in Blender mesh {geometry.get('name', '')!r}")
+                position_index = int(corner["vertex"])
+                if position_index < 0 or position_index >= len(positions):
+                    raise ValueError(f"Invalid vertex index in Blender mesh {geometry.get('name', '')!r}")
+                color_data = corner.get("color") if authored_colors else None
+                color = tuple(round(max(0.0, min(1.0, value)) * 255) for value in color_data) if color_data else None
+                vertex = Vertex(
+                    tuple(float(value) for value in positions[position_index]),
+                    tuple(float(value) for value in corner["normal"]),
+                    tuple(float(value) for value in corner["uv"]),
+                    influences[position_index] if influences is not None else (),
+                    color=color,
+                    color_from_source=color is not None,
+                )
+                key = (vertex.position, vertex.normal, vertex.uv, vertex.influences, vertex.color)
+                if seams:
+                    key += (position_index,)
+                index = cache.get(key)
+                if index is None:
+                    index = len(vertices)
+                    cache[key] = index
+                    vertices.append(vertex)
+                    source_indices.append(position_index)
+                indices.append(index)
+            if vertices:
+                material_name = clean_symbol(str(primitive.get("material", "material")))
+                if material_name not in material_indices:
+                    material_indices[material_name] = len(material_indices)
+                meshes.append(Mesh(
+                    clean_symbol(str(geometry.get("name") or geometry.get("id") or material_name)),
+                    vertices, indices, material_indices[material_name], material_name,
+                    (source_name,) if source_name else (),
+                ))
+                source_indices_by_primitive.append(source_indices)
+        if seams:
+            refine_outline_meshes(
+                meshes[geometry_mesh_start:], source_indices_by_primitive, seams,
+                float(geometry.get("outline_width", OUTLINE_BAND_FRACTION)),
+            )
     return meshes or calibration_mesh()
 
 
@@ -3160,24 +3256,26 @@ def variant_texture_replacements(
 
 
 def prepare_port_geometry(
-    source_dae: Path | None,
+    source_mesh_path: Path | None,
     raw_root: Path,
     config: PortConfig,
     weight_sidecar: Path | None,
 ) -> tuple[list[Mesh], list[Mesh], list[list[int]], list[list[int]], list[dict]]:
     model_stem = config.model_rel.name
-    source_meshes = (
-        parse_dae(
-            source_dae,
-            model_stem,
-            weight_sidecar=weight_sidecar,
+    if source_mesh_path is None:
+        source_meshes = calibration_mesh()
+    elif source_mesh_path.suffix.lower() == ".dae":
+        source_meshes = parse_dae(
+            source_mesh_path, model_stem, weight_sidecar=weight_sidecar,
             generate_tangents=config.generate_tangents,
             apply_bind_shape=config.apply_bind_shape,
             authored_colors=config.vertex_color_mode == "authored",
         )
-        if source_dae
-        else calibration_mesh()
-    )
+    else:
+        source_meshes = parse_port_meshes(
+            source_mesh_path, weight_sidecar,
+            authored_colors=config.vertex_color_mode == "authored",
+        )
     meshes = merged_native_meshes(source_meshes, config)
     # Resolve UV fitting only after Collada has been parsed and modifiers are
     # already baked into the actual exported mesh.  This prevents a mirrored or
@@ -3225,7 +3323,7 @@ def prepare_port_geometry(
 
 
 def analyze_port(
-    source_dae: Path | None,
+    source_mesh_path: Path | None,
     raw_root: Path,
     config: PortConfig,
     weight_sidecar: Path | None = None,
@@ -3233,7 +3331,7 @@ def analyze_port(
     chara_model: Path = DEFAULT_CHARA_MODEL,
 ) -> dict:
     source_meshes, meshes, native_palettes, palettes, records = prepare_port_geometry(
-        source_dae, raw_root, config, weight_sidecar
+        source_mesh_path, raw_root, config, weight_sidecar
     )
     expected_skeleton = resolve_expected_skeleton(config.model_rel, raw_root, chara_model)
     skeleton = validate_skeleton_palettes(palettes, skeleton_path, expected_skeleton)
@@ -3249,14 +3347,14 @@ def analyze_port(
         recommendations.append("Use a different G4SK: its bind and inverse-bind matrices are not mutually consistent.")
     if any(len(mesh.vertices) > 60000 for mesh in meshes):
         recommendations.append("A record is close to the 65535 vertex limit; reserve another native slot or simplify the mesh.")
-    if source_dae and not any(vertex.influences for mesh in source_meshes for vertex in mesh.vertices):
+    if source_mesh_path and not any(vertex.influences for mesh in source_meshes for vertex in mesh.vertices):
         recommendations.append("The DAE contains no skin weights; use --weights-json or a Collada export with controllers.")
     if not config.generate_tangents:
         recommendations.append("Enable generate_tangents for materials that use normal/specular direction maps.")
     return {
         "mode": "analyze",
         "model_rel": config.model_rel.as_posix(),
-        "source": str(source_dae) if source_dae else None,
+        "source": str(source_mesh_path) if source_mesh_path else None,
         "source_meshes": [
             {
                 "name": mesh.name,
@@ -3376,7 +3474,7 @@ def write_character_object_config(
 
 
 def write_port(
-    source_dae: Path | None,
+    source_mesh_path: Path | None,
     raw_root: Path,
     out_root: Path,
     config: PortConfig,
@@ -3386,9 +3484,9 @@ def write_port(
     chara_model: Path = DEFAULT_CHARA_MODEL,
 ) -> dict:
     source_meshes, meshes, native_palettes, palettes, _ = prepare_port_geometry(
-        source_dae, raw_root, config, weight_sidecar
+        source_mesh_path, raw_root, config, weight_sidecar
     )
-    if source_dae is not None and weight_sidecar is not None:
+    if source_mesh_path is not None and weight_sidecar is not None:
         sidecar_meshes = load_weight_sidecar(weight_sidecar)
         sidecar_has_skin = any(
             any(vertex for vertex in mesh.get("influences", []))
@@ -3444,7 +3542,7 @@ def write_port(
     g4md = build_base_g4md(meshes, records, raw_root, config)
     g4md = rewrite_joint_palettes(g4md, palettes)
     validation = validate_generated_model(g4md, g4mg)
-    custom_texture_dir = source_dae.parent / "customTextures" if source_dae else Path()
+    custom_texture_dir = source_mesh_path.parent / "customTextures" if source_mesh_path else Path()
     if texture_mode == "custom":
         texture_names = rebuild_native_g4tx_with_custom_textures(
             texture_template, custom_texture_dir, texture_out, config.texture_replacements
@@ -3533,8 +3631,8 @@ def write_port(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Experimental DAE to Level-5 G4MD/G4MG/G4TX port writer.")
-    parser.add_argument("dae", nargs="?", type=Path, help="Optional source Collada DAE.")
+    parser = argparse.ArgumentParser(description="Experimental mesh to Level-5 G4MD/G4MG/G4TX port writer.")
+    parser.add_argument("source", nargs="?", type=Path, help="Optional source DAE or Blender port-mesh JSON.")
     parser.add_argument("--raw-root", type=Path, default=DEFAULT_RAW_ROOT)
     parser.add_argument("--out-root", type=Path, default=Path("data"))
     parser.add_argument("--config", type=Path, help="Optional port preset JSON.")
@@ -3557,7 +3655,7 @@ def main() -> None:
     config = load_config(args.config)
     if args.analyze:
         result = analyze_port(
-            args.dae,
+            args.source,
             args.raw_root,
             config,
             args.weights_json,
@@ -3566,7 +3664,7 @@ def main() -> None:
         )
     else:
         result = write_port(
-            args.dae,
+            args.source,
             args.raw_root,
             args.out_root,
             config,

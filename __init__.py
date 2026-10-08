@@ -461,12 +461,12 @@ class G4ImporterPreferences(AddonPreferences):
         name="Port Export Cache",
         subtype="DIR_PATH",
         default=g4_port_addon.default_cache_dir(),
-        description="Temporary folder for DAE, weights, generated presets and reports",
+        description="Temporary folder for mesh data, weights, generated presets and reports",
     )
     keep_temporary_files: BoolProperty(
         name="Keep Port Temporary Files",
         default=False,
-        description="Keep generated DAE/config/weights files after export",
+        description="Keep generated mesh data/config/weights files after export",
     )
 
     def draw(self, context):
