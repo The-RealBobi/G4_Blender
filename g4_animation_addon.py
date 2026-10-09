@@ -4966,7 +4966,7 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         action = active_object.animation_data.action if active_object and active_object.animation_data else None
         if action and action.get("g4mt_family_import_id"):
             self.layout.label(text="Exports all clips from this imported rig family.", icon="ACTION")
-        self.layout.label(text="Exports evaluated Blender-space tracks; game axis conversion is not applied.", icon="INFO")
+        self.layout.label(text="External rig axes are converted to G4 axes on export.", icon="INFO")
 
     def execute(self, context):
         armature = context.active_object
