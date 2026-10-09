@@ -36,6 +36,7 @@ from .g4mt import (
     parse_g4mt,
     parse_g4mt_file,
 )
+from .g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
 from .g4ma import (
     G4MAMaterialChannelSummary,
     G4MAMaterialTarget,
@@ -82,6 +83,9 @@ __all__ = [
     "crc32b",
     "parse_g4mt",
     "parse_g4mt_file",
+    "G4MTLocalTransform",
+    "G4MTTargetSamples",
+    "write_g4mt_clip",
     "G4MAMaterialChannelSummary",
     "G4MAMaterialTarget",
     "build_g4ma_effect_bindings",
