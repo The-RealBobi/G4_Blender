@@ -111,6 +111,21 @@ class G4MTWriterTests(unittest.TestCase):
         value_offset = bank.header.data_offset + second_x.data_offset
         self.assertEqual((0.0, 8.0), struct.unpack_from("<2f", output, value_offset))
 
+    def test_allows_duplicate_clip_names(self):
+        target = G4MTTargetSamples("root", None, (
+            G4MTLocalTransform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+            G4MTLocalTransform((1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+        ))
+
+        output = write_g4mt_family(make_template(), (
+            G4MTClipSamples(0, "repeat", (target,)),
+            G4MTClipSamples(0, "repeat", (target,)),
+        ))
+
+        bank = parse_g4mt(output, "duplicate clip names")
+        self.assertEqual(("repeat", "repeat"), tuple(clip.name for clip in bank.clips))
+        self.assertEqual(bank.clips[0].name_hash, bank.clips[1].name_hash)
+
     def test_preserves_additive_clips_while_replacing_other_clips(self):
         first_targets = (
             G4MTTargetSamples("root", None, (
@@ -125,18 +140,18 @@ class G4MTWriterTests(unittest.TestCase):
             )),
         )
         template = bytearray(write_g4mt_family(make_template(), (
-            G4MTClipSamples(0, "walk", first_targets),
-            G4MTClipSamples(0, "base", second_targets),
+            G4MTClipSamples(0, "repeat", first_targets),
+            G4MTClipSamples(0, "repeat", second_targets),
         )))
         template[0x40 + 0x10 + 8] |= 1
         source = parse_g4mt(template, "additive passthrough test source")
 
         output = write_g4mt_family_preserving_additive(bytes(template), (
-            G4MTClipSamples(0, "walk", first_targets),
+            G4MTClipSamples(0, "repeat", first_targets),
         ))
 
         result = parse_g4mt(output, "additive passthrough test output")
-        self.assertEqual(("walk", "base"), tuple(clip.name for clip in result.clips))
+        self.assertEqual(("repeat", "repeat"), tuple(clip.name for clip in result.clips))
         self.assertEqual(source.clips[1].flags, result.clips[1].flags)
         source_info = source.target_infos[source.clips[1].target_info_start]
         result_info = result.target_infos[result.clips[1].target_info_start]

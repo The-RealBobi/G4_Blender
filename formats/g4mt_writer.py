@@ -245,8 +245,6 @@ def write_g4mt_family(template: bytes, clips: Sequence[G4MTClipSamples]) -> byte
         raise ValueError("G4MT family requires at least one target track")
     clip_names = [clip.name for clip in clips]
     clip_hashes = [crc32b(name) for name in clip_names]
-    if len(set(clip_names)) != len(clip_names) or len(set(clip_hashes)) != len(clip_hashes):
-        raise ValueError("G4MT family clip names or hashes are duplicated")
 
     single_banks = []
     for clip in clips:
@@ -403,14 +401,12 @@ def write_g4mt_family_preserving_additive(
     source = parse_g4mt(template, "G4MT family template")
     additive = {clip.index for clip in source.clips if clip.flags & 1}
     expected_generated = {clip.index for clip in source.clips} - additive
-    if {clip.template_clip_index for clip in clips} != expected_generated:
+    generated_source_indices = [clip.template_clip_index for clip in clips]
+    if len(generated_source_indices) != len(expected_generated) or set(generated_source_indices) != expected_generated:
         raise ValueError("G4MT family export must provide every non-additive source clip exactly once")
     generated_bytes = write_g4mt_family(template, clips)
     generated = parse_g4mt(generated_bytes, "generated G4MT family")
-    generated_by_name = {clip.name: clip for clip in generated.clips}
-    source_by_name = {clip.name: clip for clip in source.clips}
-    if len(generated_by_name) != len(generated.clips) or len(source_by_name) != len(source.clips):
-        raise ValueError("G4MT family contains duplicate clip names")
+    generated_by_source_index = dict(zip(generated_source_indices, generated.clips))
 
     target_hashes = list(source_target.name_hash for source_target in source.targets)
     target_index = {value: index for index, value in enumerate(target_hashes)}
@@ -445,7 +441,7 @@ def write_g4mt_family_preserving_additive(
         passthrough = source_clip.index in additive
         bank = source if passthrough else generated
         bank_bytes = template if passthrough else generated_bytes
-        bank_clip = source_clip if passthrough else generated_by_name.get(source_clip.name)
+        bank_clip = source_clip if passthrough else generated_by_source_index.get(source_clip.index)
         if bank_clip is None or bank_clip.name != source_clip.name:
             raise ValueError(f"G4MT family is missing source clip {source_clip.name!r}")
         bank_index = 0 if passthrough else 1

@@ -1278,6 +1278,10 @@ def append_motion_to_action(
     track_count = len(motion["tracks"])
     for track_index, track in enumerate(motion["tracks"], start=1):
         name = track.get("target_name")
+        if not isinstance(name, str) or not name:
+            if progress_callback is not None:
+                progress_callback(track_index, track_count)
+            continue
         # Only the event importer may explicitly transfer this track to the
         # object. Normal animation imports must retain the root bone curves.
         if event_root_name and name == event_root_name:
