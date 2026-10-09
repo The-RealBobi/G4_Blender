@@ -4899,7 +4899,7 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         if action is not None:
             self.clip_name = action.get("g4mt_clip_name", action.name)
             source = action.get("g4mt_source")
-            if source and Path(source).suffix.lower() == ".g4mt":
+            if source and Path(source).suffix.lower() in {".g4mt", ".g4pk"}:
                 self.template_path = source
                 self.filepath = str(Path(source).with_name(f"{Path(source).stem}_candidate.g4mt"))
         return ExportHelper.invoke(self, context, event)
@@ -4939,7 +4939,16 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
 
         clip_name = self.clip_name.strip() or action.get("g4mt_clip_name", action.name)
         try:
-            template = template_path.read_bytes()
+            template_source = template_path.read_bytes()
+            if template_path.suffix.lower() == ".g4pk":
+                entry_name = action.get("g4pk_entry")
+                if not entry_name:
+                    raise ValueError("The imported Action does not identify its G4MT package entry")
+                selected_entry, template = select_g4mt_entry(template_source, entry_name)
+                if selected_entry != entry_name:
+                    raise ValueError("The selected G4PK entry does not match the imported Action family")
+            else:
+                template = template_source
             bank = parse_g4mt_bank(template, str(template_path))
             rig_id = action.get("g4mt_rig_id")
             family_id = action.get("g4mt_family_import_id")
@@ -4951,7 +4960,8 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
                 family = [candidate for candidate in bpy.data.actions
                           if candidate.get("g4mt_rig_id") == rig_id
                           and candidate.get("g4mt_family_import_id") == family_id
-                          and candidate.get("g4mt_source") == source]
+                          and candidate.get("g4mt_source") == source
+                          and candidate.get("g4pk_entry") == action.get("g4pk_entry")]
             if family:
                 indices = [candidate.get("g4mt_clip_index") for candidate in family]
                 if any(not isinstance(index, int) or not 0 <= index < len(bank.clips) for index in indices):
