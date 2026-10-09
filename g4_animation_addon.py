@@ -701,14 +701,36 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
         target_name = catalog.aliases.get(normalize_joint_key(bone.name), "")
         if target_name in bone_names_by_source:
             alias_targets[target_name].append(bone.name)
+
+    def parent_aliases(source_name):
+        candidates = alias_targets[source_name]
+        if len(candidates) < 2:
+            return candidates
+
+        ancestors = []
+        for candidate in candidates:
+            if all(
+                other == candidate
+                or any(parent.name == candidate for parent in iter_bone_parents(armature.data.bones[other]))
+                for other in candidates
+            ):
+                ancestors.append(candidate)
+        return ancestors if len(ancestors) == 1 else []
+
+    def iter_bone_parents(bone):
+        parent = bone.parent
+        while parent is not None:
+            yield parent
+            parent = parent.parent
+
     for source_name in bone_names_by_source:
         exact = armature.data.bones.get(source_name)
         if explicit_names[source_name]:
             bone_names_by_source[source_name] = explicit_names[source_name]
         elif exact is not None:
             bone_names_by_source[source_name] = [exact.name]
-        elif len(alias_targets.get(source_name, ())) == 1:
-            bone_names_by_source[source_name] = alias_targets[source_name]
+        else:
+            bone_names_by_source[source_name] = parent_aliases(source_name)
     for track in motion["tracks"]:
         name = track.get("target_name")
         if name:
