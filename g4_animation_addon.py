@@ -41,6 +41,7 @@ try:
         G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
         write_g4mt_clip, write_g4mt_family,
     )
+    from .formats.g4sk_writer import G4SKNode, write_g4sk_v104
     from .effects.particle_library import particle_library_metadata, read_particle_library
     from .shading.particle_nodes import deduplicate_particle_geometry_groups
     from .g4_event import (
@@ -62,6 +63,7 @@ except ImportError:
         G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
         write_g4mt_clip, write_g4mt_family,
     )
+    from formats.g4sk_writer import G4SKNode, write_g4sk_v104
     from effects.particle_library import particle_library_metadata, read_particle_library
     from shading.particle_nodes import deduplicate_particle_geometry_groups
     from g4_event import (
@@ -5059,6 +5061,161 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         return {"FINISHED"}
 
 
+def build_g4sk_from_armature(armature, template: bytes) -> tuple[bytes, int, int, float]:
+    if armature is None or armature.type != "ARMATURE":
+        raise ValueError("Select the target armature")
+
+    bones = list(armature.data.bones)
+
+    def depth(bone):
+        value = 0
+        parent = bone.parent
+        while parent is not None:
+            value += 1
+            parent = parent.parent
+        return value
+
+    source_order = {bone.name: index for index, bone in enumerate(bones)}
+    if any(
+        bone.parent is not None and source_order[bone.parent.name] >= source_order[bone.name]
+        for bone in bones
+    ):
+        bones.sort(key=depth)
+    index_by_name = {bone.name: index for index, bone in enumerate(bones)}
+    if len(index_by_name) != len(bones):
+        raise ValueError("The armature contains duplicate joint names")
+
+    parents = [index_by_name[bone.parent.name] if bone.parent else None for bone in bones]
+    conversion = Matrix.Rotation(-math.pi / 2.0, 4, "X")
+    inverse_conversion = conversion.inverted()
+    globals_ = [
+        conversion @ armature.matrix_world @ bone.matrix_local @ inverse_conversion
+        for bone in bones
+    ]
+    locals_ = [
+        globals_[parent].inverted() @ globals_[index] if parent is not None else globals_[index]
+        for index, parent in enumerate(parents)
+    ]
+    radii = [0.0] * len(bones)
+    weighted_assignments = 0
+    mesh_count = 0
+    unmatched_groups = set()
+
+    for mesh in bpy.context.scene.objects:
+        if mesh.type != "MESH" or not any(
+            modifier.type == "ARMATURE" and modifier.object == armature
+            for modifier in mesh.modifiers
+        ):
+            continue
+        mesh_count += 1
+        group_bones = {group.index: index_by_name.get(group.name) for group in mesh.vertex_groups}
+        for vertex in mesh.data.vertices:
+            position = conversion @ (mesh.matrix_world @ vertex.co)
+            for assignment in vertex.groups:
+                if assignment.weight <= 0.0:
+                    continue
+                joint_index = group_bones.get(assignment.group)
+                if joint_index is None:
+                    unmatched_groups.add(mesh.vertex_groups[assignment.group].name)
+                    continue
+                radii[joint_index] = max(
+                    radii[joint_index],
+                    (position - globals_[joint_index].translation).length,
+                )
+                weighted_assignments += 1
+
+    if unmatched_groups:
+        names = ", ".join(sorted(unmatched_groups))
+        raise ValueError(f"Positive skin weights reference joints outside the armature: {names}")
+    if mesh_count == 0 or weighted_assignments == 0:
+        raise ValueError("The armature has no positively weighted attached meshes")
+
+    nodes = []
+    max_srt_error = 0.0
+
+    def matrix12(matrix):
+        return tuple(float(matrix[row][column]) for row in range(3) for column in range(4))
+
+    for index, (bone, parent, global_matrix, local_matrix) in enumerate(
+        zip(bones, parents, globals_, locals_)
+    ):
+        location, rotation, scale = local_matrix.decompose()
+        rotation.normalize()
+        reconstructed = Matrix.LocRotScale(location, rotation, scale)
+        max_srt_error = max(
+            max_srt_error,
+            max(abs(reconstructed[row][column] - local_matrix[row][column])
+                for row in range(4) for column in range(4)),
+        )
+        if max_srt_error > 1e-4:
+            raise ValueError(f"Joint transforms contain non-SRT shear near {bone.name}")
+        local_srt = (
+            float(scale.x), float(scale.y), float(scale.z), 0.0,
+            float(rotation.x), float(rotation.y), float(rotation.z), float(rotation.w),
+            float(location.x), float(location.y), float(location.z), 0.0,
+        )
+        nodes.append(G4SKNode(
+            name=bone.name,
+            parent_index=parent,
+            local_srt=local_srt,
+            global_matrix=matrix12(global_matrix),
+            inverse_bind_matrix=matrix12(global_matrix.inverted()),
+            flags=1,
+            bounds_radius=float(radii[index]),
+        ))
+
+    return write_g4sk_v104(template, nodes), len(bones), mesh_count, max_srt_error
+
+
+class EXPORT_OT_level5_g4sk(Operator, ExportHelper):
+    bl_idname = "export_scene.level5_g4sk"
+    bl_label = "Export Level-5 G4 Skeleton Candidate"
+    bl_options = {"PRESET"}
+
+    filename_ext = ".g4sk"
+    filter_glob: StringProperty(default="*.g4sk", options={"HIDDEN"})
+    template_path: StringProperty(name="G4SK Template", subtype="FILE_PATH")
+
+    def draw(self, context):
+        self.layout.prop(self, "template_path")
+        self.layout.label(text="Exports the selected rig and its positively weighted meshes.", icon="ARMATURE_DATA")
+
+    def execute(self, context):
+        armature = context.active_object
+        template_path = Path(bpy.path.abspath(self.template_path))
+        output_path = Path(bpy.path.abspath(self.filepath))
+        if not template_path.is_file():
+            self.report({"ERROR"}, "Select an existing G4SK v104 template")
+            return {"CANCELLED"}
+        if template_path.resolve() == output_path.resolve():
+            self.report({"ERROR"}, "Output path must not overwrite the G4SK template")
+            return {"CANCELLED"}
+        if not output_path.parent.is_dir():
+            self.report({"ERROR"}, "Output directory does not exist")
+            return {"CANCELLED"}
+
+        temporary_path = None
+        try:
+            candidate, joint_count, mesh_count, srt_error = build_g4sk_from_armature(
+                armature, template_path.read_bytes()
+            )
+            handle, temporary_path = tempfile.mkstemp(
+                prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+            )
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(candidate)
+            os.replace(temporary_path, output_path)
+        except (OSError, RuntimeError, ValueError, struct.error) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        finally:
+            if temporary_path and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
+        self.report({"INFO"}, f"Wrote {joint_count} joints from {mesh_count} skinned meshes (SRT error {srt_error:.2g})")
+        return {"FINISHED"}
+
+
 class EXPORT_OT_level5_g4_fbx(Operator, ExportHelper):
     bl_idname = "export_scene.level5_g4_fbx"
     bl_label = "Export Level-5 G4 Scene"
@@ -5128,6 +5285,7 @@ def menu_func_import(self, context):
 
 def menu_func_export(self, context):
     self.layout.operator(EXPORT_OT_level5_g4mt.bl_idname, text="Level-5 G4 Animation Candidate (.g4mt)")
+    self.layout.operator(EXPORT_OT_level5_g4sk.bl_idname, text="Level-5 G4 Skeleton Candidate (.g4sk)")
     self.layout.operator(EXPORT_OT_level5_g4_fbx.bl_idname, text="Level-5 G4 Scene (.fbx)")
 
 
@@ -5141,6 +5299,7 @@ classes = [
     IMPORT_OT_level5_g4_event_parts,
     IMPORT_OT_level5_g4_event_folder,
     EXPORT_OT_level5_g4mt,
+    EXPORT_OT_level5_g4sk,
     EXPORT_OT_level5_g4_fbx,
 ]
 
