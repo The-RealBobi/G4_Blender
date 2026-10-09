@@ -1336,6 +1336,12 @@ class G4PortSceneSettings(PropertyGroup):
         description="Original G4MD/G4PKM used as a record/material template",
     )
     rig_reference_model: StringProperty(default="", options={"HIDDEN", "SKIP_SAVE"})
+    target_g4sk_path: StringProperty(
+        name="Target G4SK",
+        subtype="FILE_PATH",
+        default="",
+        description="Use this G4SK for the exported mesh palette and include it beside the G4MD",
+    )
     target_joint_names: StringProperty(default="", options={"HIDDEN"})
     use_preset_file: BoolProperty(
         name="Use Preset File Directly",
@@ -1525,6 +1531,7 @@ class G4PortSceneSettings(PropertyGroup):
             "texture_platform": self.texture_platform,
             "material_overrides": [],
             "joint_aliases": effective_joint_aliases(self),
+            "target_g4sk_path": bpy.path.abspath(self.target_g4sk_path) if self.target_g4sk_path else "",
             "source_mesh_assignments": source_mesh_assignments,
             "generate_tangents": self.generate_tangents,
             "strict_skinning": self.strict_skinning,
@@ -1886,6 +1893,9 @@ def active_rig_reference_model(props: "G4PortSceneSettings", original_model: Pat
 
 def active_rig_skeleton_path(props: "G4PortSceneSettings", original_model: Path) -> Path | None:
     """Return the on-disk G4SK used for rest conversion and validation."""
+    selected = resolve_file(props.target_g4sk_path)
+    if selected.is_file() and selected.suffix.casefold() == ".g4sk":
+        return selected
     try:
         from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, g4sk_entries_from_candidate
     except ImportError:
@@ -2068,6 +2078,9 @@ def effective_joint_aliases(props: "G4PortSceneSettings") -> dict[str, str]:
     # Auxiliary deform bones can be siblings of the joint they follow. Resolve
     # known anatomy before parent inheritance, including blanks in saved scenes.
     for name in parents:
+        if allowed and name in allowed and name not in explicit_user_sources:
+            explicit[name] = name
+            continue
         canonical = canonical_export_joint(name)
         if (
             canonical == "c_head_1_0"
@@ -2114,7 +2127,7 @@ def detect_joint_aliases(props: G4PortSceneSettings, selected_only: bool = False
             continue
         alias = props.joint_aliases.add()
         alias.source_group = group_name
-        alias.target_joint = guess_joint_alias(group_name, allowed_joints)
+        alias.target_joint = group_name if group_name in (allowed_joints or set()) else guess_joint_alias(group_name, allowed_joints)
         existing[group_name] = alias
         added += 1
     props.active_joint_alias = min(props.active_joint_alias, max(0, len(props.joint_aliases) - 1))
@@ -2135,6 +2148,13 @@ def auto_map_joint_aliases(props: G4PortSceneSettings) -> int:
 
 
 def configured_target_joints(props: G4PortSceneSettings) -> set[str] | None:
+    path = resolve_file(props.target_g4sk_path)
+    if path.is_file() and path.suffix.casefold() == ".g4sk":
+        try:
+            from .g4_port import parse_g4sk
+        except ImportError:
+            from g4_port import parse_g4sk
+        return set(parse_g4sk(path)["names"])
     try:
         names = json.loads(props.target_joint_names or "")
     except json.JSONDecodeError:
@@ -4078,6 +4098,7 @@ def draw_rigging_subsection(layout, props: G4PortSceneSettings) -> None:
         return
 
     box = layout.box()
+    box.prop(props, "target_g4sk_path")
     row = box.row(align=True)
     row.operator(LEVEL5_G4PORT_OT_detect_vertex_groups.bl_idname, icon="GROUP_VERTEX")
     row.operator(LEVEL5_G4PORT_OT_auto_map_joints.bl_idname, icon="BONE_DATA")

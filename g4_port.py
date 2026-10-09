@@ -111,6 +111,7 @@ class PortConfig:
     joint_position_transforms: dict[str, tuple[float, ...]] | None = None
     source_joint_position_transforms: dict[str, tuple[float, ...]] | None = None
     local_g4sk_bind_translations: dict[str, tuple[float, float, float]] | None = None
+    target_g4sk_path: Path | None = None
     producer_plugin_version: str = ""
     producer_expected_script_version: str = ""
     producer_marker: str = ""
@@ -339,6 +340,7 @@ def load_config(path: Path | None) -> PortConfig:
             for name, value in dict(data.get("local_g4sk_bind_translations", {})).items()
             if isinstance(value, (list, tuple)) and len(value) == 3
         },
+        target_g4sk_path=Path(data["target_g4sk_path"]) if data.get("target_g4sk_path") else None,
         producer_plugin_version=str(data.get("g4_blender_plugin_version", "")),
         producer_expected_script_version=str(data.get("g4_port_script_version_expected", "")),
         producer_marker=str(data.get("g4_blender_addon_marker", "")),
@@ -364,12 +366,23 @@ def cstr(data: bytes, offset: int) -> str:
     return data[offset:end].decode("ascii", errors="replace")
 
 
+def valid_g4sk_name_index(names: list[str], hashes: tuple[int, ...], order: tuple[int, ...]) -> bool:
+    count = len(names)
+    return (
+        len(hashes) == count
+        and len(order) == count
+        and sorted(order) == list(range(count))
+        and all(crc32b(name) == hashes[index] for index, name in enumerate(names))
+        and all(hashes[order[index]] <= hashes[order[index + 1]] for index in range(count - 1))
+    )
+
+
 def parse_g4sk(path: Path) -> dict:
     data = path.read_bytes()
     if data[:4] != b"G4SK" or len(data) < 0x40:
         raise ValueError(f"{path} is not a valid G4SK")
     joint_count = struct.unpack_from("<H", data, 0x20)[0]
-    section_offsets = [0x40 + struct.unpack_from("<H", data, 0x24 + index * 2)[0] * 4 for index in range(8)]
+    section_offsets = [0x40 + struct.unpack_from("<H", data, 0x24 + index * 2)[0] * 4 for index in range(11)]
     name_table = section_offsets[7]
     if name_table + joint_count * 2 > len(data):
         raise ValueError(f"{path} has an invalid G4SK name table")
@@ -377,6 +390,13 @@ def parse_g4sk(path: Path) -> dict:
     for index in range(joint_count):
         relative = struct.unpack_from("<H", data, name_table + index * 2)[0]
         names.append(cstr(data, name_table + relative))
+    hash_table = section_offsets[2]
+    hash_order_table = section_offsets[4]
+    if hash_table + joint_count * 4 > len(data) or hash_order_table + joint_count * 2 > len(data):
+        raise ValueError(f"{path} has an invalid G4SK joint hash index")
+    joint_hashes = struct.unpack_from(f"<{joint_count}I", data, hash_table)
+    hash_order = struct.unpack_from(f"<{joint_count}H", data, hash_order_table)
+    name_index_valid = valid_g4sk_name_index(names, joint_hashes, hash_order)
     bind_matrices = []
     inverse_bind_matrices = []
     inverse_bind_table = section_offsets[0]
@@ -397,7 +417,12 @@ def parse_g4sk(path: Path) -> dict:
     return {
         "path": str(path),
         "joint_count": joint_count,
+        "table_count": struct.unpack_from("<H", data, 0x22)[0],
+        "section_offsets": section_offsets,
         "names": names,
+        "joint_hashes": joint_hashes,
+        "hash_order": hash_order,
+        "name_index_valid": name_index_valid,
         "matrix_count": len(bind_matrices),
         "max_bind_inverse_error": max_inverse_error,
     }
@@ -444,7 +469,8 @@ def resolve_expected_skeleton(model_rel: Path, raw_root: Path, chara_model: Path
 
 
 def validate_skeleton_palettes(
-    palettes: list[list[int]], skeleton_path: Path | None, expected: dict
+    palettes: list[list[int]], skeleton_path: Path | None, expected: dict,
+    target_joint_names: list[str] | None = None,
 ) -> dict:
     if skeleton_path is None and expected.get("resolved"):
         skeleton_path = Path(expected["expected_path"])
@@ -459,14 +485,27 @@ def validate_skeleton_palettes(
         }
     skeleton = parse_g4sk(skeleton_path)
     name_set = set(skeleton["names"])
-    required_names = [COMPACT_JOINT_NAMES[index] for index in used if index < len(COMPACT_JOINT_NAMES)]
+    indexed_names = target_joint_names or COMPACT_JOINT_NAMES
+    required_names = [indexed_names[index] for index in used if index < len(indexed_names)]
+    invalid_indices = [index for index in used if index >= len(indexed_names)]
     missing_names = [name for name in required_names if name not in name_set]
+    if not skeleton["name_index_valid"]:
+        status = "invalid_name_index"
+    elif missing_names or invalid_indices:
+        status = "missing_joints"
+    elif skeleton["max_bind_inverse_error"] > 1e-3:
+        status = "invalid_bind_matrices"
+    else:
+        status = "ok"
     return {
-        "status": "ok" if not missing_names and skeleton["max_bind_inverse_error"] <= 1e-3 else "missing_joints" if missing_names else "invalid_bind_matrices",
+        "status": status,
         "path": str(skeleton_path),
         "joint_count": skeleton["joint_count"],
+        "table_count": skeleton["table_count"],
         "required_names": required_names,
+        "invalid_indices": invalid_indices,
         "missing_names": missing_names,
+        "name_index_valid": skeleton["name_index_valid"],
         "matrix_count": skeleton["matrix_count"],
         "max_bind_inverse_error": skeleton["max_bind_inverse_error"],
         "name_to_g4sk_index": {name: skeleton["names"].index(name) for name in required_names if name in name_set},
@@ -2049,6 +2088,33 @@ def rewrite_joint_palettes(md: bytes, palettes: list[list[int]]) -> bytes:
     return bytes(out)
 
 
+def rewrite_g4md_joint_hashes(md: bytes, joint_names: list[str]) -> bytes:
+    if len(set(joint_names)) != len(joint_names):
+        raise ValueError("target G4SK contains duplicate joint names")
+    name_base = struct.unpack_from("<H", md, 0x0A)[0] * 4
+    start = name_base + struct.unpack_from("<H", md, 0x74)[0] * 4
+    end = name_base + struct.unpack_from("<H", md, 0x76)[0] * 4
+    if not start <= end <= len(md):
+        raise ValueError("G4MD joint hash table offsets are invalid")
+    hashes = [crc32b(name) for name in joint_names]
+    if len(set(hashes)) != len(hashes):
+        raise ValueError("target G4SK joint names produce duplicate G4MD hashes")
+    replacement = struct.pack(f"<{len(hashes)}I", *hashes)
+    delta = len(replacement) - (end - start)
+    if delta % 4:
+        raise ValueError("G4MD joint hash table size is not four-byte aligned")
+    out = bytearray(md[:start] + replacement + md[end:])
+    for field in range(0x76, 0x8C, 2):
+        value = struct.unpack_from("<H", md, field)[0]
+        if value:
+            updated = value + delta // 4
+            if updated > 0xFFFF:
+                raise ValueError(f"G4MD offset overflow at 0x{field:02X}")
+            struct.pack_into("<H", out, field, updated)
+    struct.pack_into("<I", out, 0x0C, len(out) - struct.unpack_from("<H", out, 0x04)[0])
+    return bytes(out)
+
+
 def validate_generated_model(md: bytes, mg: bytes) -> dict:
     if md[:4] != b"G4MD":
         raise ValueError("generated model has no G4MD magic")
@@ -3288,8 +3354,12 @@ def prepare_port_geometry(
             mesh, rule.uv_fit_display_rect, bool(effective_flip[1])
         )
     native_g4md = (raw_root / config.common_rel).read_bytes()
-    native_palettes = native_record_palettes(native_g4md)
-    native_joint_indices = native_joint_name_indices(native_g4md)
+    target_skeleton = parse_g4sk(config.target_g4sk_path) if config.target_g4sk_path else None
+    native_palettes = [[] for _ in config.records] if target_skeleton else native_record_palettes(native_g4md)
+    native_joint_indices = (
+        {name: index for index, name in enumerate(target_skeleton["names"])}
+        if target_skeleton else native_joint_name_indices(native_g4md)
+    )
     palettes = configured_record_palettes(native_palettes, config.records, meshes, config.joint_aliases or {}, native_joint_indices)
     resolved_records = []
     for mesh, palette in zip(meshes, palettes):
@@ -3330,11 +3400,14 @@ def analyze_port(
     skeleton_path: Path | None = None,
     chara_model: Path = DEFAULT_CHARA_MODEL,
 ) -> dict:
+    if config.target_g4sk_path:
+        skeleton_path = config.target_g4sk_path
     source_meshes, meshes, native_palettes, palettes, records = prepare_port_geometry(
         source_mesh_path, raw_root, config, weight_sidecar
     )
     expected_skeleton = resolve_expected_skeleton(config.model_rel, raw_root, chara_model)
-    skeleton = validate_skeleton_palettes(palettes, skeleton_path, expected_skeleton)
+    target_names = parse_g4sk(config.target_g4sk_path)["names"] if config.target_g4sk_path else None
+    skeleton = validate_skeleton_palettes(palettes, skeleton_path, expected_skeleton, target_names)
     recommendations = []
     unresolved = sum(record["unresolved_influences"] for record in records)
     if unresolved:
@@ -3345,6 +3418,8 @@ def analyze_port(
         recommendations.append("Remove or remap palette joints missing from the assigned G4SK.")
     elif skeleton["status"] == "invalid_bind_matrices":
         recommendations.append("Use a different G4SK: its bind and inverse-bind matrices are not mutually consistent.")
+    elif skeleton["status"] == "invalid_name_index":
+        recommendations.append("Use a different G4SK: its joint hashes or sorted lookup index are inconsistent.")
     if any(len(mesh.vertices) > 60000 for mesh in meshes):
         recommendations.append("A record is close to the 65535 vertex limit; reserve another native slot or simplify the mesh.")
     if source_mesh_path and not any(vertex.influences for mesh in source_meshes for vertex in mesh.vertices):
@@ -3389,7 +3464,7 @@ def write_local_g4sk(
     data = bytearray(template_path.read_bytes())
     skeleton = parse_g4sk(template_path)
     names = skeleton["names"]
-    section_offsets = [0x40 + struct.unpack_from("<H", data, 0x24 + index * 2)[0] * 4 for index in range(8)]
+    section_offsets = [0x40 + struct.unpack_from("<H", data, 0x24 + index * 2)[0] * 4 for index in range(11)]
     joint_count = skeleton["joint_count"]
     bind_matrices = [
         list(struct.unpack_from("<12f", data, 0x40 + index * 0x30)) + [0.0, 0.0, 0.0, 1.0]
@@ -3483,6 +3558,8 @@ def write_port(
     skeleton_path: Path | None = None,
     chara_model: Path = DEFAULT_CHARA_MODEL,
 ) -> dict:
+    if config.target_g4sk_path:
+        skeleton_path = config.target_g4sk_path
     source_meshes, meshes, native_palettes, palettes, _ = prepare_port_geometry(
         source_mesh_path, raw_root, config, weight_sidecar
     )
@@ -3508,7 +3585,11 @@ def write_port(
         meshes, config.vertex_color_mode, config.vertex_color
     )
     apply_record_outline_rules(meshes, config.records)
-    native_joint_indices = native_joint_name_indices(native_md) if native_md else {}
+    target_skeleton = parse_g4sk(config.target_g4sk_path) if config.target_g4sk_path else None
+    native_joint_indices = (
+        {name: index for index, name in enumerate(target_skeleton["names"])}
+        if target_skeleton else native_joint_name_indices(native_md) if native_md else {}
+    )
     native_uv_formats = native_record_uv_formats(native_md) if native_md else []
     g4mg, records = build_g4mg(
         meshes,
@@ -3528,8 +3609,11 @@ def write_port(
             f"{unresolved_influences} skin influences could not be represented by their native record palettes"
         )
     expected_skeleton = resolve_expected_skeleton(config.model_rel, raw_root, chara_model)
-    skeleton_validation = validate_skeleton_palettes(palettes, skeleton_path, expected_skeleton)
-    if config.strict_skinning and skeleton_validation["status"] in {"missing_joints", "invalid_bind_matrices"}:
+    skeleton_validation = validate_skeleton_palettes(
+        palettes, skeleton_path, expected_skeleton,
+        target_skeleton["names"] if target_skeleton else None,
+    )
+    if config.strict_skinning and skeleton_validation["status"] in {"missing_joints", "invalid_bind_matrices", "invalid_name_index"}:
         raise ValueError(f"assigned G4SK validation failed: {skeleton_validation}")
 
     common_out = out_root / config.common_rel
@@ -3541,6 +3625,8 @@ def write_port(
     texture_out.parent.mkdir(parents=True, exist_ok=True)
     g4md = build_base_g4md(meshes, records, raw_root, config)
     g4md = rewrite_joint_palettes(g4md, palettes)
+    if target_skeleton:
+        g4md = rewrite_g4md_joint_hashes(g4md, target_skeleton["names"])
     validation = validate_generated_model(g4md, g4mg)
     custom_texture_dir = source_mesh_path.parent / "customTextures" if source_mesh_path else Path()
     if texture_mode == "custom":
@@ -3560,8 +3646,12 @@ def write_port(
         raise ValueError(f"unsupported texture mode {texture_mode!r}")
     common_out.write_bytes(g4md)
     mg_out.write_bytes(g4mg)
-    local_bind = config.local_g4sk_bind_translations or {}
     local_g4sk_out = None
+    if config.target_g4sk_path:
+        local_g4sk_out = common_out.with_suffix(".g4sk")
+        if config.target_g4sk_path.resolve() != local_g4sk_out.resolve():
+            shutil.copyfile(config.target_g4sk_path, local_g4sk_out)
+    local_bind = config.local_g4sk_bind_translations or {}
     objbin_out = None
     clobin_out = None
     if skeleton_path is not None and local_bind:
