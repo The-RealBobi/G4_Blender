@@ -4879,6 +4879,12 @@ def sample_action_for_g4mt(armature, action, scene, view_layer):
     bones.sort(key=depth)
     parent_indices = {bone.name: index for index, bone in enumerate(bones)}
     samples = {bone.name: [] for bone in bones}
+    uses_game_axes = bool(
+        armature.get("g4_character_model_source")
+        or armature.get("g4_character_skeleton_source")
+    )
+    blender_to_g4 = Matrix.Rotation(-math.pi / 2.0, 4, "X")
+    g4_to_blender = blender_to_g4.inverted()
     first_frame = round(action.frame_start)
     last_frame = round(action.frame_end)
     if last_frame < first_frame:
@@ -4901,6 +4907,8 @@ def sample_action_for_g4mt(armature, action, scene, view_layer):
                     pose_bone.parent.matrix.inverted_safe() @ pose_bone.matrix
                     if pose_bone.parent else pose_bone.matrix.copy()
                 )
+                if not uses_game_axes:
+                    local = blender_to_g4 @ local @ g4_to_blender
                 location, rotation, scale = local.decompose()
                 samples[bone.name].append(G4MTLocalTransform(
                     translation=tuple(location),
@@ -5047,7 +5055,7 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
-        self.report({"WARNING"}, "Wrote Blender-space G4MT candidate; target G4SK axis conversion is not applied")
+        self.report({"INFO"}, "Wrote G4MT candidate")
         return {"FINISHED"}
 
 
