@@ -737,6 +737,19 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
             ):
                 ancestors.append(candidate)
         weights = mesh_weight_sums()
+        if len(ancestors) == 1 and source_name == "c_c_1_0":
+            return ancestors
+        if len(ancestors) == 1 and source_name == "c_c_1_1":
+            deepest = [
+                candidate for candidate in candidates
+                if all(
+                    other == candidate
+                    or any(parent.name == other for parent in iter_bone_parents(armature.data.bones[candidate]))
+                    for other in candidates
+                )
+            ]
+            if len(deepest) == 1:
+                return deepest
         ranked = sorted(candidates, key=lambda name: weights[name], reverse=True)
         # Only a clearly dominant skinning influence may break an alias tie.
         if weights[ranked[0]] > 0.0 and weights[ranked[0]] >= 2.0 * weights[ranked[1]]:
