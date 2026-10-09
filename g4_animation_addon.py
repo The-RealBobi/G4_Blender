@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 import zlib
 from collections import defaultdict
 from pathlib import Path
@@ -36,7 +37,10 @@ try:
     from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
     from .formats.g4mt import parse_g4mt as parse_g4mt_bank
-    from .formats.g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
+    from .formats.g4mt_writer import (
+        G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
+        write_g4mt_clip, write_g4mt_family,
+    )
     from .effects.particle_library import particle_library_metadata, read_particle_library
     from .shading.particle_nodes import deduplicate_particle_geometry_groups
     from .g4_event import (
@@ -54,7 +58,10 @@ except ImportError:
     from g4ma_motion import decode_material_motion, material_animation_paths
     from g4cm_camera import decode_camera, parse_g4cm
     from formats.g4mt import parse_g4mt as parse_g4mt_bank
-    from formats.g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
+    from formats.g4mt_writer import (
+        G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
+        write_g4mt_clip, write_g4mt_family,
+    )
     from effects.particle_library import particle_library_metadata, read_particle_library
     from shading.particle_nodes import deduplicate_particle_geometry_groups
     from g4_event import (
@@ -2077,6 +2084,12 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             if armature is None or armature_score(armature, names) <= 0:
                 raise RuntimeError("No armature matches the G4MT targets")
 
+            rig_id = armature.get("g4_animation_rig_id")
+            if not rig_id:
+                rig_id = uuid.uuid4().hex
+                armature["g4_animation_rig_id"] = rig_id
+            family_import_id = uuid.uuid4().hex
+
             starts = [motion["clip"]["start_frame"]]
             ends = [motion["clip"]["end_frame"]]
             if camera_motion is not None:
@@ -2143,6 +2156,8 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                         extra_action["g4mt_source"] = str(path)
                         extra_action["g4mt_clip_index"] = clip["index"]
                         extra_action["g4mt_clip_name"] = clip["name"]
+                        extra_action["g4mt_rig_id"] = rig_id
+                        extra_action["g4mt_family_import_id"] = family_import_id
                         if package_entry_name is not None:
                             extra_action["g4pk_entry"] = package_entry_name
                         if not semantic_retarget:
@@ -2183,6 +2198,8 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             action["g4mt_source"] = str(path)
             action["g4mt_clip_index"] = motion["clip"]["index"]
             action["g4mt_clip_name"] = motion["clip"]["name"]
+            action["g4mt_rig_id"] = rig_id
+            action["g4mt_family_import_id"] = family_import_id
             action["g4_source_frame_origin"] = frame_origin
             if model_path is not None:
                 action["g4_model_source"] = str(model_path)
@@ -4796,10 +4813,10 @@ class IMPORT_OT_level5_g4cm(Operator, ImportHelper):
 
 
 
-def sample_active_action_for_g4mt(armature, action, scene, view_layer):
+def sample_action_for_g4mt(armature, action, scene, view_layer):
     animation_data = armature.animation_data
-    if animation_data is None or animation_data.action != action:
-        raise ValueError("The armature's active Action must be the Action being exported")
+    if animation_data is None:
+        raise ValueError("The armature has no animation data")
     if action.get("g4_event_root_motion"):
         raise ValueError("Event root motion is stored on the armature object and cannot be exported as bone tracks")
 
@@ -4822,7 +4839,13 @@ def sample_active_action_for_g4mt(armature, action, scene, view_layer):
         raise ValueError("The active Action has an empty frame range")
 
     previous_frame = scene.frame_current
+    previous_action = animation_data.action
+    previous_slot = getattr(animation_data, "action_slot", None)
     try:
+        animation_data.action = action
+        slots = getattr(action, "slots", None)
+        if slots is not None and len(slots):
+            animation_data.action_slot = slots[0]
         for frame in range(first_frame, last_frame + 1):
             scene.frame_set(frame)
             view_layer.update()
@@ -4839,6 +4862,9 @@ def sample_active_action_for_g4mt(armature, action, scene, view_layer):
                     scale=tuple(scale),
                 ))
     finally:
+        animation_data.action = previous_action
+        if previous_slot is not None:
+            animation_data.action_slot = previous_slot
         scene.frame_set(previous_frame)
         view_layer.update()
 
@@ -4882,6 +4908,10 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         self.layout.prop(self, "template_path")
         self.layout.prop(self, "template_clip_index")
         self.layout.prop(self, "clip_name")
+        active_object = context.active_object
+        action = active_object.animation_data.action if active_object and active_object.animation_data else None
+        if action and action.get("g4mt_family_import_id"):
+            self.layout.label(text="Exports all clips from this imported rig family.", icon="ACTION")
         self.layout.label(text="Exports evaluated Blender-space tracks; game axis conversion is not applied.", icon="INFO")
 
     def execute(self, context):
@@ -4911,12 +4941,42 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         try:
             template = template_path.read_bytes()
             bank = parse_g4mt_bank(template, str(template_path))
-            if self.template_clip_index >= len(bank.clips):
-                raise ValueError("Template clip index is outside the G4MT bank")
-            targets = sample_active_action_for_g4mt(
-                armature, action, context.scene, context.view_layer
-            )
-            result = write_g4mt_clip(template, self.template_clip_index, clip_name, targets)
+            rig_id = action.get("g4mt_rig_id")
+            family_id = action.get("g4mt_family_import_id")
+            source = action.get("g4mt_source")
+            family = []
+            if rig_id and family_id and source:
+                if Path(source).resolve() != template_path.resolve():
+                    raise ValueError("Select the original G4MT bank used to import this Action family")
+                family = [candidate for candidate in bpy.data.actions
+                          if candidate.get("g4mt_rig_id") == rig_id
+                          and candidate.get("g4mt_family_import_id") == family_id
+                          and candidate.get("g4mt_source") == source]
+            if family:
+                indices = [candidate.get("g4mt_clip_index") for candidate in family]
+                if any(not isinstance(index, int) or not 0 <= index < len(bank.clips) for index in indices):
+                    raise ValueError("Imported family contains a clip index outside the selected G4MT template")
+                if len(set(indices)) != len(indices):
+                    raise ValueError("Imported family contains duplicate G4MT clip indices")
+                family.sort(key=lambda candidate: candidate["g4mt_clip_index"])
+                clips = []
+                for candidate in family:
+                    targets = sample_action_for_g4mt(
+                        armature, candidate, context.scene, context.view_layer
+                    )
+                    clips.append(G4MTClipSamples(
+                        candidate["g4mt_clip_index"],
+                        candidate.get("g4mt_clip_name", candidate.name),
+                        targets,
+                    ))
+                result = write_g4mt_family(template, clips)
+            else:
+                if self.template_clip_index >= len(bank.clips):
+                    raise ValueError("Template clip index is outside the G4MT bank")
+                targets = sample_action_for_g4mt(
+                    armature, action, context.scene, context.view_layer
+                )
+                result = write_g4mt_clip(template, self.template_clip_index, clip_name, targets)
             handle, temporary_path = tempfile.mkstemp(
                 prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
             )
