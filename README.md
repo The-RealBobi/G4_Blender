@@ -91,7 +91,7 @@ Auxiliary shadow and culling objects are hidden automatically. Models absent fro
 
 ## Porting edited models
 
-The port exporter writes edited Blender geometry directly into a native `G4MD`/`G4MG` pair. DAE files remain supported as Blender-importable source models in Blender builds with the Collada importer (verified with Blender 4.5.10). Start from a compatible original model from a complete legal game dump; that base defines the record structure, materials, palettes and texture archive the exporter can safely patch.
+The add-on imports game models from a native mesh payload and no longer exports and reimports an intermediate DAE. DAE remains an optional probe/export format, and Blender can still open DAE files directly in builds that include the Collada importer. The port exporter writes edited Blender geometry directly into a native `G4MD`/`G4MG` pair. Start from a compatible original model from a complete legal game dump; that base defines the record structure, materials, palettes and texture archive the exporter can safely patch.
 
 The exporter:
 

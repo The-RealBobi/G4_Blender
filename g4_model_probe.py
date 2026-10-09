@@ -5067,7 +5067,13 @@ def remap_separated_shoe_palette(
     return None, 0
 
 
-def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path:
+def export_dae(
+    path: Path,
+    out_dir: Path,
+    extract_textures: bool = True,
+    *,
+    emit_dae: bool,
+) -> Path:
     configure_raw_data_root_from_path(path)
     md_data, g4mg, _ = read_model_buffers(path)
     md_info = parse_g4md(md_data, g4mg)
@@ -5469,6 +5475,46 @@ def export_dae(path: Path, out_dir: Path, extract_textures: bool = True) -> Path
     }
     native_path.write_text(json.dumps(native_payload, separators=(",", ":")), encoding="utf-8")
 
+    if not emit_dae:
+        report_path = native_path.with_suffix(".report.json")
+        texture_hashes = texture_hashes_by_name(texture_paths)
+        report = {
+            "source": str(path),
+            "native_mesh": str(native_path),
+            "texture_source": str(texture_containers[0]) if texture_containers else None,
+            "texture_sources": [str(texture) for texture in texture_containers],
+            "textures": [str(texture) for texture in texture_paths],
+            "texture_variants": summarize_texture_variants(texture_paths),
+            "g4md_texture_hashes": [
+                {**row, "resolved_texture": str(texture_hashes[row["hash"]]) if row["hash"] in texture_hashes else None}
+                for row in md_info.get("texture_hashes", [])
+            ],
+            "material_records": enriched_material_records(md_info, texture_paths),
+            "mesh_count": len(mesh_payloads),
+            "materials": {name: str(texture) if texture else None for name, texture in used_materials.items()},
+            "meshes": [
+                {"name": payload["name"], "record_index": payload["record_index"], "material": payload["material"]}
+                for payload in mesh_payloads
+            ],
+            "skeleton_source": skeleton_source,
+            "assigned_skeleton": assigned_skeleton,
+            "bone_orientation": skeleton_bone_orientation(skeleton_info),
+            "skeleton": None if skeleton_info is None else {
+                "joint_count": skeleton_info["joint_count"],
+                "table_count": skeleton_info["table_count"],
+                "section_offsets": [f"0x{offset:x}" for offset in skeleton_info["section_offsets"]],
+                "joint_node_matrices": "local matrices derived from global bind block at 0x40 and parent table",
+                "inverse_bind_matrices": "G4SK section 0",
+                "local_srt": "G4SK section 1: scale.xyz, pad, rotation quaternion xyzw, translation.xyz, pad",
+                "first_local_rotations_xyzw": skeleton_info.get("local_rotations_xyzw", [])[:32],
+                "name_count": len(skeleton_info["names"]),
+                "first_names": skeleton_info["names"][:32],
+            },
+            "rigging": "native mesh payload preserves local blend indices and joint palettes",
+        }
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return report_path
+
     images = []
     effects = []
     materials = []
@@ -5683,18 +5729,18 @@ def validate_dae(path: Path) -> dict:
     return {"xml": "ok", "nonfinite_arrays": nonfinite_arrays}
 
 
-def export_model_auto(value: Path, out_dir: Path) -> dict:
+def export_model_auto(value: Path, out_dir: Path, native_mesh_only: bool) -> dict:
     path = resolve_model_input(value)
-    dae_path = export_dae(path, out_dir, extract_textures=True)
-    report_path = dae_path.with_suffix(".dae.report.json")
+    output_path = export_dae(path, out_dir, extract_textures=True, emit_dae=not native_mesh_only)
+    report_path = output_path if native_mesh_only else output_path.with_suffix(".dae.report.json")
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    validation = validate_dae(dae_path)
+    validation = {"native_mesh": "ok"} if native_mesh_only else validate_dae(output_path)
     materials = report.get("materials", {})
     hashes = report.get("g4md_texture_hashes", [])
     return {
         "input": str(value),
         "resolved_model": str(path),
-        "dae": str(dae_path),
+        "dae": None if native_mesh_only else str(output_path),
         "native_mesh": report.get("native_mesh"),
         "report": str(report_path),
         "mesh_count": report.get("mesh_count", 0),
@@ -5718,12 +5764,14 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of compact text.")
     parser.add_argument("--obj-dir", type=Path, help="Write probe OBJ files for geometry validation.")
     parser.add_argument("--dae-dir", type=Path, help="Write preliminary Collada DAE files.")
+    parser.add_argument("--output-dir", type=Path, help="Write model export payloads to this directory.")
+    parser.add_argument("--native-mesh-only", action="store_true", help="Write the native Blender mesh payload without an intermediate DAE.")
     parser.add_argument("--extract-g4tx", type=Path, help="Extract all textures from one G4TX into this directory.")
     parser.add_argument("--build-skeleton-cache", type=Path, help="Build local parsed G4SK cache JSON from chara_model XML.")
     parser.add_argument(
         "--export-model",
         action="store_true",
-        help="Resolve model names/partial paths and export DAE with automatic texture extraction.",
+        help="Resolve model names/partial paths and export mesh data with automatic texture extraction.",
     )
     args = parser.parse_args(argv)
 
@@ -5740,8 +5788,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error("paths are required unless --build-skeleton-cache is used")
 
     if args.export_model:
-        out_dir = args.dae_dir or Path("exports/dae")
-        summaries = [export_model_auto(path, out_dir) for path in args.paths]
+        default_out_dir = Path("exports/g4mesh") if args.native_mesh_only else Path("exports/dae")
+        out_dir = args.output_dir or args.dae_dir or default_out_dir
+        summaries = [export_model_auto(path, out_dir, args.native_mesh_only) for path in args.paths]
         if args.json:
             print(json.dumps(summaries, indent=2))
         else:
@@ -5781,7 +5830,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             print(f"Wrote {out_path}")
     if args.dae_dir is not None:
         for path in args.paths:
-            out_path = export_dae(path, args.dae_dir)
+            out_path = export_dae(path, args.dae_dir, emit_dae=True)
             print(f"Wrote {out_path}")
 
     if args.json:

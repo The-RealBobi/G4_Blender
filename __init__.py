@@ -583,7 +583,8 @@ def run_exporter(model_path: str, prefs: G4ImporterPreferences, target_armature=
         str(probe_script),
         "--export-model",
         "--json",
-        "--dae-dir",
+        "--native-mesh-only",
+        "--output-dir",
         str(export_dir),
         model_path,
     ]
@@ -641,13 +642,6 @@ def run_exporter(model_path: str, prefs: G4ImporterPreferences, target_armature=
             if key in report:
                 summary[key] = report[key]
     return summary
-
-
-def import_collada(dae_path: Path) -> set[str]:
-    before = set(bpy.data.objects)
-    bpy.ops.wm.collada_import(filepath=str(dae_path))
-    after = set(bpy.data.objects)
-    return {obj.name for obj in after - before}
 
 
 def matrix_from_flat(values: list[float]) -> Matrix:
@@ -1092,10 +1086,10 @@ def defer_import_call(callback, label: str = "Deferred Blender operation") -> No
 
 
 def write_debug_log(summary: dict, lines: list[str]) -> None:
-    dae = Path(summary.get("dae", ""))
-    if not dae:
+    source = summary.get("native_mesh") or summary.get("dae")
+    if not source:
         return
-    log_path = dae.with_suffix(".g4_import_debug.log")
+    log_path = Path(source).with_suffix(".g4_import_debug.log")
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     summary["debug_log"] = str(log_path)
 
@@ -3206,12 +3200,7 @@ def import_g4_model(
         )
         import_method = "native"
     else:
-        dae_path = Path(summary.get("dae", "")).resolve()
-        collada_import = getattr(bpy.ops.wm, "collada_import", None)
-        if not dae_path.exists() or collada_import is None:
-            raise RuntimeError("Native G4 mesh payload was not generated and Collada fallback is unavailable")
-        imported_names = import_collada(dae_path)
-        import_method = "collada_fallback"
+        raise RuntimeError(f"Native G4 mesh payload was not generated: {summary.get('native_mesh')}")
     preserve_outline_vertex_parameters(imported_names, debug)
     removed_lods = discard_secondary_lods(imported_names)
     debug.append(f"[geometry] method={import_method} imported_objects={sorted(imported_names)}")
