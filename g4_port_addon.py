@@ -1932,15 +1932,15 @@ def write_animation_profile(
     target_skeleton_path: Path, raw_root: Path,
 ) -> Path:
     try:
-        from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
+        from .g4_model_probe import configure_raw_data_root_from_path, parse_g4sk, resolve_g4sk_from_chara_model
     except ImportError:
-        from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
+        from g4_model_probe import configure_raw_data_root_from_path, parse_g4sk, resolve_g4sk_from_chara_model
 
     reference = active_rig_reference_model(props, original_model)
     configure_raw_data_root_from_path(reference)
-    source_data, source_description = find_skeleton_for_model(reference)
+    source_data, source_description = resolve_g4sk_from_chara_model(reference)
     if source_data is None or not source_description:
-        raise RuntimeError(f"Could not resolve the source animation G4SK for {reference}")
+        raise RuntimeError(f"Could not resolve the assigned body G4SK for {reference}")
     source_description = source_description.split(" via ", 1)[0]
     if "::" in source_description:
         raise RuntimeError("The source animation G4SK is embedded in a package; a standalone raw-DUMP G4SK is required for the profile")
@@ -3904,6 +3904,9 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         profile_path = write_animation_profile(
             props, original_model, Path(report["g4md"]), Path(report["g4sk"]), raw_root
         )
+        armature = export_armature()
+        if armature is not None:
+            armature["g4_exported_model_path"] = str(Path(report["g4md"]).resolve())
         report["animation_profile"] = str(profile_path)
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 

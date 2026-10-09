@@ -39,7 +39,7 @@ try:
     from .formats.g4mt import parse_g4mt as parse_g4mt_bank
     from .formats.g4mt_writer import (
         G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
-        write_g4mt_clip, write_g4mt_family,
+        write_g4mt_clip, write_g4mt_family, write_g4mt_family_preserving_additive,
     )
     from .formats.g4sk_writer import G4SKNode, write_g4sk_v104
     from .effects.particle_library import particle_library_metadata, read_particle_library
@@ -61,7 +61,7 @@ except ImportError:
     from formats.g4mt import parse_g4mt as parse_g4mt_bank
     from formats.g4mt_writer import (
         G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
-        write_g4mt_clip, write_g4mt_family,
+        write_g4mt_clip, write_g4mt_family, write_g4mt_family_preserving_additive,
     )
     from formats.g4sk_writer import G4SKNode, write_g4sk_v104
     from effects.particle_library import particle_library_metadata, read_particle_library
@@ -4963,7 +4963,8 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
             source = action.get("g4mt_source")
             if source and Path(source).suffix.lower() in {".g4mt", ".g4pk"}:
                 self.template_path = source
-                self.filepath = str(Path(source).with_name(f"{Path(source).stem}_candidate.g4mt"))
+                self.filepath = str(generated_g4mt_output_path(armature, Path(source)) or
+                                    Path(source).with_name(f"{Path(source).stem}_candidate.g4mt"))
         return ExportHelper.invoke(self, context, event)
 
     def draw(self, context):
@@ -5041,7 +5042,7 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
                         candidate.get("g4mt_clip_name", candidate.name),
                         targets,
                     ))
-                result = write_g4mt_family(template, clips)
+                result = write_g4mt_family_preserving_additive(template, clips)
             else:
                 if self.template_clip_index >= len(bank.clips):
                     raise ValueError("Template clip index is outside the G4MT bank")
@@ -5065,6 +5066,17 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
 
         self.report({"INFO"}, "Wrote G4MT candidate")
         return {"FINISHED"}
+
+
+def generated_g4mt_output_path(armature, source_path: Path) -> Path | None:
+    model_value = str(armature.get("g4_exported_model_path", "")) if armature else ""
+    model_path = Path(model_value) if model_value else None
+    bank = re.fullmatch(r"(.+)_p([0-9]{3})", source_path.stem, re.IGNORECASE)
+    if (model_path is None or model_path.suffix.lower() != ".g4md" or not model_path.is_file()
+            or not model_path.with_suffix(".g4anim.json").is_file() or bank is None
+            or not source_path.parent.name):
+        return None
+    return model_path.with_name(f"{model_path.stem}_from_{source_path.parent.name}_p{bank.group(2)}.g4mt")
 
 
 def build_g4sk_from_armature(armature, template: bytes) -> tuple[bytes, int, int, float]:

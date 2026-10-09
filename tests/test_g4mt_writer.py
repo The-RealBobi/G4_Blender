@@ -6,8 +6,10 @@ from formats.g4mt_writer import (
     G4MTClipSamples,
     G4MTLocalTransform,
     G4MTTargetSamples,
+    simplify_samples,
     write_g4mt_clip,
     write_g4mt_family,
+    write_g4mt_family_preserving_additive,
 )
 
 
@@ -32,6 +34,16 @@ def make_template():
 
 
 class G4MTWriterTests(unittest.TestCase):
+    def test_simplifies_linear_channels_with_bounded_error(self):
+        frames = list(range(101))
+        samples = [(frame * 0.25,) for frame in frames]
+
+        reduced_frames, reduced_samples = simplify_samples(frames, samples, 1e-5)
+
+        self.assertEqual([0, 100], reduced_frames)
+        self.assertEqual([samples[0], samples[-1]], reduced_samples)
+        self.assertIn(50, simplify_samples(frames, [(frame * frame,) for frame in frames], 0.0)[0])
+
     def test_writes_and_reads_back_absolute_local_srt_channels(self):
         targets = (
             G4MTTargetSamples("root", None, (
@@ -98,6 +110,42 @@ class G4MTWriterTests(unittest.TestCase):
         second_x = bank.channels[11]
         value_offset = bank.header.data_offset + second_x.data_offset
         self.assertEqual((0.0, 8.0), struct.unpack_from("<2f", output, value_offset))
+
+    def test_preserves_additive_clips_while_replacing_other_clips(self):
+        first_targets = (
+            G4MTTargetSamples("root", None, (
+                G4MTLocalTransform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+                G4MTLocalTransform((1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+            )),
+        )
+        second_targets = (
+            G4MTTargetSamples("root", None, (
+                G4MTLocalTransform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+                G4MTLocalTransform((8.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+            )),
+        )
+        template = bytearray(write_g4mt_family(make_template(), (
+            G4MTClipSamples(0, "walk", first_targets),
+            G4MTClipSamples(0, "base", second_targets),
+        )))
+        template[0x40 + 0x10 + 8] |= 1
+        source = parse_g4mt(template, "additive passthrough test source")
+
+        output = write_g4mt_family_preserving_additive(bytes(template), (
+            G4MTClipSamples(0, "walk", first_targets),
+        ))
+
+        result = parse_g4mt(output, "additive passthrough test output")
+        self.assertEqual(("walk", "base"), tuple(clip.name for clip in result.clips))
+        self.assertEqual(source.clips[1].flags, result.clips[1].flags)
+        source_info = source.target_infos[source.clips[1].target_info_start]
+        result_info = result.target_infos[result.clips[1].target_info_start]
+        self.assertEqual(source.targets[source_info.target_index].name_hash,
+                         result.targets[result_info.target_index].name_hash)
+        source_channel = source.channels[source_info.channel_start + 5]
+        result_channel = result.channels[result_info.channel_start + 5]
+        self.assertEqual(source_channel.keys, result_channel.keys)
+        self.assertEqual(source_channel.key_count, result_channel.key_count)
 
 
 if __name__ == "__main__":

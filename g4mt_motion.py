@@ -15,8 +15,10 @@ from pathlib import Path
 
 try:
     from .g4mt_probe import companion_g4sk, crc32b, g4sk_name_table_offset, parse_g4mt, read_g4sk_data, u16
+    from .formats.g4mt_writer import PRECISION_FACE_MARKERS, simplify_samples as _simplify_samples
 except ImportError:
     from g4mt_probe import companion_g4sk, crc32b, g4sk_name_table_offset, parse_g4mt, read_g4sk_data, u16
+    from formats.g4mt_writer import PRECISION_FACE_MARKERS, simplify_samples as _simplify_samples
 
 
 CHANNEL_PATHS = {
@@ -28,9 +30,6 @@ CHANNEL_PATHS = {
     11: ("translation", 1),
     12: ("translation", 2),
 }
-
-PRECISION_FACE_MARKERS = ("eye", "eld", "ebw", "lgt")
-
 
 def matrix_mul(a: list[float], b: list[float]) -> list[float]:
     return [
@@ -213,33 +212,7 @@ def sample_channel(data: bytes, data_base: int, channel: dict, scale: float, fra
 
 
 def simplify_samples(frames, samples, tolerance: float = 1e-5):
-    if len(samples) <= 2:
-        return list(frames), list(samples)
-    keep = {0, len(samples) - 1}
-    stack = [(0, len(samples) - 1)]
-    tolerance_squared = tolerance * tolerance
-    while stack:
-        first, last = stack.pop()
-        frame_span = frames[last] - frames[first]
-        if last - first <= 1 or frame_span == 0:
-            continue
-        worst_index = None
-        worst_error = tolerance_squared
-        for index in range(first + 1, last):
-            amount = (frames[index] - frames[first]) / frame_span
-            error = sum(
-                (value - (start + (end - start) * amount)) ** 2
-                for value, start, end in zip(samples[index], samples[first], samples[last])
-            )
-            if error > worst_error:
-                worst_error = error
-                worst_index = index
-        if worst_index is not None:
-            keep.add(worst_index)
-            stack.append((first, worst_index))
-            stack.append((worst_index, last))
-    indices = sorted(keep)
-    return [frames[index] for index in indices], [samples[index] for index in indices]
+    return _simplify_samples(frames, samples, tolerance)
 
 
 def simplify_motion_samples(frames, samples, target_name: str | None):
