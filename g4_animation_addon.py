@@ -701,6 +701,25 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
         target_name = catalog.aliases.get(normalize_joint_key(bone.name), "")
         if target_name in bone_names_by_source:
             alias_targets[target_name].append(bone.name)
+    alias_weight_sums = None
+
+    def mesh_weight_sums():
+        nonlocal alias_weight_sums
+        if alias_weight_sums is None:
+            alias_weight_sums = defaultdict(float)
+            meshes = (
+                obj for obj in bpy.data.objects
+                if obj.type == "MESH"
+                and any(mod.type == "ARMATURE" and mod.object == armature for mod in obj.modifiers)
+            )
+            for mesh in meshes:
+                group_names = {group.index: group.name for group in mesh.vertex_groups}
+                for vertex in mesh.data.vertices:
+                    for assignment in vertex.groups:
+                        name = group_names.get(assignment.group)
+                        if name:
+                            alias_weight_sums[name] += assignment.weight
+        return alias_weight_sums
 
     def parent_aliases(source_name):
         candidates = alias_targets[source_name]
@@ -715,6 +734,11 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
                 for other in candidates
             ):
                 ancestors.append(candidate)
+        weights = mesh_weight_sums()
+        ranked = sorted(candidates, key=lambda name: weights[name], reverse=True)
+        # Only a clearly dominant skinning influence may break an alias tie.
+        if weights[ranked[0]] > 0.0 and weights[ranked[0]] >= 2.0 * weights[ranked[1]]:
+            return [ranked[0]]
         return ancestors if len(ancestors) == 1 else []
 
     def iter_bone_parents(bone):

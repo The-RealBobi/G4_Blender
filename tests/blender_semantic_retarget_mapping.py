@@ -69,4 +69,40 @@ assert keyed == 4, keyed
 mapping = json.loads(action["g4_retarget_mapping"])
 assert mapping["c_head_1_0"] == ["FaceControl"]
 assert json.loads(action["g4_retarget_unmapped_targets"]) == ["unmapped_joint"]
+
+bpy.ops.object.armature_add(enter_editmode=True)
+tie_rig = bpy.context.object
+tie_rig.name = "Weighted Alias Tie"
+root = tie_rig.data.edit_bones[0]
+root.name = "COG"
+root.head = (0.0, 0.0, 0.0)
+root.tail = (0.0, 0.0, 0.2)
+for name, y in (("hip", 0.1), ("waist", -0.1)):
+    bone = tie_rig.data.edit_bones.new(name)
+    bone.head = (0.0, y, 0.2)
+    bone.tail = (0.0, y, 0.4)
+bpy.ops.object.mode_set(mode="OBJECT")
+tie_motion = {"tracks": [{"target_name": "c_c_1_0"}]}
+animation.resolve_track_names_from_armature(tie_motion, tie_rig)
+assert tie_motion["tracks"][0]["armature_bone_names"] == []
+bpy.context.view_layer.objects.active = tie_rig
+tie_rig.select_set(True)
+bpy.ops.object.mode_set(mode="EDIT")
+tie_rig.data.edit_bones["hip"].parent = tie_rig.data.edit_bones["waist"]
+bpy.ops.object.mode_set(mode="OBJECT")
+animation.resolve_track_names_from_armature(tie_motion, tie_rig)
+assert tie_motion["tracks"][0]["armature_bone_names"] == ["waist"]
+
+mesh_data = bpy.data.meshes.new("Alias Influence")
+mesh_data.from_pydata([(0.0, 0.0, 0.0)] * 4, [], [])
+mesh = bpy.data.objects.new("Alias Influence", mesh_data)
+bpy.context.collection.objects.link(mesh)
+modifier = mesh.modifiers.new("Armature", "ARMATURE")
+modifier.object = tie_rig
+hip_group = mesh.vertex_groups.new(name="hip")
+waist_group = mesh.vertex_groups.new(name="waist")
+hip_group.add([0, 1, 2, 3], 0.75, "REPLACE")
+waist_group.add([0, 1, 2, 3], 0.25, "REPLACE")
+animation.resolve_track_names_from_armature(tie_motion, tie_rig)
+assert tie_motion["tracks"][0]["armature_bone_names"] == ["hip"]
 print("SEMANTIC_RETARGET_MAPPING_OK")
