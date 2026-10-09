@@ -4884,6 +4884,7 @@ def sample_action_for_g4mt(armature, action, scene, view_layer):
     uses_game_axes = bool(
         armature.get("g4_character_model_source")
         or armature.get("g4_character_skeleton_source")
+        or armature.get("g4_cumulative_scale_conversion")
     )
     blender_to_g4 = Matrix.Rotation(-math.pi / 2.0, 4, "X")
     g4_to_blender = blender_to_g4.inverted()
@@ -4910,6 +4911,11 @@ def sample_action_for_g4mt(armature, action, scene, view_layer):
                     if pose_bone.parent else pose_bone.matrix.copy()
                 )
                 if not uses_game_axes:
+                    object_scale = armature.matrix_world.to_scale()
+                    local.translation = Vector(tuple(
+                        local.translation[index] * object_scale[index]
+                        for index in range(3)
+                    ))
                     local = blender_to_g4 @ local @ g4_to_blender
                 location, rotation, scale = local.decompose()
                 samples[bone.name].append(G4MTLocalTransform(
@@ -5088,10 +5094,12 @@ def build_g4sk_from_armature(armature, template: bytes) -> tuple[bytes, int, int
     parents = [index_by_name[bone.parent.name] if bone.parent else None for bone in bones]
     conversion = Matrix.Rotation(-math.pi / 2.0, 4, "X")
     inverse_conversion = conversion.inverted()
-    globals_ = [
-        conversion @ armature.matrix_world @ bone.matrix_local @ inverse_conversion
-        for bone in bones
-    ]
+    world_rotation = armature.matrix_world.to_quaternion().to_matrix().to_4x4()
+    globals_ = []
+    for bone in bones:
+        global_matrix = conversion @ world_rotation @ bone.matrix_local @ inverse_conversion
+        global_matrix.translation = conversion @ (armature.matrix_world @ bone.matrix_local.translation)
+        globals_.append(global_matrix)
     locals_ = [
         globals_[parent].inverted() @ globals_[index] if parent is not None else globals_[index]
         for index, parent in enumerate(parents)

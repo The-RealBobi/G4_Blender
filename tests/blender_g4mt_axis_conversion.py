@@ -28,6 +28,7 @@ child.head = (0.0, 0.0, 1.0)
 child.tail = (0.0, 0.0, 2.0)
 child.parent = root
 bpy.ops.object.mode_set(mode='OBJECT')
+armature.scale = (0.01, 0.01, 0.01)
 
 action = bpy.data.actions.new('Axis conversion check')
 armature.animation_data_create()
@@ -59,10 +60,14 @@ def sampled_matrix(sample):
     )
 
 
-def verify(convert_to_g4):
+def verify(convert_to_g4, aligned=False):
     if convert_to_g4:
         if 'g4_character_model_source' in armature:
             del armature['g4_character_model_source']
+        if aligned:
+            armature['g4_cumulative_scale_conversion'] = True
+        else:
+            armature.pop('g4_cumulative_scale_conversion', None)
     else:
         armature['g4_character_model_source'] = 'native test rig'
     targets = sample_action_for_g4mt(armature, action, bpy.context.scene, bpy.context.view_layer)
@@ -73,12 +78,21 @@ def verify(convert_to_g4):
         for target in targets:
             pose_bone = armature.pose.bones[target.name]
             local = pose_bone.parent.matrix.inverted_safe() @ pose_bone.matrix if pose_bone.parent else pose_bone.matrix.copy()
-            expected = blender_to_g4 @ local @ g4_to_blender if convert_to_g4 else local
+            if convert_to_g4 and not aligned:
+                object_scale = armature.matrix_world.to_scale()
+                local.translation = Vector(tuple(
+                    local.translation[index] * object_scale[index]
+                    for index in range(3)
+                ))
+                expected = blender_to_g4 @ local @ g4_to_blender
+            else:
+                expected = local
             actual = sampled_matrix(target.samples[frame_index])
             error = max(abs(expected[row][column] - actual[row][column]) for row in range(4) for column in range(4))
             assert error < 1e-5, (target.name, frame, convert_to_g4, error)
 
 
 verify(True)
+verify(True, aligned=True)
 verify(False)
-print('G4MT_AXIS_CONVERSION_OK external=BlenderToG4 native=unchanged')
+print('G4MT_AXIS_CONVERSION_OK external=BlenderToG4 scaled=objectScale motionRest=G4 native=unchanged')
