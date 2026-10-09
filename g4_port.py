@@ -2104,6 +2104,7 @@ def rewrite_g4md_joint_hashes(md: bytes, joint_names: list[str]) -> bytes:
     if delta % 4:
         raise ValueError("G4MD joint hash table size is not four-byte aligned")
     out = bytearray(md[:start] + replacement + md[end:])
+    struct.pack_into("<H", out, 0x24, len(hashes))
     for field in range(0x76, 0x8C, 2):
         value = struct.unpack_from("<H", md, field)[0]
         if value:
@@ -2120,6 +2121,19 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
         raise ValueError("generated model has no G4MD magic")
     header_size = struct.unpack_from("<H", md, 0x04)[0]
     mesh_count = struct.unpack_from("<H", md, 0x20)[0]
+    name_base = struct.unpack_from("<H", md, 0x0A)[0] * 4
+    joint_count = struct.unpack_from("<H", md, 0x24)[0]
+    joint_hash_start = name_base + struct.unpack_from("<H", md, 0x74)[0] * 4
+    joint_hash_end = name_base + struct.unpack_from("<H", md, 0x76)[0] * 4
+    if (
+        not joint_hash_start <= joint_hash_end <= len(md)
+        or joint_hash_end - joint_hash_start != joint_count * 4
+    ):
+        raise ValueError("G4MD joint-hash count does not match its table")
+    palette_table = name_base + struct.unpack_from("<H", md, 0x82)[0] * 4
+    mesh_name_table = name_base + struct.unpack_from("<H", md, 0x84)[0] * 4
+    if not palette_table <= mesh_name_table <= len(md):
+        raise ValueError("G4MD joint-palette table is outside the file")
     vertex_buffer_size = struct.unpack_from("<I", md, 0x50)[0]
     index_buffer_size = struct.unpack_from("<I", md, 0x54)[0]
     index_base = struct.unpack_from("<I", md, 0x5C)[0]
@@ -2134,6 +2148,16 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
         flags = struct.unpack_from("<H", md, off + 0x3C)[0]
         stride = struct.unpack_from("<H", md, off + 0x3E)[0] & 0xFF
         palette_length = flags & 0xFF if flags & 0x100 else 0
+        palette_start = struct.unpack_from("<H", md, off + 0x3A)[0]
+        if palette_start + palette_length > (mesh_name_table - palette_table) // 2:
+            raise ValueError(f"record {mesh_index} joint palette exceeds its table")
+        palette = struct.unpack_from(
+            "<" + "H" * palette_length,
+            md,
+            palette_table + palette_start * 2,
+        ) if palette_length else ()
+        if any(joint >= joint_count for joint in palette):
+            raise ValueError(f"record {mesh_index} references outside the G4MD joint-hash table")
         if stride < 0x3C or vertex_offset + vertex_count * stride > vertex_buffer_size:
             raise ValueError(f"record {mesh_index} vertex range exceeds generated vertex buffer")
         if index_offset + index_count * 2 > index_buffer_size:
