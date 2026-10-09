@@ -53,6 +53,7 @@ from .g4ma import (
     summarize_g4ma_material_channels,
 )
 from .g4cm import G4CMAnalysis, analyze_g4cm_bank, parse_g4cm, parse_g4cm_file
+from .g4sk_writer import G4SKNode, write_g4sk_v104
 
 __all__ = [
     "Diagnostic",
@@ -105,4 +106,6 @@ __all__ = [
     "analyze_g4cm_bank",
     "parse_g4cm",
     "parse_g4cm_file",
+    "G4SKNode",
+    "write_g4sk_v104",
 ]
