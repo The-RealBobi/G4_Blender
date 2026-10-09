@@ -1516,7 +1516,9 @@ def create_motion_armature(motion: dict):
     return armature
 
 
-def requires_semantic_retarget(motion: dict, armature) -> bool:
+def requires_semantic_retarget(motion: dict, armature, source_rig_differs: bool) -> bool:
+    if source_rig_differs:
+        return True
     if armature.get("g4_character_model_source") or armature.get("g4_character_skeleton_source"):
         return False
     return any(
@@ -1673,6 +1675,7 @@ def g4mt_import_settings(operator) -> str:
             "import_camera": operator.import_camera,
             "set_active_camera": operator.set_active_camera,
             "reuse_selected_armature": operator.reuse_selected_armature,
+            "source_skeleton_path": operator.source_skeleton_path,
             "set_scene_fps": operator.set_scene_fps,
         }
     )
@@ -1933,6 +1936,11 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         subtype="FILE_PATH",
         description="G4MD/G4PKM model whose rig will receive the animation",
     )
+    source_skeleton_path: StringProperty(
+        name="Animation Source G4SK",
+        subtype="FILE_PATH",
+        description="Source rig for this animation bank; leave empty when it uses the selected model rig",
+    )
     import_character_parts: BoolProperty(
         name="Import Body and Shoes",
         default=False,
@@ -1984,6 +1992,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
         layout.prop(self, "import_model")
         if self.import_model:
             layout.label(text="Model and character cosmetics will be requested after the animation", icon="FILE_FOLDER")
+        layout.prop(self, "source_skeleton_path")
         layout.prop(self, "import_camera")
         if self.import_camera:
             layout.prop(self, "set_active_camera")
@@ -2071,6 +2080,16 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 )
             if skeleton_hint is None:
                 skeleton_hint = resolve_skeleton_path(skeleton_model_hint)
+            source_skeleton_path = bpy.path.abspath(self.source_skeleton_path or "")
+            source_skeleton = valid_skeleton_path(Path(source_skeleton_path)) if source_skeleton_path else None
+            if source_skeleton_path and source_skeleton is None:
+                raise RuntimeError(f"Animation source is not a readable G4SK: {source_skeleton_path}")
+            source_rig_differs = (
+                source_skeleton is not None
+                and (skeleton_hint is None or source_skeleton.read_bytes() != skeleton_hint.read_bytes())
+            )
+            if source_skeleton is not None:
+                skeleton_hint = source_skeleton
             clip_selector = self.clip.strip()
             if not clip_selector:
                 available_clips = parse_g4mt(g4mt_path, skeleton_hint)["clips"]
@@ -2126,6 +2145,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                     self.nameplate_model,
                     self.attach_ball,
                     self.ball_model,
+                    align_to_motion_rest=not source_rig_differs,
                 )
                 refresh_progress(30, "Creating G4 animation keyframes…")
             if armature is None:
@@ -2151,7 +2171,7 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
 
             track_count = len(motion["tracks"])
             part_count = len(character_part_armatures(armature))
-            semantic_retarget = requires_semantic_retarget(motion, armature)
+            semantic_retarget = requires_semantic_retarget(motion, armature, source_rig_differs)
             progress_total = max(1, track_count * (1 + part_count))
 
             def update_progress(completed, total, offset=0):
