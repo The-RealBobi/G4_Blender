@@ -19,6 +19,7 @@ from bpy.props import (
     CollectionProperty,
     FloatProperty,
     FloatVectorProperty,
+    IntProperty,
     StringProperty,
 )
 from bpy.types import Operator, PropertyGroup
@@ -34,6 +35,8 @@ try:
     from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
     from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
+    from .formats.g4mt import parse_g4mt as parse_g4mt_bank
+    from .formats.g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
     from .effects.particle_library import particle_library_metadata, read_particle_library
     from .shading.particle_nodes import deduplicate_particle_geometry_groups
     from .g4_event import (
@@ -50,6 +53,8 @@ except ImportError:
     from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
     from g4ma_motion import decode_material_motion, material_animation_paths
     from g4cm_camera import decode_camera, parse_g4cm
+    from formats.g4mt import parse_g4mt as parse_g4mt_bank
+    from formats.g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
     from effects.particle_library import particle_library_metadata, read_particle_library
     from shading.particle_nodes import deduplicate_particle_geometry_groups
     from g4_event import (
@@ -4791,6 +4796,145 @@ class IMPORT_OT_level5_g4cm(Operator, ImportHelper):
 
 
 
+def sample_active_action_for_g4mt(armature, action, scene, view_layer):
+    animation_data = armature.animation_data
+    if animation_data is None or animation_data.action != action:
+        raise ValueError("The armature's active Action must be the Action being exported")
+    if action.get("g4_event_root_motion"):
+        raise ValueError("Event root motion is stored on the armature object and cannot be exported as bone tracks")
+
+    bones = list(armature.data.bones)
+
+    def depth(bone):
+        value = 0
+        parent = bone.parent
+        while parent is not None:
+            value += 1
+            parent = parent.parent
+        return value
+
+    bones.sort(key=depth)
+    parent_indices = {bone.name: index for index, bone in enumerate(bones)}
+    samples = {bone.name: [] for bone in bones}
+    first_frame = round(action.frame_start)
+    last_frame = round(action.frame_end)
+    if last_frame < first_frame:
+        raise ValueError("The active Action has an empty frame range")
+
+    previous_frame = scene.frame_current
+    try:
+        for frame in range(first_frame, last_frame + 1):
+            scene.frame_set(frame)
+            view_layer.update()
+            for bone in bones:
+                pose_bone = armature.pose.bones[bone.name]
+                local = (
+                    pose_bone.parent.matrix.inverted_safe() @ pose_bone.matrix
+                    if pose_bone.parent else pose_bone.matrix.copy()
+                )
+                location, rotation, scale = local.decompose()
+                samples[bone.name].append(G4MTLocalTransform(
+                    translation=tuple(location),
+                    rotation_xyzw=(rotation.x, rotation.y, rotation.z, rotation.w),
+                    scale=tuple(scale),
+                ))
+    finally:
+        scene.frame_set(previous_frame)
+        view_layer.update()
+
+    return tuple(
+        G4MTTargetSamples(
+            bone.name,
+            parent_indices[bone.parent.name] if bone.parent else None,
+            tuple(samples[bone.name]),
+        )
+        for bone in bones
+    )
+
+
+class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
+    bl_idname = "export_scene.level5_g4mt"
+    bl_label = "Export G4MT Animation Candidate"
+    bl_options = {"PRESET"}
+
+    filename_ext = ".g4mt"
+    filter_glob: StringProperty(default="*.g4mt", options={"HIDDEN"})
+    template_path: StringProperty(name="G4MT Template", subtype="FILE_PATH")
+    template_clip_index: IntProperty(name="Template Clip Index", default=0, min=0)
+    clip_name: StringProperty(name="Clip Name")
+
+    def invoke(self, context, event):
+        armature = context.active_object
+        action = (
+            armature.animation_data.action
+            if armature and armature.type == "ARMATURE" and armature.animation_data
+            else None
+        )
+        if action is not None:
+            self.clip_name = action.get("g4mt_clip_name", action.name)
+            source = action.get("g4mt_source")
+            if source and Path(source).suffix.lower() == ".g4mt":
+                self.template_path = source
+                self.filepath = str(Path(source).with_name(f"{Path(source).stem}_candidate.g4mt"))
+        return ExportHelper.invoke(self, context, event)
+
+    def draw(self, context):
+        self.layout.prop(self, "template_path")
+        self.layout.prop(self, "template_clip_index")
+        self.layout.prop(self, "clip_name")
+        self.layout.label(text="Exports evaluated Blender-space tracks; game axis conversion is not applied.", icon="INFO")
+
+    def execute(self, context):
+        armature = context.active_object
+        if armature is None or armature.type != "ARMATURE":
+            self.report({"ERROR"}, "Select the target armature with its Action active")
+            return {"CANCELLED"}
+        animation_data = armature.animation_data
+        action = animation_data.action if animation_data else None
+        if action is None:
+            self.report({"ERROR"}, "The selected armature has no active Action")
+            return {"CANCELLED"}
+
+        template_path = Path(bpy.path.abspath(self.template_path))
+        output_path = Path(bpy.path.abspath(self.filepath))
+        if not template_path.is_file():
+            self.report({"ERROR"}, "Select an existing G4MT template file")
+            return {"CANCELLED"}
+        if template_path.resolve() == output_path.resolve():
+            self.report({"ERROR"}, "Output path must not overwrite the source G4MT template")
+            return {"CANCELLED"}
+        if not output_path.parent.is_dir():
+            self.report({"ERROR"}, "Output directory does not exist")
+            return {"CANCELLED"}
+
+        clip_name = self.clip_name.strip() or action.get("g4mt_clip_name", action.name)
+        try:
+            template = template_path.read_bytes()
+            bank = parse_g4mt_bank(template, str(template_path))
+            if self.template_clip_index >= len(bank.clips):
+                raise ValueError("Template clip index is outside the G4MT bank")
+            targets = sample_active_action_for_g4mt(
+                armature, action, context.scene, context.view_layer
+            )
+            result = write_g4mt_clip(template, self.template_clip_index, clip_name, targets)
+            handle, temporary_path = tempfile.mkstemp(
+                prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
+            )
+            try:
+                with os.fdopen(handle, "wb") as stream:
+                    stream.write(result)
+                os.replace(temporary_path, output_path)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.unlink(temporary_path)
+        except (OSError, RuntimeError, ValueError, struct.error) as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+        self.report({"WARNING"}, "Wrote Blender-space G4MT candidate; target G4SK axis conversion is not applied")
+        return {"FINISHED"}
+
+
 class EXPORT_OT_level5_g4_fbx(Operator, ExportHelper):
     bl_idname = "export_scene.level5_g4_fbx"
     bl_label = "Export Level-5 G4 Scene"
@@ -4859,6 +5003,7 @@ def menu_func_import(self, context):
 
 
 def menu_func_export(self, context):
+    self.layout.operator(EXPORT_OT_level5_g4mt.bl_idname, text="Level-5 G4 Animation Candidate (.g4mt)")
     self.layout.operator(EXPORT_OT_level5_g4_fbx.bl_idname, text="Level-5 G4 Scene (.fbx)")
 
 
@@ -4871,6 +5016,7 @@ classes = [
     G4EventCharacterPart,
     IMPORT_OT_level5_g4_event_parts,
     IMPORT_OT_level5_g4_event_folder,
+    EXPORT_OT_level5_g4mt,
     EXPORT_OT_level5_g4_fbx,
 ]
 
