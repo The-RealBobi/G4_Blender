@@ -2,7 +2,13 @@ import struct
 import unittest
 
 from formats.g4mt import crc32b, parse_g4mt
-from formats.g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
+from formats.g4mt_writer import (
+    G4MTClipSamples,
+    G4MTLocalTransform,
+    G4MTTargetSamples,
+    write_g4mt_clip,
+    write_g4mt_family,
+)
 
 
 def make_template():
@@ -64,6 +70,34 @@ class G4MTWriterTests(unittest.TestCase):
                 12: (0.0, 6.0 if child else 3.0),
             }[channel.channel_type]
             self.assertEqual(expected, values)
+
+    def test_writes_multiple_clips_for_one_target_rig(self):
+        first_targets = (
+            G4MTTargetSamples("root", None, (
+                G4MTLocalTransform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+                G4MTLocalTransform((1.0, 2.0, 3.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+            )),
+        )
+        second_targets = (
+            G4MTTargetSamples("root", None, (
+                G4MTLocalTransform((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+                G4MTLocalTransform((8.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)),
+            )),
+        )
+
+        output = write_g4mt_family(make_template(), (
+            G4MTClipSamples(0, "walk", first_targets),
+            G4MTClipSamples(0, "run", second_targets),
+        ))
+
+        bank = parse_g4mt(output, "family writer test")
+        self.assertEqual(("walk", "run"), tuple(clip.name for clip in bank.clips))
+        self.assertEqual((0, 1), tuple(clip.target_info_start for clip in bank.clips))
+        self.assertEqual((1, 1), tuple(clip.target_info_count for clip in bank.clips))
+        self.assertEqual(14, len(bank.channels))
+        second_x = bank.channels[11]
+        value_offset = bank.header.data_offset + second_x.data_offset
+        self.assertEqual((0.0, 8.0), struct.unpack_from("<2f", output, value_offset))
 
 
 if __name__ == "__main__":

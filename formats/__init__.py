@@ -36,7 +36,13 @@ from .g4mt import (
     parse_g4mt,
     parse_g4mt_file,
 )
-from .g4mt_writer import G4MTLocalTransform, G4MTTargetSamples, write_g4mt_clip
+from .g4mt_writer import (
+    G4MTClipSamples,
+    G4MTLocalTransform,
+    G4MTTargetSamples,
+    write_g4mt_clip,
+    write_g4mt_family,
+)
 from .g4ma import (
     G4MAMaterialChannelSummary,
     G4MAMaterialTarget,
@@ -85,7 +91,9 @@ __all__ = [
     "parse_g4mt_file",
     "G4MTLocalTransform",
     "G4MTTargetSamples",
+    "G4MTClipSamples",
     "write_g4mt_clip",
+    "write_g4mt_family",
     "G4MAMaterialChannelSummary",
     "G4MAMaterialTarget",
     "build_g4ma_effect_bindings",
