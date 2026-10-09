@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from array import array
 from pathlib import Path
 
@@ -1926,6 +1927,158 @@ def active_rig_skeleton_path(props: "G4PortSceneSettings", original_model: Path)
     return None
 
 
+def write_animation_profile(
+    props: "G4PortSceneSettings", original_model: Path, target_model: Path,
+    target_skeleton_path: Path, raw_root: Path,
+) -> Path:
+    try:
+        from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
+    except ImportError:
+        from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
+
+    reference = active_rig_reference_model(props, original_model)
+    configure_raw_data_root_from_path(reference)
+    source_data, source_description = find_skeleton_for_model(reference)
+    if source_data is None or not source_description:
+        raise RuntimeError(f"Could not resolve the source animation G4SK for {reference}")
+    source_description = source_description.split(" via ", 1)[0]
+    if "::" in source_description:
+        raise RuntimeError("The source animation G4SK is embedded in a package; a standalone raw-DUMP G4SK is required for the profile")
+    source_path = Path(source_description).resolve()
+    source_resource_path = source_path.relative_to(raw_root.resolve()).as_posix()
+    source = parse_g4sk(source_data)
+    target_data = target_skeleton_path.read_bytes()
+    target = parse_g4sk(target_data)
+
+    def parent_indices(data: bytes, joint_count: int) -> list[int | None]:
+        table = 0x40 + struct.unpack_from("<H", data, 0x2A)[0] * 4
+        if table + 2 + max(0, joint_count - 1) * 2 > len(data):
+            raise ValueError("G4SK parent table exceeds the skeleton bounds")
+        if struct.unpack_from("<H", data, table)[0] != joint_count:
+            raise ValueError("G4SK parent table count does not match its joint count")
+        parents: list[int | None] = [None]
+        for index in range(1, joint_count):
+            parent = struct.unpack_from("<H", data, table + 2 + (index - 1) * 2)[0]
+            if parent >= joint_count or parent == index:
+                raise ValueError(f"G4SK joint {index} has an invalid parent index {parent}")
+            parents.append(parent)
+        for index in range(joint_count):
+            visited = set()
+            current = index
+            while current is not None:
+                if current in visited:
+                    raise ValueError("G4SK parent table contains a hierarchy cycle")
+                visited.add(current)
+                current = parents[current]
+        return parents
+
+    source_names = source["names"]
+    target_names = target["names"]
+    if (not source_names or len(source_names) != len(set(source_names))
+            or not target_names or len(target_names) != len(set(target_names))):
+        raise ValueError("Animation profile G4SK files must contain unique joint names")
+    for skeleton in (source, target):
+        count = len(skeleton["names"])
+        if any(len(skeleton[key]) != count for key in ("local_translations", "local_rotations_xyzw", "local_scales")):
+            raise ValueError("Animation profile G4SK has an incomplete local rest transform table")
+    source_indices = {name: index for index, name in enumerate(source_names)}
+    source_parents = parent_indices(source_data, len(source_names))
+    target_parents = parent_indices(target_data, len(target_names))
+    source_bones = {}
+    armature = export_armature()
+    if armature is not None:
+        source_bones = {bone.name: bone for bone in armature.data.bones}
+    source_for_target: dict[str, str] = {}
+    targets_for_source: dict[str, list[str]] = {}
+    source_joint_names = set(source_indices)
+    source_alias_catalog = load_joint_alias_catalog()
+    for target_name in target_names:
+        bone = source_bones.get(target_name)
+        source_name = str(bone.get("g4_animation_source_joint", "")).strip() if bone else ""
+        if not source_name and target_name in source_indices:
+            source_name = target_name
+        if not source_name:
+            source_name = resolve_catalog_alias(target_name, source_alias_catalog, source_joint_names)
+        if source_name:
+            if source_name not in source_indices:
+                raise ValueError(f"Mapped source joint {source_name!r} is absent from {source_path.name}")
+            source_for_target[target_name] = source_name
+            targets_for_source.setdefault(source_name, []).append(target_name)
+
+    def transform(skeleton: dict, index: int) -> dict:
+        return {
+            "translation": skeleton["local_translations"][index],
+            "rotation": skeleton["local_rotations_xyzw"][index],
+            "scale": skeleton["local_scales"][index],
+        }
+
+    joints = []
+    for index, name in enumerate(target_names):
+        source_name = source_for_target.get(name)
+        source_index = source_indices.get(source_name) if source_name else None
+        source_parent = None
+        if source_index is not None:
+            parent = source_parents[source_index]
+            while parent is not None:
+                candidates = targets_for_source.get(source_names[parent], [])
+                if candidates:
+                    target_ancestors: set[str] = set()
+                    target_parent = target_parents[index]
+                    while target_parent is not None:
+                        target_ancestors.add(target_names[target_parent])
+                        target_parent = target_parents[target_parent]
+                    source_parent = next((candidate for candidate in candidates if candidate in target_ancestors), candidates[0])
+                    break
+                parent = source_parents[parent]
+        if source_parent == name:
+            source_parent = None
+        target_parent_index = target_parents[index]
+        target_rest = transform(target, index)
+        joints.append({
+            "name": name,
+            "nameCrc32": zlib.crc32(name.encode("utf-8")) & 0xFFFFFFFF,
+            "parent": target_names[target_parent_index] if target_parent_index is not None else None,
+            "sourceRest": transform(source, source_index) if source_index is not None else target_rest,
+            "targetRest": target_rest,
+            "modelRest": None,
+            "sourceParent": source_parent,
+            "sourceName": source_name,
+            "sourceNameCrc32": zlib.crc32(source_name.encode("utf-8")) & 0xFFFFFFFF if source_name else None,
+        })
+
+    data_root = target_model.parents[0]
+    while data_root.name != "data" and data_root.parent != data_root:
+        data_root = data_root.parent
+    target_relative = target_skeleton_path.relative_to(data_root).as_posix()
+    profile = {
+        "schemaVersion": 5,
+        "producer": "G4_Blender",
+        "modelStem": target_model.stem,
+        "sourceModelStem": reference.stem,
+        "modelPath": Path(props.model_rel).with_suffix(".g4md").as_posix(),
+        "sourceRig": {
+            "path": source_resource_path,
+            "sha256": hashlib.sha256(source_data).hexdigest(),
+        },
+        "targetRig": {
+            "path": target_relative,
+            "sha256": hashlib.sha256(target_data).hexdigest(),
+        },
+        "joints": joints,
+    }
+    output_path = target_model.with_suffix(".g4anim.json")
+    handle, temporary_path = tempfile.mkstemp(prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(profile, stream, indent=2)
+            stream.write("\n")
+        os.replace(temporary_path, output_path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+    return output_path
+
+
 def native_rest_corrections(props: "G4PortSceneSettings", original_model: Path) -> dict[str, list[float]]:
     """Map each source bone's rest space into the active target G4SK."""
     armature = export_armature()
@@ -3530,7 +3683,7 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     package_root = Path(bpy.path.abspath(filepath)) if filepath else resolve_file(getattr(prefs, "output_root", ""))
     if enforce_g4_uv_orientation(props):
         port_log(None, "Enabled Global Flip V for custom atlas export (G4 stores V inverted)")
-    if has_unchanged_native_roundtrip(props, original_model):
+    if has_unchanged_native_roundtrip(props, original_model) and not props.target_g4sk_path:
         report = copy_unchanged_native_roundtrip(props, original_model, raw_root, package_root, source_g4tx)
         report["g4_blender_plugin_version"] = g4_blender_plugin_version()
         report["g4_port_script_version_expected"] = G4_PORT_SCRIPT_VERSION_EXPECTED
@@ -3746,6 +3899,13 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Could not read export report: {report_path}") from exc
+
+    if not props.analyze_only and props.target_g4sk_path:
+        profile_path = write_animation_profile(
+            props, original_model, Path(report["g4md"]), Path(report["g4sk"]), raw_root
+        )
+        report["animation_profile"] = str(profile_path)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     if not getattr(prefs, "keep_temporary_files", False):
         for path in (mesh_data_path, weights_path, generated_config_path(cache)):
