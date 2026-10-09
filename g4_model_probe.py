@@ -1451,7 +1451,7 @@ def normalize_skeleton_info(info: dict | None) -> dict | None:
 def load_target_skeleton_override() -> dict | None:
     global TARGET_SKELETON_DATA
     if TARGET_SKELETON_DATA is not None:
-        return TARGET_SKELETON_DATA
+        return TARGET_SKELETON_DATA or None
     if TARGET_SKELETON_OVERRIDE is None or not TARGET_SKELETON_OVERRIDE.exists():
         TARGET_SKELETON_DATA = {}
         return None
