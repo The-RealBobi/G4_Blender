@@ -15,9 +15,12 @@ from pathlib import Path
 
 try:
     from .g4mt_probe import companion_g4sk, crc32b, g4sk_name_table_offset, parse_g4mt, read_g4sk_data, u16
-    from .formats.g4mt_writer import PRECISION_FACE_MARKERS, simplify_samples as _simplify_samples
+    from ..formats.g4mt_writer import PRECISION_FACE_MARKERS, simplify_samples as _simplify_samples
 except ImportError:
-    from g4mt_probe import companion_g4sk, crc32b, g4sk_name_table_offset, parse_g4mt, read_g4sk_data, u16
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from animation.g4mt_probe import companion_g4sk, crc32b, g4sk_name_table_offset, parse_g4mt, read_g4sk_data, u16
     from formats.g4mt_writer import PRECISION_FACE_MARKERS, simplify_samples as _simplify_samples
 
 
@@ -211,6 +214,35 @@ def sample_channel(data: bytes, data_base: int, channel: dict, scale: float, fra
     return [a + (b - a) * amount for a, b in zip(first, second)]
 
 
+def sample_channel_frames(data: bytes, data_base: int, channel: dict, scale: float, frames: list[int]) -> list[list[float]]:
+    keys = channel["keys"]
+    if not keys:
+        return [[] for _frame in frames]
+    values = [decode_key(data, data_base, channel, scale, index) for index in range(len(keys))]
+    stepped = encoding_step(channel)
+    result = []
+    right = 0
+    for frame in frames:
+        while right < len(keys) and keys[right] <= frame:
+            right += 1
+        if right == 0:
+            result.append(values[0])
+            continue
+        left = right - 1
+        if left == len(keys) - 1 or stepped:
+            result.append(values[left])
+            continue
+        span = keys[left + 1] - keys[left]
+        amount = (frame - keys[left]) / span if span else 0.0
+        first, second = values[left], values[left + 1]
+        result.append(
+            slerp(first, second, amount)
+            if channel["channel_type"] == 9
+            else [a + (b - a) * amount for a, b in zip(first, second)]
+        )
+    return result
+
+
 def simplify_samples(frames, samples, tolerance: float = 1e-5):
     return _simplify_samples(frames, samples, tolerance)
 
@@ -236,15 +268,21 @@ def select_clip(clips: list[dict], selector: str) -> dict:
     raise ValueError(f"clip not found: {selector}")
 
 
-def decode_motion(path: Path, clip_selector: str, skeleton_path: Path | None) -> dict:
+def prepare_motion_bank(path: Path, skeleton_path: Path | None):
     parsed = parse_g4mt(path, skeleton_path)
+    data = path.read_bytes()
+    target_hashes = {int(target["crc32b"], 16) for target in parsed["targets"]}
+    skeleton_file = skeleton_path or (
+        Path(parsed["skeleton"]) if parsed["skeleton"] else companion_g4sk(path, target_hashes)
+    )
+    skeleton = parse_skeleton(skeleton_file) if skeleton_file and skeleton_file.is_file() else None
+    return parsed, data, skeleton
+
+
+def decode_motion_from_bank(path: Path, clip_selector: str, parsed: dict, data: bytes, skeleton: dict | None) -> dict:
     clip = select_clip(parsed["clips"], clip_selector)
     if clip["flags"] & 1:
         raise ValueError("additive G4MT clips need a base pose and are not exported yet")
-    data = path.read_bytes()
-    target_hashes = {int(target["crc32b"], 16) for target in parsed["targets"]}
-    skeleton_file = skeleton_path or (Path(parsed["skeleton"]) if parsed["skeleton"] else companion_g4sk(path, target_hashes))
-    skeleton = parse_skeleton(skeleton_file) if skeleton_file and skeleton_file.is_file() else None
     target_infos = parsed["target_infos"][
         clip["target_info_start"]:clip["target_info_start"] + clip["target_info_count"]
     ]
@@ -261,29 +299,31 @@ def decode_motion(path: Path, clip_selector: str, skeleton_path: Path | None) ->
             if skeleton_index is not None:
                 rest = skeleton["local_trs"][skeleton_index]
         channels = parsed["channels"][info["channel_start"]:info["channel_start"] + info["channel_count"]]
-        values = {path_name: [] for path_name in ("scale", "rotation", "translation")}
+        values = {
+            path_name: [components[:] for _frame in frames]
+            for path_name, components in rest.items()
+        }
         animated_paths = set()
-        for frame in frames:
-            pose = {name: components[:] for name, components in rest.items()}
-            for channel in channels:
-                mapping = CHANNEL_PATHS.get(channel["channel_type"])
-                if mapping is None:
-                    continue
-                path_name, component = mapping
-                scale = parsed["scales"][channel["encoding"][6]]
-                decoded = sample_channel(data, parsed["section_offsets"]["data"], channel, scale, frame)
-                if component is None:
-                    pose[path_name] = normalize_quaternion(decoded)
-                else:
-                    pose[path_name][component] = decoded[0]
-                animated_paths.add(path_name)
-            for path_name in values:
-                value = pose[path_name]
-                if path_name == "rotation" and values[path_name]:
-                    previous = values[path_name][-1]
-                    if sum(a * b for a, b in zip(previous, value)) < 0.0:
-                        value = [-component for component in value]
-                values[path_name].append(value)
+        for channel in channels:
+            mapping = CHANNEL_PATHS.get(channel["channel_type"])
+            if mapping is None:
+                continue
+            path_name, component = mapping
+            scale = parsed["scales"][channel["encoding"][6]]
+            decoded_samples = sample_channel_frames(
+                data, parsed["section_offsets"]["data"], channel, scale, frames
+            )
+            if component is None:
+                values[path_name] = [normalize_quaternion(decoded) for decoded in decoded_samples]
+            else:
+                for frame_index, decoded in enumerate(decoded_samples):
+                    values[path_name][frame_index][component] = decoded[0]
+            animated_paths.add(path_name)
+        previous_rotation = None
+        for value in values["rotation"]:
+            if previous_rotation is not None and sum(a * b for a, b in zip(previous_rotation, value)) < 0.0:
+                value[:] = [-component for component in value]
+            previous_rotation = value
         tracks.append({
             "target_index": info["target_index"],
             "target_hash": target["crc32b"],
@@ -300,6 +340,11 @@ def decode_motion(path: Path, clip_selector: str, skeleton_path: Path | None) ->
         "times": times,
         "tracks": tracks,
     }
+
+
+def decode_motion(path: Path, clip_selector: str, skeleton_path: Path | None) -> dict:
+    parsed, data, skeleton = prepare_motion_bank(path, skeleton_path)
+    return decode_motion_from_bank(path, clip_selector, parsed, data, skeleton)
 
 
 def write_json(motion: dict, output: Path) -> None:

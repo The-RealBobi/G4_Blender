@@ -7,6 +7,7 @@ import math
 import os
 import re
 import struct
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -14,9 +15,10 @@ from typing import Iterable
 from xml.sax.saxutils import escape
 
 try:
-    from .shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
-    from .formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from ..shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
+    from ..formats.cfgbin import CfgBinDocument, parse_cfgbin_file
 except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
     from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
 
@@ -65,8 +67,8 @@ def default_chara_model_lookup() -> Path | None:
     script_dir = Path(__file__).resolve().parent
     candidates.extend(
         [
-            script_dir / "chara_model_lookup.json",
-            Path("data/chara_model_lookup.json"),
+            script_dir.parent / "data" / "chara_model_lookup.json",
+            script_dir / "data" / "chara_model_lookup.json",
         ]
     )
 
@@ -1252,7 +1254,7 @@ def parse_g4sk(data: bytes) -> dict:
     if data[:4] != b"G4SK":
         raise ValueError("not a G4SK file")
     joint_count = u16(data, 0x20)
-    section_offsets = [0x40 + u16(data, 0x24 + index * 2) * 4 for index in range(8)]
+    section_offsets = [0x40 + u16(data, 0x24 + index * 2) * 4 for index in range(11)]
 
     bind_matrices = []
     for joint_index in range(joint_count):

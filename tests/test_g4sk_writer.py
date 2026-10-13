@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from formats.g4sk_writer import G4SKNode, write_g4sk_v104
-from g4_model_probe import parse_g4sk
+from porting.g4_model_probe import parse_g4sk
 
 
 DUMP_ROOT = os.environ.get("G4SK_TEST_DUMP")

@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 try:
-    from .formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from ..formats.cfgbin import CfgBinDocument, parse_cfgbin_file
 except ImportError:
     from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
 

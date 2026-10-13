@@ -89,7 +89,7 @@ def canonical_skirt_joint(name: str, lateral_position: float) -> str:
 
 
 def catalog_path() -> Path:
-    return Path(__file__).with_name(CATALOG_FILENAME)
+    return Path(__file__).resolve().parents[1] / "data" / CATALOG_FILENAME
 
 
 def resolve_catalog_alias(

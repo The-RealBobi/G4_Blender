@@ -6,13 +6,13 @@ import tempfile
 import bpy
 
 from ..effects.loop_animation import read_loop_animation
-from ..g4pk_extract_g4mt import entries
-from ..g4mt_probe import parse_g4mt
-from ..g4mt_motion import decode_motion
+from ..animation.g4pk_extract_g4mt import entries
+from ..animation.g4mt_probe import parse_g4mt
+from ..animation.g4mt_motion import decode_motion
 
 
 def animate_effect_uv_loops(source: Path, materials: list[bpy.types.Material], scene: bpy.types.Scene, start_frame: int) -> int:
-    from ..g4_animation_addon import action_fcurve_new, material_crc32b
+    from ..animation.g4_animation_addon import action_fcurve_new, material_crc32b
 
     reference = read_loop_animation(source)
     if reference is None:
@@ -82,9 +82,9 @@ def animate_effect_uv_loops(source: Path, materials: list[bpy.types.Material], s
 
 def animate_effect_material_phases(model: Path, materials: list[bpy.types.Material], scene: bpy.types.Scene) -> int:
     from ..effects.phase_animation import effect_phases, phase_source_frame
-    from ..g4ma_motion import material_animation_paths
-    from ..g4mt_motion import sample_channel
-    from ..g4_animation_addon import action_fcurve_find, action_fcurve_new, material_crc32b
+    from ..animation.g4ma_motion import material_animation_paths
+    from ..animation.g4mt_motion import sample_channel
+    from ..animation.g4_animation_addon import action_fcurve_find, action_fcurve_new, material_crc32b
 
     count = 0
     with tempfile.TemporaryDirectory(prefix='g4_effect_phases_') as temporary:
@@ -162,7 +162,7 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
 
 def animate_effect_geometry_phases(model: Path, armature: bpy.types.Object, scene: bpy.types.Scene) -> int:
     from ..effects.phase_animation import effect_phases
-    from ..g4_animation_addon import create_action
+    from ..animation.g4_animation_addon import create_action
 
     if armature.animation_data and (armature.animation_data.action or armature.animation_data.nla_tracks):
         return 0
@@ -230,7 +230,7 @@ def animate_effect_random_offsets(source: Path, materials: list[bpy.types.Materi
     import random
     import zlib
     from ..effects.random_animation import read_random_animation, sample_parameters
-    from ..g4_animation_addon import action_fcurve_new, material_crc32b
+    from ..animation.g4_animation_addon import action_fcurve_new, material_crc32b
 
     animation = read_random_animation(source)
     # A reproducible preview realization; the game's global RNG state is not in the asset.
@@ -291,9 +291,9 @@ def animate_effect_random_offsets(source: Path, materials: list[bpy.types.Materi
 def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: dict,
                                    scene: bpy.types.Scene) -> int:
     """Bind the authored stand UV clip, retaining its source frame rate and offsets."""
-    from ..g4ma_motion import texture_animation_paths
-    from ..g4mt_motion import sample_channel, encoding_step
-    from ..g4_animation_addon import action_fcurve_new
+    from ..animation.g4ma_motion import texture_animation_paths
+    from ..animation.g4mt_motion import sample_channel, encoding_step
+    from ..animation.g4_animation_addon import action_fcurve_new
     from .particle_nodes import remove_particle_preview_window
 
     hashes = record.get('uv_animation_hashes', [])
@@ -366,9 +366,9 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
 def animate_event_texture_clip(model: Path, materials: list[bpy.types.Material], records: dict,
                                scene: bpy.types.Scene) -> int:
     """Bind event UV translations through the material's native target hashes."""
-    from ..g4ma_motion import texture_animation_paths
-    from ..g4mt_motion import sample_channel, encoding_step
-    from ..g4_animation_addon import action_fcurve_new, action_fcurve_find
+    from ..animation.g4ma_motion import texture_animation_paths
+    from ..animation.g4mt_motion import sample_channel, encoding_step
+    from ..animation.g4_animation_addon import action_fcurve_new, action_fcurve_find
     from .. import blender_base_name
 
     count = 0

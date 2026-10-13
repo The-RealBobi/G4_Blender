@@ -13,8 +13,8 @@ import G4_Blender
 G4_Blender.__path__ = [str(repo)]
 if 'G4_Blender.formats' in sys.modules:
     sys.modules['G4_Blender.formats'].__path__ = [str(repo / 'formats')]
-sys.modules.pop('G4_Blender.g4_animation_addon', None)
-from G4_Blender.g4_animation_addon import sample_action_for_g4mt
+sys.modules.pop('G4_Blender.animation.g4_animation_addon', None)
+from G4_Blender.animation.g4_animation_addon import sample_action_for_g4mt
 
 
 bpy.ops.object.armature_add(enter_editmode=True)

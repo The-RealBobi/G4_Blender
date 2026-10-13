@@ -9,6 +9,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import zlib
@@ -16,33 +17,34 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:
-    from g4_model_probe import (
-        dds_format,
-        dds_to_nxtch,
-        matrix_mul,
-        rigid_matrix_inverse,
-    )
-    from g4_joint_aliases import (
-        canonical_export_joint,
-        load_joint_alias_catalog,
-        normalize_joint_key,
-        resolve_catalog_alias,
-    )
-    from outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
-except ImportError:
     from .g4_model_probe import (
         dds_format,
         dds_to_nxtch,
         matrix_mul,
         rigid_matrix_inverse,
     )
-    from .g4_joint_aliases import (
+    from ..shared.g4_joint_aliases import (
         canonical_export_joint,
         load_joint_alias_catalog,
         normalize_joint_key,
         resolve_catalog_alias,
     )
     from .outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from porting.g4_model_probe import (
+        dds_format,
+        dds_to_nxtch,
+        matrix_mul,
+        rigid_matrix_inverse,
+    )
+    from shared.g4_joint_aliases import (
+        canonical_export_joint,
+        load_joint_alias_catalog,
+        normalize_joint_key,
+        resolve_catalog_alias,
+    )
+    from porting.outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
 
 
 DEFAULT_RAW_ROOT = Path(os.environ.get("LEVEL5_G4_RAW_ROOT", "data"))
@@ -1929,6 +1931,25 @@ def native_joint_name_indices(md: bytes) -> dict[str, int]:
     return indices
 
 
+def skeleton_joint_name_indices(skeleton: dict) -> dict[str, int]:
+    names = skeleton.get("names") or []
+    catalog = load_joint_alias_catalog()
+    canonical_indices: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for index, name in enumerate(names):
+        canonical = resolve_catalog_alias(name, catalog)
+        if not canonical:
+            continue
+        existing = canonical_indices.get(canonical)
+        if existing is not None and existing != index:
+            ambiguous.add(canonical)
+        else:
+            canonical_indices[canonical] = index
+    for canonical in ambiguous:
+        canonical_indices.pop(canonical, None)
+    return {**canonical_indices, **{name: index for index, name in enumerate(names) if name}}
+
+
 def palette_compatible_joint(
     joint: int | None, palette: list[int], native_joint_indices: dict[str, int]
 ) -> int | None:
@@ -1965,19 +1986,25 @@ def configured_record_palettes(
 
     def used_palette_joints(mesh: Mesh, rule: RecordRule, native_palette: list[int]) -> set[int]:
         used_joints: set[int] = set()
-        for vertex in mesh.vertices:
-            for joint_name, _ in vertex.influences:
-                resolved = compact_joint_index(joint_name, aliases, native_joint_indices=native_joint_indices)
-                compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
-                if compatible is not None:
-                    resolved = compatible
-                elif native_joint_indices and resolved not in native_joint_indices.values():
-                    # A compact name that is absent from the native hash table
-                    # cannot be represented by merely appending its compact
-                    # ordinal to a physical G4MD palette.
-                    continue
-                if resolved is not None:
-                    used_joints.add(resolved)
+        influences = [
+            joint_name
+            for vertex in mesh.vertices
+            for joint_name, _ in vertex.influences
+        ]
+        if rule.rigid_joint is not None:
+            influences.append(rule.rigid_joint)
+        for joint_name in influences:
+            resolved = compact_joint_index(joint_name, aliases, native_joint_indices=native_joint_indices)
+            compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
+            if compatible is not None:
+                resolved = compatible
+            elif native_joint_indices and resolved not in native_joint_indices.values():
+                # A compact name that is absent from the native hash table
+                # cannot be represented by merely appending its compact
+                # ordinal to a physical G4MD palette.
+                continue
+            if resolved is not None:
+                used_joints.add(resolved)
         return used_joints
 
     def expanded_native_palette(index: int, rule: RecordRule, mesh: Mesh) -> list[int]:
@@ -2215,6 +2242,10 @@ def source_uv_transform(mesh: Mesh, rule: RecordRule) -> tuple[tuple[float, floa
     # it first can make every part inherit the same atlas tile.
     source_names = [name for name in mesh.source_names if name]
     lookup_names = source_names + ([mesh.name] if mesh.name else [])
+    for name in lookup_names:
+        for key in (f"{name}::{mesh.material_name}", f"{clean_symbol(name)}::{mesh.material_name}"):
+            if key in transforms:
+                return values(transforms[key])
     for name in lookup_names:
         exact = {name, clean_symbol(name)}
         for key, transform in transforms.items():
@@ -3381,7 +3412,7 @@ def prepare_port_geometry(
     target_skeleton = parse_g4sk(config.target_g4sk_path) if config.target_g4sk_path else None
     native_palettes = [[] for _ in config.records] if target_skeleton else native_record_palettes(native_g4md)
     native_joint_indices = (
-        {name: index for index, name in enumerate(target_skeleton["names"])}
+        skeleton_joint_name_indices(target_skeleton)
         if target_skeleton else native_joint_name_indices(native_g4md)
     )
     palettes = configured_record_palettes(native_palettes, config.records, meshes, config.joint_aliases or {}, native_joint_indices)
@@ -3611,7 +3642,7 @@ def write_port(
     apply_record_outline_rules(meshes, config.records)
     target_skeleton = parse_g4sk(config.target_g4sk_path) if config.target_g4sk_path else None
     native_joint_indices = (
-        {name: index for index, name in enumerate(target_skeleton["names"])}
+        skeleton_joint_name_indices(target_skeleton)
         if target_skeleton else native_joint_name_indices(native_md) if native_md else {}
     )
     native_uv_formats = native_record_uv_formats(native_md) if native_md else []

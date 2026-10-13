@@ -1,6 +1,6 @@
 import unittest
 
-import g4_model_probe
+from porting import g4_model_probe
 
 
 class TargetSkeletonOverrideTests(unittest.TestCase):

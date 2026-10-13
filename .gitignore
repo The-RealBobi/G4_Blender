@@ -198,3 +198,8 @@ MISSION.md
 
 /graphify-out/
 .work/
+/.boss
+
+!/tools/
+/tools/*
+!/tools/build_release.py

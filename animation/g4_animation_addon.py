@@ -1,4 +1,5 @@
 import json
+import hashlib
 import math
 import os
 import re
@@ -18,47 +19,64 @@ import bpy
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
+    EnumProperty,
     FloatProperty,
     FloatVectorProperty,
     IntProperty,
     StringProperty,
 )
-from bpy.types import Operator, PropertyGroup
+from bpy.types import Operator, Panel, PropertyGroup
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 from mathutils import Matrix, Quaternion, Vector
 
 try:
-    from .g4_model_probe import g4sk_entries_from_candidate
-    from .g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
-    from .g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
+    from ..formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from ..porting.g4_model_probe import g4sk_entries_from_candidate
+    from ..porting.g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
+    from .g4pk_extract_g4mt import entries as g4pk_entries, replace_entries as replace_g4pk_entries
+    from .g4pk_extract_g4mt import select_g4mt_entry
     from .g4mt_probe import parse_g4mt, read_g4sk_data
-    from .g4mt_motion import decode_motion, simplify_motion_samples
-    from .g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
+    from .g4mt_motion import (
+        decode_motion,
+        decode_motion_from_bank,
+        prepare_motion_bank,
+        simplify_motion_samples,
+    )
+    from ..shared.g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
     from .g4ma_motion import decode_material_motion, material_animation_paths
     from .g4cm_camera import decode_camera, parse_g4cm
-    from .formats.g4mt import parse_g4mt as parse_g4mt_bank
-    from .formats.g4mt_writer import (
+    from ..formats.g4mt import parse_g4mt as parse_g4mt_bank
+    from ..formats.diagnostics import NativeFormatError
+    from ..formats.g4mt_writer import (
         G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
         write_g4mt_clip, write_g4mt_family, write_g4mt_family_preserving_additive,
     )
-    from .formats.g4sk_writer import G4SKNode, write_g4sk_v104
-    from .effects.particle_library import particle_library_metadata, read_particle_library
-    from .shading.particle_nodes import deduplicate_particle_geometry_groups
+    from ..formats.g4sk_writer import G4SKNode, write_g4sk_v104
+    from ..effects.particle_library import particle_library_metadata, read_particle_library
+    from ..shading.particle_nodes import deduplicate_particle_geometry_groups
     from .g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
         load_event_actor_models, load_event_actor_points,
         load_event_actor_point_assignments, point_assignment_for_actor,
     )
 except ImportError:
-    from g4_model_probe import g4sk_entries_from_candidate
-    from g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
-    from g4pk_extract_g4mt import entries as g4pk_entries, select_g4mt_entry
-    from g4mt_probe import parse_g4mt, read_g4sk_data
-    from g4mt_motion import decode_motion, simplify_motion_samples
-    from g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
-    from g4ma_motion import decode_material_motion, material_animation_paths
-    from g4cm_camera import decode_camera, parse_g4cm
+    from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from porting.g4_model_probe import g4sk_entries_from_candidate
+    from porting.g4_model_probe import configure_raw_data_root_from_path, find_skeleton_for_model, parse_g4sk
+    from animation.g4pk_extract_g4mt import entries as g4pk_entries, replace_entries as replace_g4pk_entries
+    from animation.g4pk_extract_g4mt import select_g4mt_entry
+    from animation.g4mt_probe import parse_g4mt, read_g4sk_data
+    from animation.g4mt_motion import (
+        decode_motion,
+        decode_motion_from_bank,
+        prepare_motion_bank,
+        simplify_motion_samples,
+    )
+    from shared.g4_joint_aliases import load_joint_alias_catalog, normalize_joint_key
+    from animation.g4ma_motion import decode_material_motion, material_animation_paths
+    from animation.g4cm_camera import decode_camera, parse_g4cm
     from formats.g4mt import parse_g4mt as parse_g4mt_bank
+    from formats.diagnostics import NativeFormatError
     from formats.g4mt_writer import (
         G4MTClipSamples, G4MTLocalTransform, G4MTTargetSamples,
         write_g4mt_clip, write_g4mt_family, write_g4mt_family_preserving_additive,
@@ -66,7 +84,7 @@ except ImportError:
     from formats.g4sk_writer import G4SKNode, write_g4sk_v104
     from effects.particle_library import particle_library_metadata, read_particle_library
     from shading.particle_nodes import deduplicate_particle_geometry_groups
-    from g4_event import (
+    from animation.g4_event import (
         event_light_config_references, event_light_parameter_entries, event_light_slots,
         load_event_actor_models, load_event_actor_points,
         load_event_actor_point_assignments, point_assignment_for_actor,
@@ -423,7 +441,7 @@ def resolve_decoder(prefs) -> Path:
     fallback = default_decoder_script()
     if fallback:
         return Path(fallback)
-    raise RuntimeError("g4mt_motion.py was not found. Configure it in the addon preferences.")
+    raise RuntimeError("animation/g4mt_motion.py was not found. Configure it in the addon preferences.")
 
 
 def resolve_camera_decoder(prefs) -> Path:
@@ -434,7 +452,7 @@ def resolve_camera_decoder(prefs) -> Path:
     fallback = default_camera_decoder_script()
     if fallback:
         return Path(fallback)
-    raise RuntimeError("g4cm_camera.py was not found. Configure it in the addon preferences.")
+    raise RuntimeError("animation/g4cm_camera.py was not found. Configure it in the addon preferences.")
 
 
 def decode_g4mt(
@@ -476,7 +494,7 @@ def materialize_g4mt(path: Path, entry: str) -> tuple[Path, Path | None, str | N
     safe_name = Path(entry_name.replace("\\", "/")).name
     if not safe_name.lower().endswith(".g4mt"):
         safe_name = f"{path.stem}_{entry}.g4mt"
-    destination = cache_root / safe_name
+    destination = Path(tempfile.mkdtemp(prefix="animation_", dir=cache_root)) / safe_name
     destination.write_bytes(payload)
     return destination, destination, entry_name
 
@@ -505,6 +523,138 @@ def decode_g4cm(path: Path, clip: str, prefs) -> tuple[dict, Path]:
 def model_identifiers(path: Path) -> list[str]:
     stem = re.sub(r"_c\d+$", "", path.stem, flags=re.IGNORECASE)
     return list(dict.fromkeys(value.lower() for value in MODEL_ID_RE.findall(stem)))
+
+
+def discover_animation_bank_resources_by_branch(
+    character_bank_id: str, event_skeleton_id: str, data_roots: list[Path]
+) -> list[tuple[Path, Path, bool]]:
+    bank_ids = {False: character_bank_id.strip().lower(), True: event_skeleton_id.strip().lower()}
+    if any(not re.fullmatch(r"c\d{4,10}", bank_id) for bank_id in bank_ids.values()):
+        raise ValueError("Character and event animation IDs must look like c000101")
+    resources = []
+    event_groups = set()
+    event_point_effects = {}
+    seen_paths = set()
+    seen_relative_paths = set()
+    for data_root in data_roots:
+        for folder, is_event in (("chr", False), ("event", True)):
+            source_root = data_root / "common" / folder
+            if not source_root.is_dir():
+                continue
+            for path in source_root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in {".g4mt", ".g4pk"}:
+                    continue
+                relative = path.relative_to(data_root)
+                identifiers = {
+                    identifier
+                    for part in relative.parts
+                    for identifier in model_identifiers(Path(part))
+                }
+                if is_event:
+                    event_parts = event_path_parts(relative)
+                    if event_parts is not None and "point_eff" in path.stem.casefold():
+                        event_point_effects.setdefault((data_root, *event_parts), []).append(path)
+                if bank_ids[is_event] not in identifiers:
+                    continue
+                resolved = path.resolve()
+                if resolved in seen_paths or relative in seen_relative_paths:
+                    continue
+                seen_paths.add(resolved)
+                seen_relative_paths.add(relative)
+                resources.append((path, data_root, is_event))
+                if is_event:
+                    event_parts = event_path_parts(relative)
+                    if event_parts is not None:
+                        event_groups.add((data_root, *event_parts))
+    for data_root, group, event_name in event_groups:
+        for path in event_point_effects.get((data_root, group, event_name), ()):
+            resolved = path.resolve()
+            relative = path.relative_to(data_root)
+            if resolved in seen_paths or relative in seen_relative_paths:
+                continue
+            seen_paths.add(resolved)
+            seen_relative_paths.add(relative)
+            resources.append((path, data_root, True))
+    return sorted(resources, key=lambda item: (item[2], item[0].as_posix().casefold()))
+
+
+def discover_animation_bank_resources(bank_id: str, data_roots: list[Path]) -> list[tuple[Path, Path, bool]]:
+    return discover_animation_bank_resources_by_branch(bank_id, bank_id, data_roots)
+
+
+def resolve_animation_family_ids(model_path: Path, data_roots: list[Path]) -> tuple[str, str]:
+    """Return the character-motion family and generic event skeleton for a model."""
+    lookup_path = model_lookup_path()
+    relative_path = model_relative_path(model_path)
+    if lookup_path is None or relative_path is None:
+        raise ValueError(f"Could not resolve the original model family from {model_path}")
+    try:
+        lookup = json.loads(lookup_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read character model lookup: {lookup_path}") from error
+    row = (lookup.get("models") or {}).get(relative_path)
+    if not row:
+        raise ValueError(f"Original model is not present in the character model lookup: {relative_path}")
+    event_skeleton_id = str(row.get("g4sk_stem") or "").lower()
+    if not re.fullmatch(r"c\d{4,10}", event_skeleton_id):
+        raise ValueError(f"No generic skeleton ID is recorded for {relative_path}")
+    try:
+        skeleton_crc = int(row["skeleton_crc"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"No valid skeleton CRC is recorded for {relative_path}") from error
+
+    for data_root in data_roots:
+        config_paths = sorted((data_root / "common" / "gamedata" / "character").glob("chara_motion*.cfg.bin"))
+        for config_path in config_paths:
+            try:
+                document = parse_cfgbin_file(config_path)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(document, CfgBinDocument):
+                continue
+            for entry in document.entries:
+                if entry.name != "CHARA_MOTION_INFO" or len(entry.values) < 2:
+                    continue
+                try:
+                    entry_crc = int(entry.values[0].value)
+                except (TypeError, ValueError):
+                    continue
+                if entry_crc != skeleton_crc:
+                    continue
+                bank_path = str(entry.values[1].value).replace("\\", "/")
+                match = re.match(r"(c\d{4,10})/", bank_path, re.IGNORECASE)
+                if match:
+                    return match.group(1).lower(), event_skeleton_id
+    raise ValueError(
+        f"Could not find a character animation family for {relative_path} in chara_motion config"
+    )
+
+
+def find_animation_bank_resources(bank_id: str, data_roots: list[Path]) -> tuple[int, int]:
+    resources = discover_animation_bank_resources(bank_id, data_roots)
+    return sum(not is_event for _, _, is_event in resources), sum(is_event for _, _, is_event in resources)
+
+
+def rewrite_bank_identifier(value: str, source_bank_id: str, target_bank_id: str) -> str:
+    return re.sub(
+        rf"(?<![A-Za-z0-9]){re.escape(source_bank_id)}(?![A-Za-z0-9])",
+        target_bank_id,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def target_animation_bank_id(armature) -> str:
+    model_path = Path(str(armature.get("g4_exported_model_path", ""))) if armature else Path()
+    candidates = model_identifiers(model_path) if model_path.name else []
+    if not candidates and armature is not None:
+        candidates = model_identifiers(Path(armature.name))
+    character_id = next((value for value in candidates if value.startswith("c")), "")
+    if re.fullmatch(r"c99\d{6}", character_id):
+        return f"c00{character_id[3:]}"
+    if re.fullmatch(r"c00\d{6}", character_id):
+        return character_id
+    return ""
 
 
 def resolve_model_path(g4mt_path: Path, configured_root: str) -> Path | None:
@@ -693,16 +843,34 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
             resolved += 1
     bone_names_by_source = {name: [] for name in track_bone_names(motion)}
     explicit_names = {name: [] for name in bone_names_by_source}
+    explicit_bone_names = set()
     for bone in armature.data.bones:
         source_name = str(bone.get("g4_animation_source_joint", "")).strip()
+        if source_name:
+            explicit_bone_names.add(bone.name)
         if source_name in explicit_names:
             explicit_names[source_name].append(bone.name)
     catalog = load_joint_alias_catalog()
     alias_targets: dict[str, list[str]] = defaultdict(list)
     for bone in armature.data.bones:
+        if bone.name in explicit_bone_names:
+            continue
         target_name = catalog.aliases.get(normalize_joint_key(bone.name), "")
         if target_name in bone_names_by_source:
             alias_targets[target_name].append(bone.name)
+    try:
+        from ..porting.g4_port_addon import contextual_joint_aliases
+    except ImportError:
+        from porting.g4_port_addon import contextual_joint_aliases
+    for bone_name, source_name in contextual_joint_aliases(
+        {bone.name for bone in armature.data.bones}
+    ).items():
+        if (
+            bone_name not in explicit_bone_names
+            and source_name in bone_names_by_source
+            and bone_name not in alias_targets[source_name]
+        ):
+            alias_targets[source_name].append(bone_name)
     alias_weight_sums = None
 
     def mesh_weight_sums():
@@ -728,6 +896,22 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
         if len(candidates) < 2:
             return candidates
 
+        paired_helpers = [
+            name for name in candidates
+            if any(token in normalize_joint_key(name) for token in ("twist", "roll", "hiza"))
+        ]
+        if paired_helpers:
+            primary = [name for name in candidates if name not in paired_helpers]
+            if len(primary) == 1:
+                return [primary[0], *paired_helpers]
+
+        weights = mesh_weight_sums()
+        ranked = sorted(candidates, key=lambda name: weights[name], reverse=True)
+        # A clearly dominant skinning group identifies the source joint more
+        # reliably than an otherwise plausible parent/child name match.
+        if weights[ranked[0]] > 0.0 and weights[ranked[0]] >= 2.0 * weights[ranked[1]]:
+            return [ranked[0]]
+
         ancestors = []
         for candidate in candidates:
             if all(
@@ -736,7 +920,6 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
                 for other in candidates
             ):
                 ancestors.append(candidate)
-        weights = mesh_weight_sums()
         if len(ancestors) == 1 and source_name == "c_c_1_0":
             return ancestors
         if len(ancestors) == 1 and source_name == "c_c_1_1":
@@ -750,10 +933,6 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
             ]
             if len(deepest) == 1:
                 return deepest
-        ranked = sorted(candidates, key=lambda name: weights[name], reverse=True)
-        # Only a clearly dominant skinning influence may break an alias tie.
-        if weights[ranked[0]] > 0.0 and weights[ranked[0]] >= 2.0 * weights[ranked[1]]:
-            return [ranked[0]]
         return ancestors if len(ancestors) == 1 else []
 
     def iter_bone_parents(bone):
@@ -764,7 +943,11 @@ def resolve_track_names_from_armature(motion: dict, armature) -> int:
 
     for source_name in bone_names_by_source:
         exact = armature.data.bones.get(source_name)
-        if explicit_names[source_name]:
+        exact_source = str(exact.get("g4_animation_source_joint", "")).strip() if exact else ""
+        if source_name == "c_global_0_0" and exact is not None and exact_source in {"", source_name}:
+            # Keep game root motion on the canonical G4SK root, not an inherited helper parent.
+            bone_names_by_source[source_name] = [exact.name]
+        elif explicit_names[source_name]:
             bone_names_by_source[source_name] = explicit_names[source_name]
         elif exact is not None:
             bone_names_by_source[source_name] = [exact.name]
@@ -994,8 +1177,11 @@ def has_display_oriented_bones(armature) -> bool:
 def align_armature_to_native_bind(armature, model_path: Path) -> int:
     """Use the model's G4SK bind matrices as the animation rig rest axes."""
     try:
-        configure_raw_data_root_from_path(model_path)
-        skeleton_data, _source = find_skeleton_for_model(model_path)
+        if model_path.suffix.casefold() == ".g4sk":
+            skeleton_data = model_path.read_bytes()
+        else:
+            configure_raw_data_root_from_path(model_path)
+            skeleton_data, _source = find_skeleton_for_model(model_path)
         skeleton = parse_g4sk(skeleton_data) if skeleton_data else None
     except (OSError, ValueError, RuntimeError, struct.error):
         return 0
@@ -1054,43 +1240,24 @@ def import_model_for_animation(
 ):
     if model_path is None:
         raise RuntimeError("Select the G4MD/G4PKM model that will receive the animation.")
-    if not hasattr(bpy.ops.import_scene, "level5_g4"):
-        raise RuntimeError("Enable the separate 'Level-5 G4 Model Importer' addon before importing the model.")
-
-    before = set(bpy.data.objects)
-    original_orientation = getattr(prefs, "apply_bone_orientation", False)
+    importer = model_importer_module()
+    import_model = getattr(importer, "import_g4_model", None) if importer is not None else None
+    if import_model is None:
+        raise RuntimeError("The Level-5 G4 Model Importer does not expose its model import function")
+    model_preferences = getattr(importer, "addon_preferences", None)
+    model_prefs = model_preferences() if model_preferences is not None else prefs
+    original_orientation = getattr(model_prefs, "apply_bone_orientation", False)
     try:
-        prefs.apply_bone_orientation = False
-        result = bpy.ops.import_scene.level5_g4(
-            filepath=str(model_path),
-            create_report_text=False,
-            # Modular meshes must be attached after the actor's rest pose is
-            # aligned to the motion.  Binding them first leaves their skin
-            # data authored against the previous rest skeleton.
-            import_character_parts=False,
-            auto_character_parts=False,
-            # The animation flow has already collected the character parts.
-            # Without this flag the model operator schedules its setup dialog
-            # again and returns before an armature exists for the G4MT action.
-            character_setup_complete=True,
-            skip_character_setup=True,
-            force_character_styling=force_character_styling,
-            body_model=body_model,
-            shoes_model=shoes_model,
-            accessory_model=accessory_model,
-            gloves_model=gloves_model,
-            armband_model=armband_model,
-            nameplate_model=nameplate_model,
-            attach_ball=attach_ball,
-            ball_model=ball_model,
-            character_part_stem=character_part_stem,
-            preserve_character_part_armatures=False,
+        model_prefs.apply_bone_orientation = False
+        _, imported_names = import_model(
+            model_path,
+            model_prefs,
+            False,
+            apply_styling=True if force_character_styling else None,
         )
     finally:
-        prefs.apply_bone_orientation = original_orientation
-    if "FINISHED" not in result:
-        raise RuntimeError(f"Level-5 G4 Model Importer could not import {model_path}")
-    imported = set(bpy.data.objects) - before
+        model_prefs.apply_bone_orientation = original_orientation
+    imported = {obj for name in imported_names if (obj := bpy.data.objects.get(name)) is not None}
     armature = best_armature(imported, track_bone_names(motion))
     if armature is None:
         raise RuntimeError(f"The imported model contains no usable armature: {model_path}")
@@ -1238,11 +1405,11 @@ def append_curve_samples(action, cache: dict, data_path: str, index: int, group:
         frames = (frames[0], frames[-1])
         values = (values[0], values[-1])
     key = (data_path, index)
-    curve = cache.get(key)
+    if key not in cache:
+        cache[key] = action_fcurve_find(action, data_path, index)
+    curve = cache[key]
     if curve is None:
-        curve = action_fcurve_find(action, data_path, index)
-        if curve is None:
-            curve = action_fcurve_new(action, owner, data_path, index, group)
+        curve = action_fcurve_new(action, owner, data_path, index, group)
         cache[key] = curve
     count = len(frames)
     if not count:
@@ -1270,6 +1437,10 @@ def append_motion_to_action(
     event_root_name: str | None = None,
 ) -> tuple[int, int]:
     cache = curve_cache if curve_cache is not None else {}
+    cache.update({
+        (curve.data_path, curve.array_index): curve
+        for curve in action_fcurves(action)
+    })
     rest_by_name = motion_rest_matrices(motion)
     frames = motion["frames"]
     action_frames = [1 + source_frame - frame_origin for source_frame in frames]
@@ -1366,6 +1537,7 @@ def append_motion_to_action(
                 reduced_frames, reduced_samples = simplify_motion_samples(action_frames, samples, name)
                 component_count = len(reduced_samples[0]) if reduced_samples else 0
                 for component in range(component_count):
+                    cache.setdefault((data_path, component), None)
                     append_curve_samples(
                         action,
                         cache,
@@ -1529,6 +1701,42 @@ def create_motion_armature(motion: dict):
     return armature
 
 
+def create_g4sk_armature(skeleton_path: Path):
+    skeleton = parse_g4sk(skeleton_path.read_bytes())
+    names = skeleton["names"]
+    local_trs = [
+        {
+            "translation": skeleton["local_translations"][index],
+            "rotation": skeleton["local_rotations_xyzw"][index],
+            "scale": skeleton["local_scales"][index],
+        }
+        for index in range(skeleton["joint_count"])
+    ]
+    parents = [
+        parent if parent < skeleton["joint_count"] and parent != index else -1
+        for index, parent in enumerate(skeleton["parent_indices"])
+    ]
+    return create_motion_armature({
+        "skeleton": {"names": names, "parents": parents, "local_trs": local_trs}
+    })
+
+
+def create_victorytool_target_armature(
+    skeleton_path: Path, model_path: Path, source_joint_mapping: dict[str, str],
+):
+    armature = create_g4sk_armature(skeleton_path)
+    armature.name = f"{model_path.stem}__AnimationExport"
+    armature["g4_character_model_source"] = str(model_path.resolve())
+    armature["g4_character_skeleton_source"] = str(skeleton_path.resolve())
+    armature["g4_cumulative_scale_conversion"] = True
+    for bone_name, source_name in source_joint_mapping.items():
+        bone = armature.data.bones.get(bone_name)
+        if bone is None:
+            raise ValueError(f"Animation mapping refers to a missing target joint: {bone_name}")
+        bone["g4_animation_source_joint"] = source_name
+    return armature
+
+
 def requires_semantic_retarget(motion: dict, armature, source_rig_differs: bool) -> bool:
     if source_rig_differs:
         return True
@@ -1541,17 +1749,35 @@ def requires_semantic_retarget(motion: dict, armature, source_rig_differs: bool)
     )
 
 
-def create_retargeted_action(armature, motion: dict, frame_origin: int):
+def create_retargeted_action(armature, motion: dict, frame_origin: int, collect_g4mt_samples: bool):
     source_armature = create_motion_armature(motion)
     source_motion = dict(motion)
     source_motion["tracks"] = [dict(track) for track in motion["tracks"]]
     resolve_track_names_from_armature(source_motion, source_armature)
-    source_action = None
-    scene = bpy.context.scene
-    previous_frame = scene.frame_current
     action = None
     try:
-        source_action, source_keyed = create_action(source_armature, source_motion, frame_origin)
+        source_bones = list(source_armature.data.bones)
+
+        def depth(bone):
+            value = 0
+            parent = bone.parent
+            while parent is not None:
+                value += 1
+                parent = parent.parent
+            return value
+
+        source_bones.sort(key=depth)
+        source_tracks = {
+            track["target_name"]: track
+            for track in source_motion["tracks"]
+            if track.get("target_name")
+        }
+        source_keyed = sum(
+            bool(track.get("armature_bone_names"))
+            and source_armature.data.bones.get(track["target_name"]) is not None
+            for track in source_motion["tracks"]
+            if track.get("target_name")
+        )
         if source_keyed == 0:
             raise ValueError("G4 animation has no tracks on its source skeleton")
 
@@ -1569,16 +1795,12 @@ def create_retargeted_action(armature, motion: dict, frame_origin: int):
                 target_to_source[target_name] = source_name
 
         target_bones = list(armature.data.bones)
-
-        def depth(bone):
-            value = 0
-            parent = bone.parent
-            while parent is not None:
-                value += 1
-                parent = parent.parent
-            return value
-
         target_bones.sort(key=depth)
+        source_local_rest = {
+            bone.name: bone.parent.matrix_local.inverted_safe() @ bone.matrix_local
+            if bone.parent else bone.matrix_local.copy()
+            for bone in source_bones
+        }
         rest_local = {
             bone.name: bone.parent.matrix_local.inverted_safe() @ bone.matrix_local
             if bone.parent else bone.matrix_local.copy()
@@ -1587,92 +1809,410 @@ def create_retargeted_action(armature, motion: dict, frame_origin: int):
         source_world_rotation = source_armature.matrix_world.to_quaternion()
         target_world_rotation = armature.matrix_world.to_quaternion()
         target_inverse_rotation = target_world_rotation.inverted()
-        source_points = [source_armature.matrix_world @ bone.matrix_local.translation for bone in source_armature.data.bones]
-        target_points = [armature.matrix_world @ bone.matrix_local.translation for bone in target_bones]
-        source_height = max(point.z for point in source_points) - min(point.z for point in source_points)
-        target_height = max(point.z for point in target_points) - min(point.z for point in target_points)
-        translation_scale = target_height / source_height if source_height > 1e-6 else 1.0
-        source_rest_world = {
-            source_name: source_world_rotation @ source_armature.data.bones[source_name].matrix_local.to_quaternion()
-            for source_name in target_to_source.values()
-            if source_armature.data.bones.get(source_name) is not None
-        }
+        target_inverse_transform = target_inverse_rotation.to_matrix()
+        aliases = load_joint_alias_catalog().aliases
 
-        action = bpy.data.actions.new(name=motion["clip"]["name"] or "G4 Retargeted Animation")
-        action.use_fake_user = True
-        action.use_frame_range = True
-        action.frame_start = source_action.frame_start
-        action.frame_end = source_action.frame_end
-        armature.animation_data_create()
-        armature.animation_data.action = action
-        action_frames = range(round(source_action.frame_start), round(source_action.frame_end) + 1)
-        for frame in action_frames:
-            scene.frame_set(frame)
-            bpy.context.view_layer.update()
+        def mapped_target_bone(source_name):
+            if source_name == "c_global_0_0":
+                canonical_root = armature.data.bones.get("c_global_0_0")
+                if canonical_root is not None:
+                    return canonical_root
+            explicit = [
+                bone for bone in target_bones
+                if str(bone.get("g4_animation_source_joint", "")).strip() == source_name
+            ]
+            if explicit:
+                if len(explicit) == 1:
+                    return explicit[0]
+                source_bone = source_armature.data.bones.get(source_name)
+                source_parent_name = source_bone.parent.name if source_bone and source_bone.parent else None
+                direct = [
+                    bone for bone in explicit
+                    if (target_to_source.get(bone.parent.name) if bone.parent else None) == source_parent_name
+                ]
+                candidates = direct or explicit
+                shallowest = min(depth(bone) for bone in candidates)
+                primary = [bone for bone in candidates if depth(bone) == shallowest]
+                return primary[0] if len(primary) == 1 else None
+            exact = armature.data.bones.get(source_name)
+            if exact is not None and str(exact.get("g4_animation_source_joint", "")).strip() in {"", source_name}:
+                return exact
+            tracked = [bone for bone in target_bones if target_to_source.get(bone.name) == source_name]
+            if len(tracked) == 1:
+                return tracked[0]
+            if tracked:
+                return None
+            aliased = [
+                bone for bone in target_bones
+                if not str(bone.get("g4_animation_source_joint", "")).strip()
+                and aliases.get(normalize_joint_key(bone.name)) == source_name
+            ]
+            return aliased[0] if len(aliased) == 1 else None
+
+        translation_targets = {
+            source_name: mapped_target_bone(source_name)
+            for source_name in set(target_to_source.values())
+        }
+        source_root = source_armature.data.bones.get("c_global_0_0")
+        source_pelvis = source_armature.data.bones.get("c_c_1_0")
+        target_root = translation_targets.get("c_global_0_0")
+        target_pelvis = translation_targets.get("c_c_1_0")
+        height_joint_names = (
+            "c_global_0_0", "c_c_1_0", "c_c_1_1", "c_n_1_0", "c_head_1_0", "c_atc01_1_0",
+            "l_l_1_0", "l_l_1_1", "l_foot_1_0", "l_foot_1_1",
+            "r_l_1_0", "r_l_1_1", "r_foot_1_0", "r_foot_1_1",
+        )
+        height_points = [
+            (
+                source_armature.matrix_world @ source_bone.matrix_local.translation,
+                armature.matrix_world @ target_bone.matrix_local.translation,
+            )
+            for source_name in height_joint_names
+            if (source_bone := source_armature.data.bones.get(source_name)) is not None
+            and (target_bone := mapped_target_bone(source_name)) is not None
+        ]
+        source_height = max((source.z for source, _target in height_points), default=0.0) - min(
+            (source.z for source, _target in height_points), default=0.0
+        )
+        target_height = max((_target.z for _source, _target in height_points), default=0.0) - min(
+            (_target.z for _source, _target in height_points), default=0.0
+        )
+        body_translation_scale = target_height / source_height if source_height > 1e-6 else 1.0
+        if source_root is not None and source_pelvis is not None and target_root is not None and target_pelvis is not None:
+            source_pelvis_height = (
+                source_armature.matrix_world @ source_pelvis.matrix_local.translation
+                - source_armature.matrix_world @ source_root.matrix_local.translation
+            ).length
+            target_pelvis_height = (
+                armature.matrix_world @ target_pelvis.matrix_local.translation
+                - armature.matrix_world @ target_root.matrix_local.translation
+            ).length
+            pelvis_translation_scale = (
+                target_pelvis_height / source_pelvis_height
+                if source_pelvis_height > 1e-6 else body_translation_scale
+            )
+        else:
+            pelvis_translation_scale = body_translation_scale
+        source_rest = motion_rest_matrices(motion)
+        source_basis_correction = {}
+        for bone in source_bones:
+            rest = source_rest.get(bone.name)
+            track = source_tracks.get(bone.name)
+            if rest is None and track is not None and motion["frames"]:
+                rest = source_matrix({
+                    "translation": track["values"]["translation"][0],
+                    "rotation": track["values"]["rotation"][0],
+                    "scale": track["values"]["scale"][0],
+                })
+            if rest is not None:
+                source_rest[bone.name] = rest
+                source_basis_correction[bone.name] = retarget_basis_correction(
+                    rest, source_local_rest[bone.name]
+                )
+        source_rest_world = {
+            bone.name: source_world_rotation @ bone.matrix_local.to_quaternion()
+            for bone in source_bones
+        }
+        chain_rotation_targets = {}
+
+        def source_is_ancestor(ancestor_name, child_name):
+            current = source_armature.data.bones.get(child_name)
+            while current is not None:
+                if current.name == ancestor_name:
+                    return True
+                current = current.parent
+            return False
+
+        def normalized_chain_distances(points):
+            distances = [0.0]
+            for first, second in zip(points, points[1:]):
+                distances.append(distances[-1] + (second - first).length)
+            total = distances[-1]
+            if total <= 1e-8:
+                denominator = max(1, len(points) - 1)
+                return [index / denominator for index in range(len(points))]
+            return [distance / total for distance in distances]
+
+        for target_bone in target_bones:
+            source_name = target_to_source.get(target_bone.name)
+            if source_name is None or target_bone.parent is None:
+                continue
+            target_anchor = target_bone.parent
+            source_anchor_name = target_to_source.get(target_anchor.name)
+            while source_anchor_name is None and target_anchor.parent is not None:
+                target_anchor = target_anchor.parent
+                source_anchor_name = target_to_source.get(target_anchor.name)
+            if source_anchor_name is None or source_anchor_name == source_name:
+                continue
+            if not source_is_ancestor(source_anchor_name, source_name):
+                continue
+            while (
+                target_anchor.parent is not None
+                and target_to_source.get(target_anchor.parent.name) == source_anchor_name
+            ):
+                target_anchor = target_anchor.parent
+
+            target_path = []
+            current_target = target_bone
+            while current_target is not None and current_target.name != target_anchor.name:
+                target_path.append(current_target)
+                current_target = current_target.parent
+            if current_target is None or not target_path:
+                continue
+            target_path.reverse()
+
+            source_path = []
+            current_source = source_armature.data.bones.get(source_name)
+            while current_source is not None:
+                source_path.append(current_source)
+                if current_source.name == source_anchor_name:
+                    break
+                current_source = current_source.parent
+            if not source_path or source_path[-1].name != source_anchor_name:
+                continue
+            source_path.reverse()
+
+            target_points = [target_anchor.matrix_local.translation.copy()]
+            target_points.extend(bone.matrix_local.translation.copy() for bone in target_path)
+            target_fractions = normalized_chain_distances(target_points)[1:]
+            source_points = [bone.matrix_local.translation.copy() for bone in source_path]
+            source_fractions = normalized_chain_distances(source_points)
+            for bone, target_fraction in zip(target_path, target_fractions):
+                chain_rotation_targets[bone.name] = (
+                    tuple(source_bone.name for source_bone in source_path),
+                    tuple(source_fractions),
+                    target_fraction,
+                )
+        frame_start = 1 + motion["clip"]["start_frame"] - frame_origin
+        frame_end = frame_start + max(0, len(motion["frames"]) - 1)
+        action_frames = range(round(frame_start), round(frame_end) + 1)
+        target_samples = None if collect_g4mt_samples else {}
+        if target_samples is not None:
+            action = bpy.data.actions.new(name=motion["clip"]["name"] or "G4 Retargeted Animation")
+            action.use_fake_user = True
+            action.use_frame_range = True
+            action.frame_start = frame_start
+            action.frame_end = frame_end
+            armature.animation_data_create()
+            armature.animation_data.action = action
+        for bone in target_bones:
+            source_name = target_to_source.get(bone.name)
+            if source_name not in source_rest_world:
+                continue
+            if target_samples is not None:
+                armature.pose.bones[bone.name].rotation_mode = "QUATERNION"
+                target_samples[bone.name] = ([], [], [])
+        g4mt_samples = (
+            {bone.name: [] for bone in target_bones if bone.name in target_to_source}
+            if collect_g4mt_samples else None
+        )
+
+        skeleton = motion.get("skeleton") or {}
+        skeleton_names = skeleton.get("names") or []
+        skeleton_parents = skeleton.get("parents") or []
+        source_parent_names = {}
+        for index, name in enumerate(skeleton_names):
+            parent_index = skeleton_parents[index] if index < len(skeleton_parents) else -1
+            if 0 <= parent_index < len(skeleton_names) and parent_index != index:
+                source_parent_names[name] = skeleton_names[parent_index]
+        previous_rotations = {}
+        # Compose source poses from decoded channels instead of evaluating a source Action per frame.
+        for frame_index, _frame in enumerate(action_frames):
+            source_pose_matrices = {}
+            for bone in source_bones:
+                basis = Matrix.Identity(4)
+                track = source_tracks.get(bone.name)
+                correction = source_basis_correction.get(bone.name)
+                if track is not None and correction is not None:
+                    values = track["values"]
+                    animated_scale = list(values["scale"][frame_index])
+                    parent_track = source_tracks.get(source_parent_names.get(bone.name))
+                    if parent_track is not None:
+                        parent_scale = parent_track["values"]["scale"][frame_index]
+                        animated_scale = [
+                            value / parent_value if abs(parent_value) > 1e-9 else value
+                            for value, parent_value in zip(animated_scale, parent_scale)
+                        ]
+                    animated = source_matrix({
+                        "translation": values["translation"][frame_index],
+                        "rotation": values["rotation"][frame_index],
+                        "scale": animated_scale,
+                    })
+                    source_delta = source_rest.get(bone.name, animated).inverted_safe() @ animated
+                    blender_delta = correction.inverted_safe() @ source_delta @ correction
+                    location, rotation, scale = blender_delta.decompose()
+                    previous_rotation = previous_rotations.get(bone.name)
+                    if previous_rotation is not None and previous_rotation.dot(rotation) < 0.0:
+                        rotation.negate()
+                    previous_rotations[bone.name] = rotation.copy()
+                    animated_paths = set(track.get("animated_paths") or ())
+                    if "translation" not in animated_paths:
+                        location = Vector((0.0, 0.0, 0.0))
+                    if "rotation" not in animated_paths:
+                        rotation = Quaternion((1.0, 0.0, 0.0, 0.0))
+                    if "scale" not in animated_paths:
+                        scale = Vector((1.0, 1.0, 1.0))
+                    basis = Matrix.LocRotScale(location, rotation, scale)
+
+                parent_pose = source_pose_matrices.get(bone.parent.name) if bone.parent else None
+                local_rest = source_local_rest[bone.name]
+                source_pose_matrices[bone.name] = (
+                    parent_pose @ local_rest @ basis if parent_pose is not None
+                    else local_rest @ basis
+                )
+
+            source_world_deltas = {}
+            for source_name, source_rest_rotation in source_rest_world.items():
+                source_pose = source_pose_matrices.get(source_name)
+                if source_pose is None:
+                    continue
+                source_pose_world = source_world_rotation @ source_pose.to_quaternion()
+                source_world_deltas[source_name] = source_pose_world @ source_rest_rotation.inverted()
+
+            def interpolated_source_delta(source_names, source_fractions, target_fraction):
+                if len(source_names) == 1:
+                    return source_world_deltas[source_names[0]]
+                for index in range(1, len(source_fractions)):
+                    if target_fraction <= source_fractions[index]:
+                        lower = source_fractions[index - 1]
+                        upper = source_fractions[index]
+                        weight = (target_fraction - lower) / max(upper - lower, 1e-8)
+                        return source_world_deltas[source_names[index - 1]].slerp(
+                            source_world_deltas[source_names[index]], weight
+                        )
+                return source_world_deltas[source_names[-1]]
+
             pose_matrices = {}
             for bone in target_bones:
                 local_rest = rest_local[bone.name]
                 parent_pose = pose_matrices.get(bone.parent.name) if bone.parent else None
                 inherited = parent_pose @ local_rest if parent_pose is not None else local_rest.copy()
                 source_name = target_to_source.get(bone.name)
-                source_pose = source_armature.pose.bones.get(source_name) if source_name else None
-                if source_pose is not None and source_name in source_rest_world:
-                    source_pose_world = source_world_rotation @ source_pose.matrix.to_quaternion()
+                source_pose = source_pose_matrices.get(source_name) if source_name else None
+                has_source_pose = source_pose is not None and source_name in source_world_deltas
+                chain_rotation = chain_rotation_targets.get(bone.name)
+                if has_source_pose or chain_rotation is not None:
                     target_rest_world = target_world_rotation @ bone.matrix_local.to_quaternion()
-                    desired_world = source_pose_world @ source_rest_world[source_name].inverted() @ target_rest_world
+                    if chain_rotation is not None:
+                        source_names, source_fractions, target_fraction = chain_rotation
+                        source_world_delta = interpolated_source_delta(
+                            source_names, source_fractions, target_fraction
+                        )
+                    else:
+                        source_world_delta = source_world_deltas[source_name]
+                    desired_world = source_world_delta @ target_rest_world
                     desired_local = target_inverse_rotation @ desired_world
                     location, _rotation, scale = inherited.decompose()
-                    source_bone = source_armature.data.bones[source_name]
-                    source_parent = source_bone.parent
-                    if source_parent is not None:
-                        source_parent_pose = source_armature.pose.bones[source_parent.name]
-                        source_local_pose = source_parent_pose.matrix.inverted_safe() @ source_pose.matrix
-                        source_local_rest = source_parent.matrix_local.inverted_safe() @ source_bone.matrix_local
-                        source_parent_world = source_world_rotation @ source_parent_pose.matrix.to_quaternion()
-                    else:
-                        source_local_pose = source_pose.matrix
-                        source_local_rest = source_bone.matrix_local
-                        source_parent_world = source_world_rotation
-                    source_translation_delta = source_local_pose.translation - source_local_rest.translation
-                    target_translation_delta = target_inverse_rotation @ (source_parent_world @ source_translation_delta)
-                    location += target_translation_delta * translation_scale
+                    if has_source_pose:
+                        source_bone = source_armature.data.bones[source_name]
+                        source_parent = source_bone.parent
+                        if source_parent is not None:
+                            source_parent_pose = source_pose_matrices[source_parent.name]
+                            source_local_pose = source_parent_pose.inverted_safe() @ source_pose
+                            source_parent_world = source_world_rotation @ source_parent_pose.to_quaternion()
+                        else:
+                            source_local_pose = source_pose
+                            source_parent_world = source_world_rotation
+                        source_translation_delta = (
+                            source_local_pose.translation - source_local_rest[source_name].translation
+                        )
+                        carries_root_translation = (
+                            source_name in {"c_global_0_0", "c_c_1_0"} or source_parent is None
+                        ) and translation_targets.get(source_name) == bone
+                        if carries_root_translation:
+                            target_translation_delta = target_inverse_transform @ (
+                                source_parent_world @ source_translation_delta
+                            )
+                            translation_scale = (
+                                pelvis_translation_scale
+                                if source_name == "c_c_1_0" else body_translation_scale
+                            )
+                            location += target_translation_delta * translation_scale
                     pose_matrix = Matrix.LocRotScale(location, desired_local, scale)
                 else:
                     pose_matrix = inherited
                 pose_matrices[bone.name] = pose_matrix
-                if source_pose is None or source_name not in source_rest_world:
-                    continue
-                parent_pose = pose_matrices.get(bone.parent.name) if bone.parent else None
-                local_pose = parent_pose.inverted_safe() @ pose_matrix if parent_pose is not None else pose_matrix
-                basis = local_rest.inverted_safe() @ local_pose
-                location, rotation, scale = basis.decompose()
-                pose_bone = armature.pose.bones[bone.name]
-                pose_bone.location = location
-                pose_bone.rotation_mode = "QUATERNION"
-                pose_bone.rotation_quaternion = rotation
-                pose_bone.scale = scale
-                for data_path in ("location", "rotation_quaternion", "scale"):
-                    pose_bone.keyframe_insert(data_path=data_path, frame=frame, group=bone.name)
+                if target_samples is not None and source_pose is not None and source_name in source_rest_world:
+                    parent_pose = pose_matrices.get(bone.parent.name) if bone.parent else None
+                    local_pose = parent_pose.inverted_safe() @ pose_matrix if parent_pose is not None else pose_matrix
+                    basis = local_rest.inverted_safe() @ local_pose
+                    location, rotation, scale = basis.decompose()
+                    channels = target_samples[bone.name]
+                    channels[0].append(tuple(location))
+                    channels[1].append(tuple(rotation))
+                    channels[2].append(tuple(scale))
+            if g4mt_samples is not None:
+                for bone in target_bones:
+                    if bone.name not in g4mt_samples:
+                        continue
+                    parent_pose = pose_matrices.get(bone.parent.name) if bone.parent else None
+                    local_pose = (
+                        parent_pose.inverted_safe() @ pose_matrices[bone.name]
+                        if parent_pose is not None else pose_matrices[bone.name].copy()
+                    )
+                    location, rotation, scale = local_pose.decompose()
+                    g4mt_samples[bone.name].append(G4MTLocalTransform(
+                        translation=tuple(location),
+                        rotation_xyzw=(rotation.x, rotation.y, rotation.z, rotation.w),
+                        scale=tuple(scale),
+                    ))
+        if target_samples is not None:
+            curve_cache = {}
+            curve_samples = []
+            frames = tuple(action_frames)
+            for bone_name, channels in target_samples.items():
+                pose_bone = armature.pose.bones[bone_name]
+                for data_path, samples in zip(("location", "rotation_quaternion", "scale"), channels):
+                    path = pose_bone.path_from_id(data_path)
+                    for component in range(len(samples[0])):
+                        curve_cache[(path, component)] = None
+                        curve_samples.append((bone_name, path, component, samples))
+            for bone_name, path, component, samples in curve_samples:
+                append_curve_samples(
+                    action,
+                    curve_cache,
+                    path,
+                    component,
+                    bone_name,
+                    frames,
+                    [sample[component] for sample in samples],
+                    owner=armature,
+                )
 
-        action["g4_retarget_mapping"] = json.dumps(
-            {name: list(targets) for name, targets in source_to_target.items()},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        action["g4_retarget_unmapped_targets"] = json.dumps(
-            sorted(track["target_name"] for track in motion["tracks"]
-                   if track.get("target_name") and track["target_name"] not in source_to_target),
-            ensure_ascii=False,
-        )
-        return action, len(target_to_source)
+            slots = getattr(action, "slots", None)
+            if slots is not None and len(slots):
+                armature.animation_data.action_slot = slots[0]
+
+            action["g4_retarget_mapping"] = json.dumps(
+                {name: list(targets) for name, targets in source_to_target.items()},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            action["g4_retarget_unmapped_targets"] = json.dumps(
+                sorted(track["target_name"] for track in motion["tracks"]
+                       if track.get("target_name") and track["target_name"] not in source_to_target),
+                ensure_ascii=False,
+            )
+        g4mt_targets = None
+        if g4mt_samples is not None:
+            g4mt_target_bones = [bone for bone in target_bones if bone.name in g4mt_samples]
+            g4mt_target_indices = {
+                bone.name: index for index, bone in enumerate(g4mt_target_bones)
+            }
+            g4mt_targets = tuple(
+                G4MTTargetSamples(
+                    bone.name,
+                    g4mt_target_indices.get(bone.parent.name) if bone.parent else None,
+                    tuple(g4mt_samples[bone.name]),
+                )
+                for bone in g4mt_target_bones
+            )
+        return action, len(target_to_source), g4mt_targets
     except Exception:
         if action is not None and action.name in bpy.data.actions:
             bpy.data.actions.remove(action, do_unlink=True)
         raise
     finally:
-        scene.frame_set(previous_frame)
-        if source_action is not None and source_action.name in bpy.data.actions:
-            bpy.data.actions.remove(source_action, do_unlink=True)
         armature_data = source_armature.data
         bpy.data.objects.remove(source_armature, do_unlink=True)
         if armature_data.name in bpy.data.armatures:
@@ -1692,6 +2232,160 @@ def g4mt_import_settings(operator) -> str:
             "set_scene_fps": operator.set_scene_fps,
         }
     )
+
+
+def tag_g4mt_action(action, source: str, clip: dict, rig_id: str, family_id: str,
+                    package_entry_name: str | None, part_armature=None) -> None:
+    action["g4mt_source"] = source
+    action["g4mt_clip_index"] = clip["index"]
+    action["g4mt_clip_name"] = clip["name"]
+    action["g4mt_rig_id"] = rig_id
+    action["g4mt_family_import_id"] = family_id
+    if package_entry_name is not None:
+        action["g4pk_entry"] = package_entry_name
+    if part_armature is not None:
+        action["g4mt_part_armature"] = part_armature.name
+
+
+def tag_character_part_actions(actor, motion: dict, source: str, rig_id: str,
+                               family_id: str, package_entry_name: str | None) -> None:
+    for part in character_part_armatures(actor):
+        action = part.animation_data.action if part.animation_data else None
+        if action is not None:
+            tag_g4mt_action(
+                action,
+                source,
+                motion["clip"],
+                rig_id,
+                family_id,
+                package_entry_name,
+                part,
+            )
+
+
+def imported_g4mt_family_actions(armature) -> list:
+    action = armature.animation_data.action if armature and armature.animation_data else None
+    if action is None or action.get("g4mt_part_armature"):
+        return []
+    family_id = action.get("g4mt_family_import_id")
+    rig_id = action.get("g4mt_rig_id")
+    source = action.get("g4mt_source")
+    if not family_id or not rig_id or not source:
+        return []
+    entry_name = action.get("g4pk_entry")
+    return sorted(
+        (
+            candidate for candidate in bpy.data.actions
+            if candidate.get("g4mt_family_import_id") == family_id
+            and candidate.get("g4mt_rig_id") == rig_id
+            and candidate.get("g4mt_source") == source
+            and candidate.get("g4pk_entry") == entry_name
+            and not candidate.get("g4mt_part_armature")
+        ),
+        key=lambda candidate: candidate.get("g4mt_clip_index", -1),
+    )
+
+
+_G4MT_ACTION_MENU_ITEMS = ()
+_G4MT_ACTION_MENU_NAMES = {}
+
+
+def g4mt_action_menu_items(_operator, context):
+    global _G4MT_ACTION_MENU_ITEMS
+    global _G4MT_ACTION_MENU_NAMES
+    actions = imported_g4mt_family_actions(context.active_object)
+    _G4MT_ACTION_MENU_NAMES = {
+        f"CLIP_{index}": action.name
+        for index, action in enumerate(actions)
+    }
+    _G4MT_ACTION_MENU_ITEMS = tuple(
+        (
+            f"CLIP_{index}",
+            f"{action.get('g4mt_clip_index', '?')}: {action.get('g4mt_clip_name', action.name)}",
+            f"Clip {action.get('g4mt_clip_index', '?')} from the imported G4MT bank",
+            "ACTION",
+            index,
+        )
+        for index, action in enumerate(actions)
+    ) or (("__NONE", "No imported clips", "Import a G4MT bank first", "INFO", 0),)
+    return _G4MT_ACTION_MENU_ITEMS
+
+
+def assign_action_with_slot(armature, action) -> None:
+    animation_data = armature.animation_data_create()
+    animation_data.action = action
+    slots = getattr(action, "slots", None)
+    if slots is not None and len(slots):
+        animation_data.action_slot = slots[0]
+
+
+class VIEW3D_OT_level5_g4mt_select_action(Operator):
+    bl_idname = "view3d.level5_g4mt_select_action"
+    bl_label = "Select Imported G4MT Clip"
+
+    action_name: EnumProperty(name="Animation", items=g4mt_action_menu_items)
+
+    def execute(self, context):
+        armature = context.active_object
+        family = imported_g4mt_family_actions(armature)
+        action = bpy.data.actions.get(_G4MT_ACTION_MENU_NAMES.get(self.action_name, ""))
+        if action is None or action not in family:
+            self.report({"ERROR"}, "The selected action is no longer part of this imported bank")
+            return {"CANCELLED"}
+
+        assign_action_with_slot(armature, action)
+        for part in character_part_armatures(armature):
+            part_action = next(
+                (
+                    candidate for candidate in bpy.data.actions
+                    if candidate.get("g4mt_family_import_id") == action.get("g4mt_family_import_id")
+                    and candidate.get("g4mt_clip_index") == action.get("g4mt_clip_index")
+                    and candidate.get("g4mt_part_armature") == part.name
+                ),
+                None,
+            )
+            if part_action is not None:
+                assign_action_with_slot(part, part_action)
+
+        context.scene.frame_set(context.scene.frame_current)
+        self.report({"INFO"}, f"Active G4MT clip: {action.get('g4mt_clip_name', action.name)}")
+        return {"FINISHED"}
+
+
+class VIEW3D_PT_level5_g4mt_bank(Panel):
+    bl_label = "Imported G4MT Bank"
+    bl_idname = "VIEW3D_PT_level5_g4mt_bank"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "G4"
+
+    @classmethod
+    def poll(cls, context):
+        return len(imported_g4mt_family_actions(context.active_object)) > 0
+
+    def draw(self, context):
+        armature = context.active_object
+        actions = imported_g4mt_family_actions(armature)
+        current = armature.animation_data.action
+        current_index = actions.index(current) + 1 if current in actions else 0
+        self.layout.operator_menu_enum(
+            VIEW3D_OT_level5_g4mt_select_action.bl_idname,
+            "action_name",
+            text=f"{current_index}/{len(actions)}  {current.get('g4mt_clip_name', current.name)}",
+            icon="ACTION",
+        )
+        self.layout.operator(
+            EXPORT_OT_level5_g4mt_bank_family.bl_idname,
+            text="Retarget Original Bank Family",
+            icon="EXPORT",
+        )
+        self.layout.operator(
+            EXPORT_OT_level5_g4mt_victorytool_family.bl_idname,
+            text="Export Animation Family for VictoryTool",
+            icon="EXPORT",
+        )
+        if len(actions) == 1:
+            self.layout.label(text="Only one clip was imported into this Action family", icon="INFO")
 
 
 def character_model_start_path() -> str:
@@ -2193,7 +2887,9 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 refresh_progress(percent, f"Importing animation: {current}/{progress_total} bone tracks")
 
             if semantic_retarget:
-                action, keyed_bones = create_retargeted_action(armature, motion, frame_origin)
+                action, keyed_bones, _g4mt_targets = create_retargeted_action(
+                    armature, motion, frame_origin, False
+                )
             else:
                 action, keyed_bones = create_action(
                     armature,
@@ -2209,6 +2905,9 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                 motion,
                 frame_origin,
                 progress_callback=lambda completed, total: update_progress(completed, total, track_count),
+            )
+            tag_character_part_actions(
+                armature, motion, str(path), rig_id, family_import_id, package_entry_name
             )
             imported_clip_count = 1
             if self.import_all_clips:
@@ -2228,25 +2927,26 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
                         extra_motion = decode_motion(g4mt_path, str(clip["index"]), skeleton_hint)
                         resolve_track_names_from_armature(extra_motion, armature)
                         if semantic_retarget:
-                            extra_action, extra_keyed = create_retargeted_action(
+                            extra_action, extra_keyed, _extra_g4mt_targets = create_retargeted_action(
                                 armature,
                                 extra_motion,
                                 clip["start_frame"],
+                                False,
                             )
                         else:
                             extra_action, extra_keyed = create_action(armature, extra_motion)
                         if extra_keyed == 0:
                             bpy.data.actions.remove(extra_action)
                             raise RuntimeError(f"Animation {clip['name']} has no matching bone tracks")
-                        extra_action["g4mt_source"] = str(path)
-                        extra_action["g4mt_clip_index"] = clip["index"]
-                        extra_action["g4mt_clip_name"] = clip["name"]
-                        extra_action["g4mt_rig_id"] = rig_id
-                        extra_action["g4mt_family_import_id"] = family_import_id
-                        if package_entry_name is not None:
-                            extra_action["g4pk_entry"] = package_entry_name
+                        tag_g4mt_action(
+                            extra_action, str(path), clip, rig_id, family_import_id, package_entry_name
+                        )
                         if not semantic_retarget:
                             animate_character_parts(armature, extra_motion, clip["start_frame"])
+                            tag_character_part_actions(
+                                armature, extra_motion, str(path), rig_id, family_import_id,
+                                package_entry_name,
+                            )
                         imported_clip_count += 1
                 finally:
                     armature.animation_data.action = action
@@ -2280,18 +2980,12 @@ class IMPORT_OT_level5_g4mt(Operator, ImportHelper):
             context.scene.frame_set(1)
             context.view_layer.objects.active = armature
             armature.select_set(True)
-            action["g4mt_source"] = str(path)
-            action["g4mt_clip_index"] = motion["clip"]["index"]
-            action["g4mt_clip_name"] = motion["clip"]["name"]
-            action["g4mt_rig_id"] = rig_id
-            action["g4mt_family_import_id"] = family_import_id
+            tag_g4mt_action(action, str(path), motion["clip"], rig_id, family_import_id, package_entry_name)
             action["g4_source_frame_origin"] = frame_origin
             if model_path is not None:
                 action["g4_model_source"] = str(model_path)
             if skeleton_hint is not None:
                 action["g4_skeleton_source"] = str(skeleton_hint)
-            if package_entry_name is not None:
-                action["g4pk_entry"] = package_entry_name
             if camera_path is not None and camera_motion is not None:
                 action["g4cm_source"] = str(camera_path)
                 action["g4cm_clip_name"] = camera_motion["clip"]["name"]
@@ -2773,8 +3467,10 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
             suffix = re.search(r"(\d{5})$", model.stem)
             if suffix:
                 number = int(suffix.group(1)) // 10
-                # Both c0010 and c0011 naming families occur in native events.
-                cut = next((name for name in (f"c{number:04d}", f"c{number + 1:04d}")
+                # Event effect IDs are one-based relative to the five-digit suffix.
+                # Prefer that native mapping when both neighboring cuts exist;
+                # retain the direct mapping for older event families.
+                cut = next((name for name in (f"c{number + 1:04d}", f"c{number:04d}")
                             if name in available_cuts), None)
             shader_names = set()
             for source in (particle, next(asset_directory.glob("*.objbin"), None)):
@@ -2896,7 +3592,8 @@ def import_event_effect_models(
     motions: dict[str, dict],
     cut_starts: dict[str, int],
     event_end: int,
-) -> list[object]:
+    progress,
+):
     imported_roots = []
     failed_models = []
     by_cut = defaultdict(list)
@@ -2909,6 +3606,7 @@ def import_event_effect_models(
         following = [frame for frame in cut_starts.values() if frame > cut_starts[cut]]
         end_frame = min(following) if following else event_end + 1
         for effect_index, candidate in enumerate(cut_candidates, 1):
+            yield progress(f"Importing event effect: {Path(candidate['model']).name}")
             model_path = Path(candidate["model"])
             before = set(bpy.data.objects)
             scene = bpy.context.scene
@@ -2953,7 +3651,7 @@ def import_event_effect_models(
                 root["g4_event_effect_particle_emitters"] = json.dumps(
                     particle_library_metadata(particle_library)
                 )
-                from .shading.particle_nodes import apply_particle_library_clock
+                from ..shading.particle_nodes import apply_particle_library_clock
                 root["g4_event_effect_particle_clocks"] = apply_particle_library_clock(
                     imported, particle_library, cut_starts[cut], scene
                 )
@@ -3284,7 +3982,7 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         keyed_material = False
         for _, frame, parameters, _ in keyed:
             if primary_shadow is not None and primary_shadow.type == "RGB":
-                from .shading.character_lighting import animate_capture_lighting
+                from ..shading.character_lighting import animate_capture_lighting
                 animate_capture_lighting(material.node_tree.nodes, parameters, frame)
                 keyed_material = True
                 continue
@@ -3402,7 +4100,7 @@ def import_event_character_lighting(directory: Path, cut_starts: dict[str, int])
         {cut: slots for cut, _, _, slots in keyed}, sort_keys=True
     )
     scene["g4_event_light_count"] = len(light_keys)
-    from .shading.character_lighting import optimize_event_lighting
+    from ..shading.character_lighting import optimize_event_lighting
     optimize_event_lighting(scene)
     return light_objects[0] if light_objects else None
 
@@ -3983,7 +4681,7 @@ def import_event_actor(
             )
         cut_frames.append((cut, strip_start))
         keyed_bones += keyed
-        progress()
+        yield progress(f"Imported event cut: {cut}")
     armature.animation_data.action = None
     animate_event_actor_visibility(armature, {cut for cut, _ in cut_frames}, cut_starts)
     return armature, keyed_bones, cut_frames
@@ -4078,7 +4776,7 @@ def import_event_camera(
             raise RuntimeError(
                 f"Could not add camera strip {clip['name']} at {start} for {duration} frames"
             ) from exc
-        progress()
+        yield progress(f"Importing event camera: {clip['name']}")
     if camera_object is None:
         raise RuntimeError(f"No camera clips found in {path}")
     camera_object["g4cm_source"] = str(path)
@@ -4217,7 +4915,7 @@ def event_uses_modular_characters(directory: Path, prefs) -> bool:
 
 def model_importer_module():
     """Return the loaded model-importer package without creating an import cycle."""
-    return sys.modules.get(__package__) if __package__ else None
+    return sys.modules.get(__package__.split(".")[0]) if __package__ else None
 
 
 def resolve_event_setup_actor_model(directory: Path, actor: str, prefs) -> Path | None:
@@ -4514,6 +5212,10 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
     bl_label = "Import Level-5 G4 Event Folder"
     bl_options = {"REGISTER", "UNDO"}
 
+    progress_text: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_value: FloatProperty(options={"HIDDEN", "SKIP_SAVE"}, min=0.0, max=1.0)
+    progress_window_open: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
+
     directory: StringProperty(
         name="Event Folder",
         subtype="DIR_PATH",
@@ -4552,12 +5254,58 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         return {"RUNNING_MODAL"}
 
     def draw(self, context):
+        if self.progress_window_open:
+            self.layout.label(text=self.progress_text, icon="FILE_REFRESH")
+            self.layout.progress(factor=self.progress_value, type="BAR", text="Event import")
+            return
         layout = self.layout
         layout.prop(self, "import_camera")
         layout.prop(self, "import_effects")
         layout.prop(self, "prompt_character_parts")
 
     def execute(self, context):
+        directory = Path(bpy.path.abspath(self.directory or ""))
+        if not directory.is_dir():
+            self.report({"ERROR"}, f"Event folder not found: {directory}")
+            return {"CANCELLED"}
+        packages = collect_event_packages(directory)
+        if not packages:
+            self.report({"ERROR"}, f"No character G4PK cuts found in {directory}")
+            return {"CANCELLED"}
+        character_actors = sorted(actor for actor in packages if actor.startswith("c"))
+        if (
+            self.prompt_character_parts
+            and character_actors
+            and not self.character_parts_json
+            and event_uses_modular_characters(directory, addon_preferences())
+        ):
+            invoke_event_parts_dialog(
+                directory,
+                self.import_camera,
+                self.import_effects,
+                character_actors,
+            )
+            return {"FINISHED"}
+
+        addon = sys.modules.get(__package__.split(".")[0])
+        start_progress = getattr(addon, "start_import_progress", None) if addon else None
+        if start_progress is None:
+            self.report({"ERROR"}, "The G4 model importer progress handler is unavailable")
+            return {"CANCELLED"}
+        return start_progress(
+            self,
+            context,
+            1,
+            "Preparing event import…",
+            self._import_event_task(context),
+        )
+
+    def modal(self, context, event):
+        addon = sys.modules.get(__package__.split(".")[0])
+        return addon.modal_import_progress(self, context, event)
+
+    def _import_event_task(self, context):
+        yield 0, 1, "Preparing event import…"
         directory = Path(bpy.path.abspath(self.directory or ""))
         log_path = event_import_log_path()
         try:
@@ -4621,7 +5369,9 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         total_steps = sum(len(paths) for paths in packages.values()) + camera_clip_count
         completed_steps = 0
         window_manager = context.window_manager
+        window_manager.progress_end()
         window_manager.progress_begin(0, max(1, total_steps))
+        self._import_progress_total = max(1, total_steps)
         last_progress_refresh = 0.0
 
         def refresh_batch_progress(status: str):
@@ -4630,20 +5380,18 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             if now - last_progress_refresh < 0.12 and completed_steps < total_steps:
                 return
             last_progress_refresh = now
+            self.progress_text = status
+            self.progress_value = min(1.0, max(0.0, completed_steps / max(1, total_steps)))
             context.workspace.status_text_set(status)
-            for window in window_manager.windows:
-                for area in window.screen.areas:
-                    area.tag_redraw()
-            try:
-                bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
-            except RuntimeError:
-                pass
 
-        def progress():
+        def progress(status: str = ""):
             nonlocal completed_steps
             completed_steps += 1
             window_manager.progress_update(completed_steps)
-            refresh_batch_progress(f"Importing event: {completed_steps}/{total_steps} cuts")
+            refresh_batch_progress(
+                status or f"Importing event: {completed_steps}/{total_steps} cuts"
+            )
+            return completed_steps, total_steps, self.progress_text
 
         refresh_batch_progress("Preparing G4 event import…")
 
@@ -4654,6 +5402,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         point_motions = {}
         event_log = [f"event={directory}", f"actors={','.join(character_actors)}"]
         write_event_import_log(event_log)
+        yield completed_steps, total_steps, "Resolving event characters and effects…"
         try:
             actor_models = resolve_event_actor_models(directory, prefs)
             point_assignments = resolve_event_actor_point_assignments(directory, prefs)
@@ -4676,15 +5425,25 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         try:
             with tempfile.TemporaryDirectory(prefix="level5_g4_event_") as temporary:
                 temporary_directory = Path(temporary)
+                yield completed_steps, total_steps, "Reading event timeline…"
                 frame_origin, frame_end, cut_starts = event_timeline_layout(
                     packages,
                     temporary_directory,
                     camera_paths[0] if camera_paths else None,
                 )
+                total_steps += sum(
+                    1 for candidate in effect_candidates
+                    if candidate.get("cut") in cut_starts
+                )
+                window_manager.progress_end()
+                window_manager.progress_begin(0, max(1, total_steps))
+                self._import_progress_total = max(1, total_steps)
+                yield completed_steps, total_steps, "Decoding character placement…"
                 point_motions = (
                     decode_event_point_motions(directory, prefs, temporary_directory) if point_assignments else {}
                 )
                 event_log.append(f"placement_cuts={len(point_assignments)}; point_motions={len(point_motions)}")
+                yield completed_steps, total_steps, "Decoding event effects…"
                 effect_motions = (
                     decode_event_effect_motions(directory, prefs, temporary_directory)
                     if self.import_effects else {}
@@ -4701,11 +5460,23 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                     defaults = event_part_defaults(directory, actor, prefs)
                     overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {})
                     for key, value in defaults.items():
-                        if event_part_needs_default(actor_parts.get(key, ""), key, overrides):
+                        current = actor_parts.get(key, "")
+                        current_path = Path(bpy.path.abspath(current)) if current else None
+                        if (
+                            event_part_needs_default(current, key, overrides)
+                            or (current_path is not None and not current_path.is_file())
+                        ):
                             actor_parts[key] = value
+                    event_log.append(
+                        f"{actor}: parts=" + json.dumps(
+                            {key: actor_parts.get(key, "") for key in ("head", "body", "shoes", "accessory")},
+                            sort_keys=True,
+                        )
+                    )
                     actor_base = event_actor_base_id(actor)
                     try:
-                        armature, _, actor_cut_frames = import_event_actor(
+                        yield completed_steps, total_steps, f"Importing character: {actor}"
+                        armature, _, actor_cut_frames = yield from import_event_actor(
                             actor=actor,
                             packages=actor_packages,
                             prefs=prefs,
@@ -4740,16 +5511,32 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                         )
                     except Exception as exc:
                         skipped_actors[actor] = str(exc)
-                        event_log.append(f"{actor}: ERROR {exc}")
+                        error_trace = traceback.format_exc()
+                        event_log.append(f"{actor}: ERROR {exc}\n{error_trace}")
+                        append_event_file_log(f"{actor}: ERROR {exc}\n{error_trace}")
+                        write_event_import_log(event_log)
                         for _ in actor_packages:
                             progress()
                         continue
                     actors.append(armature)
+                    if event_log is not None:
+                        attached_parts = sorted({
+                            obj.get("g4_character_part_source", "")
+                            for obj in event_actor_objects(armature)
+                            if obj.get("g4_character_part_source")
+                        })
+                        event_log.append(f"{actor}: attached_parts={json.dumps(attached_parts)}")
                     cut_frames.update(actor_cut_frames)
                 import_event_character_lighting(directory, cut_starts)
                 event_log.append("stage=importing-effects")
                 write_event_import_log(event_log)
-                effect_roots = import_event_effect_models(effect_candidates, effect_motions, cut_starts, frame_end-frame_origin+1)
+                effect_roots = yield from import_event_effect_models(
+                    effect_candidates,
+                    effect_motions,
+                    cut_starts,
+                    frame_end-frame_origin+1,
+                    progress,
+                )
                 joined_effect_meshes = join_event_effect_meshes(context.scene)
                 shared_particle_groups = deduplicate_particle_geometry_groups(context.scene)
                 event_log.append(f"effect_roots={len(effect_roots)}")
@@ -4757,7 +5544,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                 event_log.append(f"shared_particle_groups={shared_particle_groups}")
                 write_event_import_log(event_log)
                 if camera_paths:
-                    camera_object, _ = import_event_camera(
+                    camera_object, _ = yield from import_event_camera(
                         camera_paths[0],
                         context.collection,
                         frame_origin,
@@ -4806,7 +5593,6 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         finally:
-            window_manager.progress_end()
             context.workspace.status_text_set(None)
 
         message = (
@@ -4819,7 +5605,7 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
         if p3lip_controllers:
             message += f", {len(p3lip_controllers)} P3LIP tracks"
         if skipped_actors:
-            message += f"; skipped {len(skipped_actors)} unresolved actors"
+            message += f"; skipped {len(skipped_actors)} actors; details are in G4 Event Import Log"
         placement_warning = has_event_point_packages and (not point_assignments or not point_motions)
         if placement_warning:
             message += "; event point placement data was not fully resolved"
@@ -4977,6 +5763,22 @@ def sample_action_for_g4mt(armature, action, scene, view_layer):
     )
 
 
+def character_bank_id_from_path(path: Path) -> str:
+    bank = re.fullmatch(r"(c\d{4,10})_p\d{3}", path.stem, re.IGNORECASE)
+    if bank is not None:
+        return bank.group(1).lower()
+    parent = path.parent.name.lower()
+    if re.fullmatch(r"c\d{4,10}", parent):
+        return parent
+    candidates = [
+        identifier
+        for part in reversed(path.parts)
+        for identifier in model_identifiers(Path(part))
+        if identifier.startswith("c")
+    ]
+    return candidates[0] if candidates else ""
+
+
 class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
     bl_idname = "export_scene.level5_g4mt"
     bl_label = "Export G4MT Animation Candidate"
@@ -4987,6 +5789,13 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
     template_path: StringProperty(name="G4MT Template", subtype="FILE_PATH")
     template_clip_index: IntProperty(name="Template Clip Index", default=0, min=0)
     clip_name: StringProperty(name="Clip Name")
+    related_bank_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    related_bank_summary: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    export_all_clips: BoolProperty(
+        name="Export All Clips from Imported Bank",
+        default=False,
+        description="Write every imported clip from this bank family; turn off to write only the active Action",
+    )
 
     def invoke(self, context, event):
         armature = context.active_object
@@ -4997,22 +5806,42 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         )
         if action is not None:
             self.clip_name = action.get("g4mt_clip_name", action.name)
+            clip_index = action.get("g4mt_clip_index")
+            if isinstance(clip_index, int) and clip_index >= 0:
+                self.template_clip_index = clip_index
             source = action.get("g4mt_source")
             if source and Path(source).suffix.lower() in {".g4mt", ".g4pk"}:
                 self.template_path = source
                 self.filepath = str(generated_g4mt_output_path(armature, Path(source)) or
                                     Path(source).with_name(f"{Path(source).stem}_candidate.g4mt"))
+                bank_id = character_bank_id_from_path(Path(source))
+                if bank_id:
+                    self.related_bank_id = bank_id
+                    character_count, event_count = find_animation_bank_resources(
+                        self.related_bank_id,
+                        candidate_data_roots(Path(source), addon_preferences().raw_data_root),
+                    )
+                    self.related_bank_summary = (
+                        f"Bank ID {self.related_bank_id}: {character_count} character and "
+                        f"{event_count} event resources found"
+                    )
         return ExportHelper.invoke(self, context, event)
 
     def draw(self, context):
         self.layout.prop(self, "template_path")
         self.layout.prop(self, "template_clip_index")
         self.layout.prop(self, "clip_name")
+        if self.related_bank_summary:
+            self.layout.label(text=self.related_bank_summary, icon="FILE_FOLDER")
+            self.layout.label(text="The output template below is still exported on its own.", icon="INFO")
         active_object = context.active_object
         action = active_object.animation_data.action if active_object and active_object.animation_data else None
-        if action and action.get("g4mt_family_import_id"):
-            self.layout.label(text="Exports all clips from this imported rig family.", icon="ACTION")
-        self.layout.label(text="External rig axes are converted to G4 axes on export.", icon="INFO")
+        if imported_g4mt_family_actions(active_object):
+            self.layout.prop(self, "export_all_clips")
+            if self.export_all_clips:
+                self.layout.label(text="All clips in this imported rig family will be written.", icon="ACTION")
+            else:
+                self.layout.label(text="Only the active Action will be written.", icon="ACTION")
 
     def execute(self, context):
         armature = context.active_object
@@ -5062,7 +5891,7 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
                           and candidate.get("g4mt_family_import_id") == family_id
                           and candidate.get("g4mt_source") == source
                           and candidate.get("g4pk_entry") == action.get("g4pk_entry")]
-            if family:
+            if family and self.export_all_clips:
                 indices = [candidate.get("g4mt_clip_index") for candidate in family]
                 if any(not isinstance(index, int) or not 0 <= index < len(bank.clips) for index in indices):
                     raise ValueError("Imported family contains a clip index outside the selected G4MT template")
@@ -5105,6 +5934,1051 @@ class EXPORT_OT_level5_g4mt(Operator, ExportHelper):
         return {"FINISHED"}
 
 
+def ensure_native_motion_helpers(armature) -> None:
+    if armature is None or armature.type != "ARMATURE":
+        raise ValueError("Select the target armature")
+    if armature.mode != "OBJECT":
+        raise RuntimeError("Switch the target armature to Object Mode before exporting")
+
+    view_layer = bpy.context.view_layer
+    previous_active = view_layer.objects.active
+    selection = {obj.name: obj.select_get() for obj in view_layer.objects}
+    try:
+        for obj in view_layer.objects:
+            obj.select_set(False)
+        armature.select_set(True)
+        view_layer.objects.active = armature
+        bpy.ops.object.mode_set(mode="EDIT")
+        bones = armature.data.edit_bones
+
+        def get_or_create(name: str):
+            bone = bones.get(name)
+            if bone is None:
+                bone = bones.new(name)
+                bone.head = (0.0, 0.0, 0.0)
+                bone.tail = (0.0, 0.1, 0.0)
+                bone.use_deform = False
+            return bone
+
+        output = get_or_create("output")
+        bounding_box = get_or_create("boundingBox")
+        global_root = get_or_create("c_global_0_0")
+        ball = get_or_create("c_ball_1_0")
+        output.parent = None
+        bounding_box.parent = output
+        global_root.parent = output
+        ball.parent = global_root
+        for bone in bones:
+            if bone.name not in {"output", "boundingBox", "c_global_0_0", "c_ball_1_0"} and bone.parent is None:
+                bone.parent = global_root
+                bone.use_connect = False
+    finally:
+        if armature.mode == "EDIT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        for obj in view_layer.objects:
+            obj.select_set(selection.get(obj.name, False))
+        view_layer.objects.active = previous_active
+
+
+def source_skeleton_for_bank(resource: Path, bank_id: str, data_root: Path, override: Path | None) -> Path | None:
+    if override is not None:
+        return valid_skeleton_path(override)
+    model_root = data_root / "common" / "chr" / bank_id
+    for suffix in (".g4sk", ".g4pkm", ".g4md"):
+        model = model_root / f"{bank_id}{suffix}"
+        if model.is_file():
+            skeleton = valid_skeleton_path(model) if suffix == ".g4sk" else resolve_skeleton_path(model)
+            if skeleton is not None:
+                return skeleton
+    model_path = resolve_model_path(resource, str(data_root))
+    skeleton = resolve_skeleton_path(model_path)
+    if skeleton is not None:
+        return skeleton
+    skeleton = valid_skeleton_path(resource)
+    if skeleton is not None:
+        return skeleton
+    for index, (skeleton_data, _source) in enumerate(g4sk_entries_from_candidate(resource)):
+        cache_root = Path(tempfile.gettempdir()) / "level5_g4sk_blender"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_key = zlib.crc32(f"{data_root}:{bank_id}:{resource}:{index}".encode("utf-8")) & 0xFFFFFFFF
+        destination = cache_root / f"{cache_key:08x}.g4sk"
+        if not destination.is_file() or destination.read_bytes() != skeleton_data:
+            destination.write_bytes(skeleton_data)
+        return destination
+    return None
+
+
+def retarget_g4mt_payload(template: bytes, resource: Path, entry_name: str, skeleton_path: Path,
+                          armature, scene, view_layer):
+    bank = parse_g4mt_bank(template, f"{resource}::{entry_name}")
+    playable = [clip for clip in bank.clips if not clip.flags & 1]
+    if not playable:
+        return template
+
+    animation_data = armature.animation_data_create()
+    original_action = animation_data.action
+    original_slot = getattr(animation_data, "action_slot", None)
+    original_frame = scene.frame_current
+    original_pose = {
+        bone.name: (
+            bone.location.copy(), bone.rotation_mode, bone.rotation_euler.copy(),
+            bone.rotation_quaternion.copy(), tuple(bone.rotation_axis_angle), bone.scale.copy(),
+        )
+        for bone in armature.pose.bones
+    }
+    handle, temporary_name = tempfile.mkstemp(prefix="level5_g4mt_bank_", suffix=".g4mt")
+    os.close(handle)
+    temporary_path = Path(temporary_name)
+    clips = []
+    try:
+        temporary_path.write_bytes(template)
+        parsed_motion_bank, motion_data, motion_skeleton = prepare_motion_bank(
+            temporary_path, skeleton_path
+        )
+        mapping_motion = {
+            "tracks": [
+                {"target_name": name}
+                for name in dict.fromkeys((*motion_skeleton["names"], *(bone.name for bone in armature.data.bones)))
+            ]
+        }
+        resolve_track_names_from_armature(mapping_motion, armature)
+        target_joint_mapping = {
+            track["target_name"]: tuple(track.get("armature_bone_names") or ())
+            for track in mapping_motion["tracks"]
+        }
+        target_names_by_hash = {
+            zlib.crc32(bone.name.encode("utf-8")) & 0xFFFFFFFF: bone.name
+            for bone in armature.data.bones
+        }
+        for clip_number, clip in enumerate(playable, 1):
+            motion = decode_motion_from_bank(
+                resource, str(clip.index), parsed_motion_bank, motion_data, motion_skeleton
+            )
+            for track in motion["tracks"]:
+                name = track.get("target_name")
+                if not name:
+                    target_hash = track.get("target_hash")
+                    try:
+                        target_hash = int(target_hash, 16) if isinstance(target_hash, str) else int(target_hash)
+                    except (TypeError, ValueError):
+                        target_hash = None
+                    name = target_names_by_hash.get(target_hash)
+                    if name is not None:
+                        track["target_name"] = name
+                track["armature_bone_names"] = target_joint_mapping.get(name, ())
+            if not any(track.get("armature_bone_names") for track in motion["tracks"]):
+                yield f"No target tracks matched; preserving {resource.name} / {clip.name or clip.index}"
+                return None
+
+            animation_data.action = None
+            clear_pose(armature)
+            action, mapped_bones, targets = create_retargeted_action(
+                armature, motion, clip.start_frame, True
+            )
+            try:
+                if mapped_bones == 0:
+                    raise RuntimeError(
+                        f"No destination bones map to {resource.name} / {clip.name or clip.index}"
+                    )
+                if targets is None:
+                    raise RuntimeError("Retarget did not produce G4MT samples")
+            finally:
+                animation_data.action = None
+                if action is not None and action.name in bpy.data.actions:
+                    bpy.data.actions.remove(action, do_unlink=True)
+                clear_pose(armature)
+
+            clips.append(G4MTClipSamples(clip.index, clip.name, targets))
+            yield f"{resource.name}: {clip_number}/{len(playable)} — {clip.name or clip.index}"
+
+        return write_g4mt_family_preserving_additive(template, clips)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+        animation_data.action = original_action
+        if original_slot is not None:
+            animation_data.action_slot = original_slot
+        scene.frame_set(original_frame)
+        view_layer.update()
+        if original_action is None:
+            for bone in armature.pose.bones:
+                state = original_pose.get(bone.name)
+                if state is None:
+                    continue
+                location, rotation_mode, euler, quaternion, axis_angle, scale = state
+                bone.rotation_mode = rotation_mode
+                bone.location = location
+                bone.rotation_euler = euler
+                bone.rotation_quaternion = quaternion
+                bone.rotation_axis_angle = axis_angle
+                bone.scale = scale
+
+
+def write_bank_resource(source: Path, relative: Path, output_root: Path, data: bytes) -> None:
+    destination = output_root / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+        os.replace(temporary_name, destination)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+    sidecar = source.with_suffix(".mevbin")
+    if sidecar.is_file():
+        shutil.copy2(sidecar, destination.with_suffix(".mevbin"))
+
+
+def publish_animation_overlay(stage: Path, output: Path) -> None:
+    if not output.exists():
+        os.rename(stage, output)
+        return
+    if not output.is_dir():
+        raise RuntimeError(f"Animation output is not a directory: {output}")
+    staged_files = sorted(path for path in stage.rglob("*") if path.is_file())
+    collisions = [output / path.relative_to(stage) for path in staged_files
+                  if (output / path.relative_to(stage)).exists()]
+    if collisions:
+        preview = ", ".join(path.as_posix() for path in collisions[:3])
+        raise RuntimeError(f"Animation overlay would overwrite existing files: {preview}")
+    moved = []
+    try:
+        for source in staged_files:
+            destination = output / source.relative_to(stage)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, destination)
+            moved.append(destination)
+    except Exception:
+        for path in reversed(moved):
+            path.unlink(missing_ok=True)
+        raise
+    shutil.rmtree(stage)
+
+
+def export_animation_bank_resources(resources, character_bank_id: str, event_skeleton_id: str, output_root: Path,
+                                    armature, source_skeleton_override: Path | None,
+                                    target_bank_id: str):
+    ensure_native_motion_helpers(armature)
+    skeleton_cache = {}
+    total = len(resources)
+    written = 0
+    skipped = 0
+    warnings = []
+    for resource_index, (resource, data_root, is_event) in enumerate(resources, 1):
+        source_bank_id = event_skeleton_id if is_event else character_bank_id
+        source = resource.read_bytes()
+        relative = Path(*(
+            rewrite_bank_identifier(part, source_bank_id, target_bank_id)
+            for part in resource.relative_to(data_root).parts
+        ))
+        if resource.suffix.lower() == ".g4mt":
+            try:
+                parse_g4mt_bank(source, f"{resource}::{resource.name}")
+            except NativeFormatError as error:
+                if not (is_event and "point_eff" in resource.stem.casefold()):
+                    raise
+                write_bank_resource(resource, relative, output_root, source)
+                written += 1
+                warnings.append(str(error))
+                yield f"Skipped invalid point-effect bank: {resource.name} ({error})"
+                yield (resource_index / total, f"Exported {resource_index}/{total}: {resource.name}")
+                continue
+            skeleton_key = data_root, event_skeleton_id
+            skeleton = skeleton_cache.get(skeleton_key)
+            if skeleton is None:
+                skeleton = source_skeleton_for_bank(resource, event_skeleton_id, data_root, source_skeleton_override)
+                if skeleton is None:
+                    raise RuntimeError(f"Could not resolve a source G4SK for {resource.name}; select one manually")
+                skeleton_cache[skeleton_key] = skeleton
+            result = yield from retarget_g4mt_payload(
+                source, resource, resource.name, skeleton, armature, bpy.context.scene, bpy.context.view_layer
+            )
+            if result is None:
+                skipped += 1
+                write_bank_resource(resource, relative, output_root, source)
+                written += 1
+            else:
+                write_bank_resource(resource, relative, output_root, result)
+                written += 1
+        else:
+            replacements = {}
+            renamed_entries = {}
+            skipped_entries = 0
+            package_entries = g4pk_entries(source)
+            g4mt_indices = [index for index, (_name, offset, _size) in enumerate(package_entries)
+                            if source[offset:offset + 4] == b"G4MT"]
+            for entry_number, entry_index in enumerate(g4mt_indices, 1):
+                entry_name, offset, size = package_entries[entry_index]
+                renamed_name = rewrite_bank_identifier(entry_name, source_bank_id, target_bank_id)
+                if renamed_name != entry_name:
+                    renamed_entries[entry_index] = renamed_name
+                payload = source[offset:offset + size]
+                try:
+                    parse_g4mt_bank(payload, f"{resource}::{entry_name}")
+                except NativeFormatError as error:
+                    if not (is_event and "point_eff" in f"{resource.name} {entry_name}".casefold()):
+                        raise
+                    skipped_entries += 1
+                    warnings.append(str(error))
+                    yield f"Skipped invalid point-effect bank: {entry_name} ({error})"
+                    continue
+                skeleton_key = data_root, event_skeleton_id
+                skeleton = skeleton_cache.get(skeleton_key)
+                if skeleton is None:
+                    skeleton = source_skeleton_for_bank(resource, event_skeleton_id, data_root, source_skeleton_override)
+                    if skeleton is None:
+                        raise RuntimeError(
+                            f"Could not resolve a source G4SK for {resource.name}; select one manually"
+                        )
+                    skeleton_cache[skeleton_key] = skeleton
+                result = yield from retarget_g4mt_payload(
+                    payload, resource, entry_name, skeleton,
+                    armature, bpy.context.scene, bpy.context.view_layer,
+                )
+                if result is None:
+                    skipped_entries += 1
+                elif result != source[offset:offset + size]:
+                    replacements[entry_index] = result
+                yield f"{resource.name}: bank {entry_number}/{len(g4mt_indices)}"
+            if g4mt_indices:
+                skipped += skipped_entries
+                result = replace_g4pk_entries(source, replacements, renamed_entries)
+                write_bank_resource(resource, relative, output_root, result)
+                written += 1
+            else:
+                write_bank_resource(resource, relative, output_root, source)
+                written += 1
+        yield (resource_index / total, f"Exported {resource_index}/{total}: {resource.name}")
+    return written, skipped, warnings
+
+
+def discover_victorytool_animation_sources(bank_id: str, data_roots: list[Path]):
+    bank_files = {}
+    for resource, data_root, is_event in discover_animation_bank_resources(bank_id, data_roots):
+        if is_event or resource.parent.name.casefold() != bank_id.casefold():
+            continue
+        match = re.fullmatch(rf"{re.escape(bank_id)}_p(\d{{3}})", resource.stem, re.IGNORECASE)
+        if match is None:
+            continue
+        bank_type = match.group(1)
+        previous = bank_files.get(bank_type)
+        if previous is None or (resource.suffix.lower() == ".g4pk" and previous[0].suffix.lower() != ".g4pk"):
+            bank_files[bank_type] = (resource, data_root)
+    return [(bank_type, *bank_files[bank_type]) for bank_type in sorted(bank_files)]
+
+
+def export_victorytool_animation_candidates(
+    bank_sources, bank_id: str, model_path: Path, staging_directory: Path,
+    armature, source_skeleton_override: Path | None,
+):
+    model_stem = model_path.stem
+    skeleton_cache = {}
+    written = 0
+    skipped = 0
+    for resource_index, (bank_type, resource, data_root) in enumerate(bank_sources, 1):
+        source = resource.read_bytes()
+        if resource.suffix.lower() == ".g4mt":
+            payloads = [(resource.name, source)]
+        else:
+            payloads = [
+                (entry_name, source[offset:offset + size])
+                for entry_name, offset, size in g4pk_entries(source)
+                if source[offset:offset + 4] == b"G4MT"
+            ]
+            if len(payloads) > 1:
+                raise RuntimeError(f"{resource.name} contains multiple G4MT banks; VictoryTool expects one bank per type")
+        if not payloads:
+            skipped += 1
+            yield (resource_index / len(bank_sources), f"Skipped {resource.name}: no G4MT payload")
+            continue
+
+        skeleton_key = data_root, bank_id
+        skeleton = skeleton_cache.get(skeleton_key)
+        if skeleton is None:
+            skeleton = source_skeleton_for_bank(resource, bank_id, data_root, source_skeleton_override)
+            if skeleton is None:
+                raise RuntimeError(f"Could not resolve a source G4SK for {resource.name}; select one manually")
+            skeleton_cache[skeleton_key] = skeleton
+
+        entry_name, payload = payloads[0]
+        playable_count = sum(not clip.flags & 1 for clip in parse_g4mt_bank(payload).clips)
+        retarget = retarget_g4mt_payload(
+            payload, resource, entry_name, skeleton, armature,
+            bpy.context.scene, bpy.context.view_layer,
+        )
+        completed_clips = 0
+        while True:
+            try:
+                message = next(retarget)
+            except StopIteration as completed:
+                result = completed.value
+                break
+            completed_clips += 1
+            clip_progress = min(1.0, completed_clips / max(1, playable_count))
+            progress = (resource_index - 1 + clip_progress) / len(bank_sources)
+            yield progress, message
+        if result is None:
+            skipped += 1
+        else:
+            parse_g4mt_bank(result, f"{resource.name}::{entry_name}")
+            destination = staging_directory / f"{model_stem}_from_{bank_id}_p{bank_type}.g4mt"
+            destination.write_bytes(result)
+            written += 1
+        yield (resource_index / len(bank_sources), f"Exported bank {resource_index}/{len(bank_sources)}: p{bank_type}")
+    if written == 0:
+        raise RuntimeError(f"No animation banks from {bank_id} matched the target rig")
+    return written, skipped
+
+
+def animation_worker_resource_groups(resources):
+    character_resources = [item for item in resources if not item[2]]
+    event_resources = [item for item in resources if item[2]]
+    groups = []
+    if character_resources:
+        groups.append(("chr", character_resources))
+    if event_resources:
+        groups.extend(("event", event_resources[index::2]) for index in range(2) if event_resources[index::2])
+    return groups
+
+
+def export_animation_candidates_with_progress(
+    bank_sources, bank_id: str, model_path: Path, staging_directory: Path,
+    armature, source_skeleton_override: Path | None,
+):
+    return export_victorytool_animation_candidates(
+        bank_sources, bank_id, model_path, staging_directory, armature,
+        source_skeleton_override,
+    )
+
+
+class EXPORT_OT_level5_g4mt_bank_family(Operator):
+    bl_idname = "export_scene.level5_g4mt_bank_family"
+    bl_label = "Retarget Original G4MT Bank Family"
+    bl_options = {"REGISTER"}
+
+    source_bank_id: StringProperty(name="Original Bank ID", default="")
+    source_event_skeleton_id: StringProperty(name="Event Skeleton ID", default="")
+    target_bank_id: StringProperty(name="Destination Bank ID", default="")
+    source_skeleton_path: StringProperty(name="Original Source G4SK Override", subtype="FILE_PATH", default="")
+    output_directory: StringProperty(name="Data Overlay Folder", subtype="DIR_PATH", default="")
+    armature_name: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    source_data_root: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    bank_summary: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_text: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_value: FloatProperty(options={"HIDDEN", "SKIP_SAVE"}, min=0.0, max=1.0)
+    progress_window_open: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        armature = context.scene.objects.get(self.armature_name) if self.armature_name else context.active_object
+        action = armature.animation_data.action if armature and armature.animation_data else None
+        source = Path(str(action.get("g4mt_source", ""))) if action is not None else Path()
+        self.source_bank_id = character_bank_id_from_path(source) or self.source_bank_id
+        self.target_bank_id = target_animation_bank_id(armature) or self.target_bank_id
+        source_model = Path()
+        if not self.source_bank_id or not self.source_event_skeleton_id:
+            try:
+                from ..porting import g4_port_addon
+            except ImportError:
+                from porting import g4_port_addon
+            source_model = g4_port_addon.resolve_file(g4_port_addon.settings(context).original_model)
+        prefs = addon_preferences()
+        roots = candidate_data_roots(source_model if source_model.is_file() else source, getattr(prefs, "raw_data_root", ""))
+        if self.source_data_root:
+            data_root = Path(bpy.path.abspath(self.source_data_root)).resolve()
+            if data_root.is_dir() and data_root not in roots:
+                roots.append(data_root)
+        if source_model.is_file() and roots:
+            try:
+                self.source_bank_id, self.source_event_skeleton_id = resolve_animation_family_ids(source_model, roots)
+            except ValueError:
+                pass
+        if self.source_bank_id and self.source_event_skeleton_id:
+            resources = discover_animation_bank_resources_by_branch(
+                self.source_bank_id, self.source_event_skeleton_id, roots
+            )
+            characters = sum(not is_event for _, _, is_event in resources)
+            events = len(resources) - characters
+            self.bank_summary = (
+                f"CHR family {self.source_bank_id}; event skeleton {self.source_event_skeleton_id} "
+                f"({characters} character, {events} event resources)"
+            )
+        if armature is not None:
+            model_path = Path(str(armature.get("g4_exported_model_path", "")))
+            if model_path.suffix.lower() == ".g4md" and not self.output_directory:
+                data_root = next((parent for parent in model_path.parents if parent.name.casefold() == "data"), None)
+                self.output_directory = str(data_root or model_path.parent)
+        return context.window_manager.invoke_props_dialog(self, width=560)
+
+    def draw(self, context):
+        if self.progress_window_open:
+            self.layout.label(text=self.progress_text, icon="FILE_REFRESH")
+            self.layout.progress(factor=self.progress_value, type="BAR", text="Animation bank export")
+            return
+        self.layout.prop(self, "source_bank_id")
+        self.layout.prop(self, "source_event_skeleton_id")
+        self.layout.prop(self, "target_bank_id")
+        self.layout.prop(self, "source_skeleton_path")
+        self.layout.prop(self, "output_directory")
+        if self.bank_summary:
+            self.layout.label(text=self.bank_summary, icon="FILE_FOLDER")
+            self.layout.label(text="The target G4SK and animation profile use the exported character rig.", icon="INFO")
+            self.layout.label(text="Matching common/chr and common/event resources are included.", icon="INFO")
+            self.layout.label(text="Banks are written into the selected data overlay.", icon="FILE_FOLDER")
+
+    def execute(self, context):
+        armature = context.scene.objects.get(self.armature_name) if self.armature_name else context.active_object
+        if armature is None or armature.type != "ARMATURE":
+            self.report({"ERROR"}, "Select the target character armature")
+            return {"CANCELLED"}
+        prefs = addon_preferences()
+        action = armature.animation_data.action if armature.animation_data else None
+        source = Path(str(action.get("g4mt_source", ""))) if action is not None else Path()
+        roots = candidate_data_roots(source, getattr(prefs, "raw_data_root", ""))
+        if self.source_data_root:
+            data_root = Path(bpy.path.abspath(self.source_data_root)).resolve()
+            if data_root.is_dir() and data_root not in roots:
+                roots.append(data_root)
+        try:
+            resources = discover_animation_bank_resources_by_branch(
+                self.source_bank_id, self.source_event_skeleton_id, roots
+            )
+        except ValueError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if not resources:
+            self.report({"ERROR"}, f"No original G4MT/G4PK resources found for {self.source_bank_id}")
+            return {"CANCELLED"}
+        if not re.fullmatch(r"c\d{4,10}", self.target_bank_id.strip().lower()):
+            self.report({"ERROR"}, "Destination animation ID must be a character ID such as c000101")
+            return {"CANCELLED"}
+
+        output = Path(bpy.path.abspath(self.output_directory)).resolve()
+        existing_data_overlay = output.is_dir() and output.name.casefold() == "data" and (output / "common").is_dir()
+        if (output.exists() and not existing_data_overlay) or not output.parent.is_dir():
+            self.report({"ERROR"}, "Choose a new output folder or an existing package data folder")
+            return {"CANCELLED"}
+        if any(output == root or root in output.parents for root in roots):
+            self.report({"ERROR"}, "Output folder cannot be inside a source data directory")
+            return {"CANCELLED"}
+        override = None
+        if self.source_skeleton_path:
+            override = valid_skeleton_path(Path(bpy.path.abspath(self.source_skeleton_path)))
+            if override is None:
+                self.report({"ERROR"}, "Source G4SK override is not a readable skeleton")
+                return {"CANCELLED"}
+
+        self._output = output
+        self._stage = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+        self._worker_root = Path(tempfile.mkdtemp(prefix="level5_g4_animation_workers_"))
+        self._cancel_path = self._worker_root / "cancel"
+        self._workers = []
+        target_armature = None
+        try:
+            target_skeleton_value = str(armature.get("g4_exported_skeleton_path", ""))
+            target_skeleton_path = Path(target_skeleton_value) if target_skeleton_value else None
+            if target_skeleton_path is None or not target_skeleton_path.is_file():
+                raise RuntimeError("Export the target model first so its G4SK can be used for animation retargeting")
+            target_armature = create_g4sk_armature(target_skeleton_path)
+            target_armature.name = f"{armature.name}__G4SKExportTarget"
+            worker_armature_name = target_armature.name
+            target_armature["g4_character_model_source"] = str(
+                Path(str(armature.get("g4_exported_model_path", ""))).resolve()
+            )
+            target_armature["g4_character_skeleton_source"] = str(target_skeleton_path.resolve())
+            target_armature["g4_cumulative_scale_conversion"] = True
+
+            rig_snapshot = self._worker_root / "target_rig.blend"
+            target_joint_mappings = {}
+            if armature.get("g4_exported_model_path"):
+                try:
+                    from ..porting import g4_port_addon
+                except ImportError:
+                    from porting import g4_port_addon
+                port_settings = g4_port_addon.settings(context)
+                target_names = set(parse_g4sk(target_skeleton_path.read_bytes())["names"])
+                for branch_name, is_event, bank_id in (
+                    ("chr", False, self.source_bank_id.strip().lower()),
+                    ("event", True, self.source_event_skeleton_id.strip().lower()),
+                ):
+                    branch = [item for item in resources if item[2] == is_event]
+                    if not branch:
+                        continue
+                    source_skeleton = source_skeleton_for_bank(
+                        branch[0][0], bank_id, branch[0][1], override
+                    )
+                    if source_skeleton is None:
+                        raise RuntimeError(f"Could not resolve the source G4SK for {bank_id}")
+                    source_names = set(parse_g4sk(source_skeleton.read_bytes())["names"])
+                    target_joint_mappings[branch_name] = g4_port_addon.animation_source_joint_map(
+                        port_settings,
+                        source_names,
+                        target_names,
+                    )
+            bpy.data.libraries.write(str(rig_snapshot), {target_armature}, fake_user=True)
+            armature_data = target_armature.data
+            bpy.data.objects.remove(target_armature, do_unlink=True)
+            target_armature = None
+            if armature_data.users == 0:
+                bpy.data.armatures.remove(armature_data)
+            worker_script = Path(__file__).with_name("g4_animation_worker.py")
+            for index, (branch, group) in enumerate(animation_worker_resource_groups(resources)):
+                job_path = self._worker_root / f"job_{index}.json"
+                progress_path = self._worker_root / f"progress_{index}.json"
+                result_path = self._worker_root / f"result_{index}.json"
+                log_path = self._worker_root / f"worker_{index}.log"
+                job_path.write_text(json.dumps({
+                    "armature_name": worker_armature_name,
+                    "branch": branch,
+                    "character_bank_id": self.source_bank_id.strip().lower(),
+                    "event_skeleton_id": self.source_event_skeleton_id.strip().lower(),
+                    "target_bank_id": self.target_bank_id.strip().lower(),
+                    "source_skeleton_override": str(override) if override else "",
+                    "target_joint_mapping": target_joint_mappings.get(branch, {}),
+                    "output_root": str(self._stage),
+                    "progress_path": str(progress_path),
+                    "cancel_path": str(self._cancel_path),
+                    "result_path": str(result_path),
+                    "resources": [
+                        {"path": str(path), "data_root": str(data_root), "is_event": is_event}
+                        for path, data_root, is_event in group
+                    ],
+                }), encoding="utf-8")
+                command = [
+                    bpy.app.binary_path,
+                    "--background",
+                    "--factory-startup",
+                    "--python-exit-code",
+                    "1",
+                    "--threads",
+                    str(max(1, min(4, (os.cpu_count() or 4) // 3))),
+                    str(rig_snapshot),
+                    "--python",
+                    str(worker_script),
+                    "--",
+                    str(job_path),
+                ]
+                with log_path.open("wb") as log_stream:
+                    process = subprocess.Popen(command, stdout=log_stream, stderr=subprocess.STDOUT)
+                self._workers.append({
+                    "process": process,
+                    "branch": branch,
+                    "total": len(group),
+                    "progress_path": progress_path,
+                    "result_path": result_path,
+                    "log_path": log_path,
+                })
+        except Exception as exc:
+            if target_armature is not None and target_armature.name in bpy.data.objects:
+                armature_data = target_armature.data
+                bpy.data.objects.remove(target_armature, do_unlink=True)
+                if armature_data.users == 0:
+                    bpy.data.armatures.remove(armature_data)
+            self._cancel_path.touch()
+            for worker in self._workers:
+                worker["process"].terminate()
+            for worker in self._workers:
+                worker["process"].wait()
+            shutil.rmtree(self._stage, ignore_errors=True)
+            shutil.rmtree(self._worker_root, ignore_errors=True)
+            self.report({"ERROR"}, f"Could not start animation workers: {exc}")
+            return {"CANCELLED"}
+        self._resources = len(resources)
+        self._window_manager = context.window_manager
+        self._timer = self._window_manager.event_timer_add(0.05, window=context.window)
+        self._window_manager.progress_begin(0, len(resources))
+        self.progress_text = "Starting separate CHR and event animation workers…"
+        self.progress_value = 0.0
+        self.progress_window_open = True
+        context.window_manager.modal_handler_add(self)
+        self._cancel_requested = False
+        addon = sys.modules.get(__package__.split(".")[0])
+        addon.begin_progress_dialog(self, context)
+        return {"RUNNING_MODAL"}
+
+    def _finish(self, context, succeeded=False):
+        self.progress_window_open = False
+        if getattr(self, "_timer", None) is not None:
+            self._window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        self._window_manager.progress_end()
+        context.workspace.status_text_set(None)
+        addon = sys.modules.get(__package__.split(".")[0])
+        if addon is not None:
+            addon.end_progress_dialog(self)
+        if not succeeded and getattr(self, "_stage", None) is not None:
+            shutil.rmtree(self._stage, ignore_errors=True)
+        if getattr(self, "_worker_root", None) is not None:
+            shutil.rmtree(self._worker_root, ignore_errors=True)
+
+    def modal(self, context, event):
+        addon = sys.modules.get(__package__.split(".")[0])
+        if addon is not None and addon.progress_cancel_clicked(self, context, event):
+            self._cancel_requested = True
+        if event.type == "ESC" or getattr(self, "_cancel_requested", False):
+            self._cancel_requested = True
+            self._cancel_path.touch(exist_ok=True)
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+
+        completed_resources = 0.0
+        active_messages = []
+        for worker in self._workers:
+            try:
+                progress = json.loads(worker["progress_path"].read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                progress = {"completed": 0.0, "message": f"Starting {worker['branch']} worker…"}
+            completed_resources += min(worker["total"], max(0.0, float(progress.get("completed", 0.0))))
+            active_messages.append((
+                float(progress.get("updated_at", 0.0)),
+                f"{worker['branch']}: {progress.get('message', 'Working…')}",
+            ))
+            code = worker["process"].poll()
+            if code not in (None, 0) and not self._cancel_requested:
+                self._worker_failure = worker
+                self._cancel_requested = True
+                self._cancel_path.touch(exist_ok=True)
+
+        self.progress_value = min(1.0, completed_resources / max(1, self._resources))
+        self._window_manager.progress_update(completed_resources)
+        self.progress_text = "Stopping workers…" if self._cancel_requested else max(active_messages)[1]
+        context.workspace.status_text_set(self.progress_text)
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                area.tag_redraw()
+
+        if self._cancel_requested:
+            if any(worker["process"].poll() is None for worker in self._workers):
+                return {"RUNNING_MODAL"}
+            failure = getattr(self, "_worker_failure", None)
+            failure_log = ""
+            if failure is not None:
+                try:
+                    failure_log = failure["log_path"].read_text(encoding="utf-8", errors="replace")[-3000:]
+                except OSError:
+                    pass
+            failure_detail = ""
+            if failure is not None:
+                try:
+                    failure_result = json.loads(failure["result_path"].read_text(encoding="utf-8"))
+                    error_lines = [line.strip() for line in failure_result.get("error", "").splitlines() if line.strip()]
+                    failure_detail = error_lines[-1] if error_lines else ""
+                except (OSError, json.JSONDecodeError):
+                    pass
+            self._finish(context)
+            if failure is not None:
+                self.report({"ERROR"}, f"{failure['branch']} animation worker failed: {failure_detail or failure_log[-240:] or 'see worker log'}")
+            else:
+                self.report({"WARNING"}, "Animation bank export cancelled; partial files were removed")
+            return {"CANCELLED"}
+
+        if all(worker["process"].poll() is not None for worker in self._workers):
+            failed = next((worker for worker in self._workers if worker["process"].returncode != 0), None)
+            if failed is not None:
+                self._worker_failure = failed
+                self._cancel_requested = True
+                self._cancel_path.touch(exist_ok=True)
+                return {"RUNNING_MODAL"}
+            try:
+                result = [json.loads(worker["result_path"].read_text(encoding="utf-8")) for worker in self._workers]
+                if any(item.get("status") != "complete" for item in result):
+                    raise RuntimeError("An animation worker finished without a complete result")
+                publish_animation_overlay(self._stage, self._output)
+            except Exception as exc:
+                self._finish(context)
+                self.report({"ERROR"}, str(exc))
+                return {"CANCELLED"}
+            self._finish(context, succeeded=True)
+            written = sum(item["written"] for item in result)
+            skipped = sum(item["skipped"] for item in result)
+            invalid_point_effects = sum(len(item.get("warnings", ())) for item in result)
+            self.report(
+                {"INFO"},
+                f"Exported {written} resources; {skipped} unchanged for unmatched bones; "
+                f"{invalid_point_effects} invalid point-effect banks copied unchanged",
+            )
+            return {"FINISHED"}
+        return {"RUNNING_MODAL"}
+
+    def cancel(self, context):
+        if getattr(self, "_cancel_path", None) is not None:
+            self._cancel_path.touch(exist_ok=True)
+        for worker in getattr(self, "_workers", ()):
+            if worker["process"].poll() is None:
+                worker["process"].terminate()
+        for worker in getattr(self, "_workers", ()):
+            if worker["process"].poll() is None:
+                worker["process"].wait()
+        self._finish(context)
+
+
+class EXPORT_OT_level5_g4mt_victorytool_family(Operator):
+    bl_idname = "export_scene.level5_g4mt_victorytool_family"
+    bl_label = "Export Animation Family for VictoryTool"
+    bl_options = {"REGISTER"}
+
+    source_bank_id: StringProperty(name="Source Bank Family", default="")
+    armature_name: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_text: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_value: FloatProperty(options={"HIDDEN", "SKIP_SAVE"}, min=0.0, max=1.0)
+    progress_window_open: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context, event):
+        armature = context.active_object
+        if armature is None or armature.type != "ARMATURE":
+            armature = next((obj for obj in context.scene.objects
+                             if obj.type == "ARMATURE" and obj.get("g4_exported_model_path")), None)
+        self.armature_name = armature.name if armature is not None else ""
+        action = armature.animation_data.action if armature and armature.animation_data else None
+        source = Path(str(action.get("g4mt_source", ""))) if action is not None else Path()
+        self.source_bank_id = character_bank_id_from_path(source) or self.source_bank_id
+        return context.window_manager.invoke_props_dialog(self, width=520)
+
+    def draw(self, context):
+        if self.progress_window_open:
+            self.layout.label(text=self.progress_text, icon="FILE_REFRESH")
+            self.layout.progress(factor=self.progress_value, type="BAR", text="Animation export")
+            return
+        self.layout.prop(self, "source_bank_id")
+        armature = context.scene.objects.get(self.armature_name)
+        model_value = str(armature.get("g4_exported_model_path", "")) if armature else ""
+        model_path = Path(model_value) if model_value else None
+        if model_path is not None:
+            self.layout.label(text=f"Output beside {model_path.name}", icon="FILE_FOLDER")
+        self.layout.label(text="Writes VictoryTool-named G4MT banks and the matching rig profile.", icon="ACTION")
+
+    def execute(self, context):
+        armature = context.scene.objects.get(self.armature_name)
+        if armature is None or armature.type != "ARMATURE":
+            self.report({"ERROR"}, "Select the exported character armature")
+            return {"CANCELLED"}
+        bank_id = self.source_bank_id.strip().lower()
+        if not re.fullmatch(r"c\d{4,10}", bank_id):
+            self.report({"ERROR"}, "Source bank family must be a character ID such as c000101")
+            return {"CANCELLED"}
+
+        model_path = Path(str(armature.get("g4_exported_model_path", ""))).resolve()
+        if model_path.suffix.lower() != ".g4md" or not model_path.is_file():
+            self.report({"ERROR"}, "Export the model before exporting animations")
+            return {"CANCELLED"}
+        try:
+            from ..porting import g4_port_addon
+        except ImportError:
+            from porting import g4_port_addon
+
+        props = g4_port_addon.settings(context)
+        original_model = g4_port_addon.resolve_file(props.original_model)
+        raw_root = g4_port_addon.infer_data_root(original_model)
+        if not original_model.is_file() or raw_root is None:
+            self.report({"ERROR"}, "The original model must be inside the configured game data tree")
+            return {"CANCELLED"}
+        prefs = g4_port_addon.addon_preferences()
+        roots = candidate_data_roots(Path(), getattr(prefs, "raw_data_root", ""))
+        if raw_root.resolve() not in roots:
+            roots.append(raw_root.resolve())
+        bank_sources = discover_victorytool_animation_sources(bank_id, roots)
+        if not bank_sources:
+            self.report({"ERROR"}, f"No common/chr animation banks found for {bank_id}")
+            return {"CANCELLED"}
+        exported_skeleton = str(armature.get("g4_exported_skeleton_path", ""))
+        target_skeleton_path = Path(exported_skeleton) if exported_skeleton else None
+        if target_skeleton_path is None or not target_skeleton_path.is_file():
+            target_skeleton_path = g4_port_addon.active_rig_skeleton_path(props, original_model)
+        if target_skeleton_path is None or not target_skeleton_path.is_file():
+            self.report({"ERROR"}, "Could not resolve the G4SK used by the original model")
+            return {"CANCELLED"}
+
+        stem = model_path.stem
+        expected_prefix = f"{stem}_from_{bank_id}_p"
+        existing = list(model_path.parent.glob(f"{stem}_from_*_p*.g4mt"))
+        foreign = [path for path in existing if not path.name.startswith(expected_prefix)]
+        invalid = [path for path in existing if not re.fullmatch(
+            rf"{re.escape(stem)}_from_{re.escape(bank_id)}_p\d{{3}}\.g4mt", path.name, re.IGNORECASE
+        )]
+        if foreign or invalid:
+            self.report({"ERROR"}, "Remove previous or nonstandard animation candidates beside the model before exporting another family")
+            return {"CANCELLED"}
+
+        try:
+            previous_active = context.view_layer.objects.active
+            previous_selection = [obj for obj in context.view_layer.objects if obj.select_get()]
+            self._previous_active = previous_active
+            self._previous_selection = previous_selection
+            context.view_layer.objects.active = armature
+            source_skeleton = source_skeleton_for_bank(bank_sources[0][1], bank_id, bank_sources[0][2], None)
+            if source_skeleton is None:
+                raise RuntimeError(f"Could not resolve a source G4SK for {bank_sources[0][1].name}")
+            source_skeleton_data = source_skeleton.read_bytes()
+            source_hash = hashlib.sha256(source_skeleton_data).hexdigest()
+            try:
+                from ..porting.g4_model_probe import configure_raw_data_root_from_path, resolve_g4sk_from_chara_model
+            except ImportError:
+                from porting.g4_model_probe import configure_raw_data_root_from_path, resolve_g4sk_from_chara_model
+            reference = g4_port_addon.active_rig_reference_model(props, original_model)
+            configure_raw_data_root_from_path(reference)
+            reference_data, _reference_source = resolve_g4sk_from_chara_model(reference)
+            if reference_data is None or hashlib.sha256(reference_data).hexdigest().casefold() != source_hash.casefold():
+                raise RuntimeError("Choose the source model/G4SK that belongs to the selected animation family")
+
+            source_joint_names = set(parse_g4sk(source_skeleton_data)["names"])
+            target_joint_names = set(parse_g4sk(target_skeleton_path.read_bytes())["names"])
+            source_joint_mapping = g4_port_addon.animation_source_joint_map(
+                props, source_joint_names, target_joint_names
+            )
+            temporary_armature = create_victorytool_target_armature(
+                target_skeleton_path, model_path, source_joint_mapping
+            )
+            self._armature = temporary_armature
+            for obj in context.view_layer.objects:
+                obj.select_set(False)
+            temporary_armature.select_set(True)
+            context.view_layer.objects.active = temporary_armature
+
+            stage = Path(tempfile.mkdtemp(prefix=f".{stem}_animation_", dir=model_path.parent))
+            self._output_directory = model_path.parent
+            self._stage = stage
+            self._output_files = {path.name for path in existing}
+            self._generator = export_victorytool_animation_candidates(
+                bank_sources, bank_id, model_path, stage, temporary_armature, None,
+            )
+            self._profile = {
+                "props": props,
+                "original_model": original_model,
+                "model_path": model_path,
+                "target_skeleton_path": target_skeleton_path,
+                "raw_root": raw_root,
+                "source_hash": source_hash,
+            }
+            self._window_manager = context.window_manager
+            self._timer = self._window_manager.event_timer_add(0.01, window=context.window)
+            self._window_manager.progress_begin(0, len(bank_sources))
+            self._progress_started = True
+            self._resources = len(bank_sources)
+            self._last_progress = 0.0
+            self.progress_text = "Preparing animation banks"
+            self.progress_value = 0.0
+            self.progress_window_open = True
+            self._cancel_requested = False
+            context.window_manager.modal_handler_add(self)
+            addon = sys.modules.get(__package__.split(".")[0])
+            addon.begin_progress_dialog(self, context)
+            return {"RUNNING_MODAL"}
+        except Exception as exc:
+            self._finish(context)
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+
+    def _finish(self, context, succeeded=False):
+        self.progress_window_open = False
+        if getattr(self, "_generator", None) is not None:
+            self._generator.close()
+            self._generator = None
+        if getattr(self, "_timer", None) is not None:
+            self._window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        if getattr(self, "_progress_started", False):
+            self._window_manager.progress_end()
+            self._progress_started = False
+        context.workspace.status_text_set(None)
+        addon = sys.modules.get(__package__.split(".")[0])
+        if addon is not None:
+            addon.end_progress_dialog(self)
+        temporary = getattr(self, "_armature", None)
+        if temporary is not None and temporary.name in bpy.data.objects:
+            data = temporary.data
+            bpy.data.objects.remove(temporary, do_unlink=True)
+            if data.users == 0:
+                bpy.data.armatures.remove(data)
+        for obj in getattr(self, "_previous_selection", ()):
+            if obj.name in bpy.data.objects:
+                obj.select_set(True)
+        previous_active = getattr(self, "_previous_active", None)
+        if previous_active is not None and previous_active.name in bpy.data.objects:
+            context.view_layer.objects.active = previous_active
+        stage = getattr(self, "_stage", None)
+        if stage is not None and stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def modal(self, context, event):
+        addon = sys.modules.get(__package__.split(".")[0])
+        if addon is not None and addon.progress_cancel_clicked(self, context, event):
+            self._cancel_requested = True
+        if event.type == "ESC" or getattr(self, "_cancel_requested", False):
+            self._finish(context)
+            self.report({"WARNING"}, "Animation export cancelled; staged files were removed")
+            return {"CANCELLED"}
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        try:
+            update = next(self._generator)
+            if isinstance(update, tuple):
+                self._last_progress, message = update
+            else:
+                message = update
+            self._window_manager.progress_update(self._last_progress * self._resources)
+            self.progress_value = min(1.0, max(0.0, self._last_progress))
+            self.progress_text = message
+            context.workspace.status_text_set(message)
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type in {"WINDOW", "UI"}:
+                        area.tag_redraw()
+        except StopIteration as completed:
+            written, skipped = completed.value
+            staged_files = list(self._stage.glob("*.g4mt"))
+            if len(staged_files) != written:
+                self._finish(context)
+                self.report({"ERROR"}, "Animation staging did not contain every exported bank")
+                return {"CANCELLED"}
+            model_path = self._profile["model_path"]
+            profile_path = model_path.with_suffix(".g4anim.json")
+            previous_profile = profile_path.read_bytes() if profile_path.exists() else None
+            replaced = []
+            overwritten = {}
+            try:
+                for path in staged_files:
+                    destination = self._output_directory / path.name
+                    overwritten[destination] = destination.read_bytes() if destination.exists() else None
+                    os.replace(path, destination)
+                    replaced.append(destination)
+                from ..porting import g4_port_addon
+                profile_path = g4_port_addon.write_animation_profile(
+                    self._profile["props"], self._profile["original_model"], model_path,
+                    self._profile["target_skeleton_path"], self._profile["raw_root"],
+                )
+                profile = json.loads(profile_path.read_text(encoding="utf-8"))
+                if profile["sourceRig"]["sha256"].casefold() != self._profile["source_hash"].casefold():
+                    raise RuntimeError("The VictoryTool profile source rig does not match the selected animation family")
+            except Exception:
+                for path in replaced:
+                    original = overwritten[path]
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(original)
+                if previous_profile is None:
+                    profile_path.unlink(missing_ok=True)
+                else:
+                    profile_path.write_bytes(previous_profile)
+                raise
+            staged_names = {path.name for path in staged_files}
+            for name in self._output_files - staged_names:
+                (self._output_directory / name).unlink(missing_ok=True)
+            self._finish(context, succeeded=True)
+            self.report({"INFO"}, f"Exported {written} VictoryTool animation banks; {skipped} banks had no matching tracks")
+            return {"FINISHED"}
+        except Exception as exc:
+            self._finish(context)
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        return {"RUNNING_MODAL"}
+
+    def cancel(self, context):
+        self._finish(context)
+
+
 def generated_g4mt_output_path(armature, source_path: Path) -> Path | None:
     model_value = str(armature.get("g4_exported_model_path", "")) if armature else ""
     model_path = Path(model_value) if model_value else None
@@ -5119,6 +6993,7 @@ def generated_g4mt_output_path(armature, source_path: Path) -> Path | None:
 def build_g4sk_from_armature(armature, template: bytes) -> tuple[bytes, int, int, float]:
     if armature is None or armature.type != "ARMATURE":
         raise ValueError("Select the target armature")
+    ensure_native_motion_helpers(armature)
 
     bones = list(armature.data.bones)
 
@@ -5342,11 +7217,18 @@ def menu_func_import(self, context):
 
 def menu_func_export(self, context):
     self.layout.operator(EXPORT_OT_level5_g4mt.bl_idname, text="Level-5 G4 Animation Candidate (.g4mt)")
+    self.layout.operator(EXPORT_OT_level5_g4mt_bank_family.bl_idname, text="Retarget Original Bank Family")
+    self.layout.operator(
+        EXPORT_OT_level5_g4mt_victorytool_family.bl_idname,
+        text="Export Animation Family for VictoryTool",
+    )
     self.layout.operator(EXPORT_OT_level5_g4sk.bl_idname, text="Level-5 G4 Skeleton Candidate (.g4sk)")
     self.layout.operator(EXPORT_OT_level5_g4_fbx.bl_idname, text="Level-5 G4 Scene (.fbx)")
 
 
 classes = [
+    VIEW3D_OT_level5_g4mt_select_action,
+    VIEW3D_PT_level5_g4mt_bank,
     IMPORT_OT_level5_g4mt_pick_model,
     IMPORT_OT_level5_g4mt_pick_body,
     IMPORT_OT_level5_g4mt_pick_shoes,
@@ -5356,6 +7238,8 @@ classes = [
     IMPORT_OT_level5_g4_event_parts,
     IMPORT_OT_level5_g4_event_folder,
     EXPORT_OT_level5_g4mt,
+    EXPORT_OT_level5_g4mt_bank_family,
+    EXPORT_OT_level5_g4mt_victorytool_family,
     EXPORT_OT_level5_g4sk,
     EXPORT_OT_level5_g4_fbx,
 ]

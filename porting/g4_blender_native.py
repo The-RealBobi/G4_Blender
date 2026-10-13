@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 try:
-    from .formats import (
+    from ..formats import (
         FormatEvidence,
         build_format_evidence,
         parse_cfgbin_file,

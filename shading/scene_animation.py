@@ -11,7 +11,7 @@ def migrate_material_animation(
     paths: set[str],
     interpolations: set[str],
 ) -> int:
-    from ..g4_animation_addon import action_fcurves, action_fcurve_new
+    from ..animation.g4_animation_addon import action_fcurves, action_fcurve_new
 
     if scene.library:
         return 0

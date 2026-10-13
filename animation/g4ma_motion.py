@@ -20,9 +20,9 @@ try:
     from .g4mt_probe import parse_g4mt
     from .g4pk_extract_g4mt import entries
 except ImportError:
-    from g4mt_motion import encoding_step, sample_channel, select_clip
-    from g4mt_probe import parse_g4mt
-    from g4pk_extract_g4mt import entries
+    from animation.g4mt_motion import encoding_step, sample_channel, select_clip
+    from animation.g4mt_probe import parse_g4mt
+    from animation.g4pk_extract_g4mt import entries
 
 
 def material_animation_paths(model: Path, cache_root: Path) -> list[Path]:

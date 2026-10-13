@@ -14,10 +14,10 @@ export_dir = Path(os.environ["G4_EXPORT_DIR"])
 raw_root = Path(os.environ["LEVEL5_G4_RAW_ROOT"])
 prefs = SimpleNamespace(
     python_path=os.environ["G4_PYTHON"],
-    probe_script=str(repo / "g4_model_probe.py"),
+    probe_script=str(repo / "porting" / "g4_model_probe.py"),
     export_dir=str(export_dir),
     raw_data_root=str(raw_root),
-    chara_model_lookup=str(repo / "chara_model_lookup.json"),
+    chara_model_lookup=str(repo / "data" / "chara_model_lookup.json"),
     chara_model_xml="",
 )
 

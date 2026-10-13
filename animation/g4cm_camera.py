@@ -13,7 +13,7 @@ from pathlib import Path
 try:
     from .g4mt_probe import crc32b, find_name_table, u16, u32
 except ImportError:
-    from g4mt_probe import crc32b, find_name_table, u16, u32
+    from animation.g4mt_probe import crc32b, find_name_table, u16, u32
 
 
 CAMERA_HASH = crc32b("Camera")

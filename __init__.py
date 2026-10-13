@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (1, 12, 1),
+    "version": (2, 0, 17),
     "blender": (4, 0, 0),
-    "location": "File > Import/Export > G4MD / G4PKM",
-    "description": "",
+    "location": "File > Import/Export; View3D > Sidebar > Level-5",
+    "description": "Import, animate and port Level-5 G4 game assets.",
     "category": "Import-Export",
 }
 
@@ -107,6 +107,193 @@ def should_redraw_import_progress(completed: int, total: int) -> bool:
     return completed <= 1 or completed >= total or completed % 10 == 0
 
 
+def draw_progress_overlay(operator):
+    context = bpy.context
+    if (
+        context.window is None
+        or context.area is None
+        or context.area.type != "VIEW_3D"
+        or context.window.as_pointer() != operator._progress_window_pointer
+        or context.area.as_pointer() != operator._progress_area_pointer
+    ):
+        return
+
+    import blf
+    import gpu
+    from gpu_extras.batch import batch_for_shader
+
+    region = context.region
+    width, height = 520, 118
+    left, bottom = (region.width - width) / 2, (region.height - height) / 2
+
+    def rectangle(x1, y1, x2, y2, color):
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+        batch = batch_for_shader(
+            shader,
+            "TRI_FAN",
+            {"pos": ((x1, y1), (x2, y1), (x2, y2), (x1, y2))},
+        )
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
+    gpu.state.blend_set("ALPHA")
+    rectangle(left, bottom, left + width, bottom + height, (0.035, 0.035, 0.035, 0.94))
+    rectangle(left, bottom + height - 1, left + width, bottom + height, (0.20, 0.20, 0.20, 1.0))
+
+    def label(text, x, y, size, color):
+        blf.size(0, size)
+        while text and blf.dimensions(0, text)[0] > width - 40:
+            text = text[:-2] + "…"
+        blf.color(0, *color)
+        blf.position(0, x, y, 0)
+        blf.draw(0, text)
+
+    label("Operation in progress", left + 16, bottom + height - 24, 14, (1, 1, 1, 1))
+    label(getattr(operator, "progress_text", "Working…"), left + 16, bottom + 66, 12, (0.82, 0.82, 0.82, 1))
+
+    bar_left, bar_bottom, bar_width, bar_height = left + 16, bottom + 42, width - 32, 8
+    rectangle(bar_left, bar_bottom, bar_left + bar_width, bar_bottom + bar_height, (0.15, 0.15, 0.15, 1))
+    rectangle(
+        bar_left,
+        bar_bottom,
+        bar_left + bar_width * min(1.0, max(0.0, getattr(operator, "progress_value", 0.0))),
+        bar_bottom + bar_height,
+        (0.22, 0.42, 0.72, 1),
+    )
+    button = (left + 16, bottom + 12, left + width - 16, bottom + 34)
+    operator._progress_cancel_bounds = (
+        region.x + button[0], region.y + button[1],
+        region.x + button[2], region.y + button[3],
+    )
+    rectangle(*button, (0.18, 0.18, 0.18, 1))
+    label("Cancel", left + width / 2 - 17, bottom + 18, 12, (1, 1, 1, 1))
+    gpu.state.blend_set("NONE")
+
+
+def begin_progress_dialog(operator, context) -> None:
+    screen = context.screen
+    area = context.area if context.area is not None and context.area.type == "VIEW_3D" else next(
+        (area for area in screen.areas if area.type == "VIEW_3D"), None
+    ) if screen is not None else None
+    if context.window is None or area is None:
+        return
+    operator._cancel_requested = False
+    operator._progress_window_pointer = context.window.as_pointer()
+    operator._progress_area_pointer = area.as_pointer()
+    operator._progress_cancel_bounds = None
+    operator._progress_draw_handle = bpy.types.SpaceView3D.draw_handler_add(
+        draw_progress_overlay, (operator,), "WINDOW", "POST_PIXEL"
+    )
+    area.tag_redraw()
+
+
+def end_progress_dialog(operator) -> None:
+    handle = getattr(operator, "_progress_draw_handle", None)
+    if handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(handle, "WINDOW")
+        operator._progress_draw_handle = None
+
+
+def progress_cancel_clicked(operator, context, event) -> bool:
+    if (
+        event.type != "LEFTMOUSE"
+        or event.value != "PRESS"
+        or context.window is None
+        or context.window.as_pointer() != getattr(operator, "_progress_window_pointer", None)
+    ):
+        return False
+    bounds = getattr(operator, "_progress_cancel_bounds", None)
+    if bounds is None:
+        return False
+    x1, y1, x2, y2 = bounds
+    return x1 <= event.mouse_x <= x2 and y1 <= event.mouse_y <= y2
+
+
+def start_import_progress(operator, context, total: int, status: str, task):
+    if context.window is None:
+        try:
+            while True:
+                next(task)
+        except StopIteration as result:
+            if result.value and isinstance(result.value, str):
+                operator.report({"INFO"}, result.value)
+            return result.value if isinstance(result.value, set) else {"FINISHED"}
+        except Exception as error:
+            task.close()
+            append_import_log(f"model import failed: {error}\n{traceback.format_exc()}")
+            operator.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+    window_manager = context.window_manager
+    operator._import_progress_task = task
+    operator._import_progress_timer = window_manager.event_timer_add(0.05, window=context.window)
+    operator._import_progress_total = max(1, total)
+    operator.progress_text = status
+    operator.progress_value = 0.0
+    operator.progress_window_open = True
+    operator._cancel_requested = False
+    window_manager.progress_begin(0, operator._import_progress_total)
+    update_import_progress(context, 0, operator._import_progress_total, status, redraw=False)
+    window_manager.modal_handler_add(operator)
+    begin_progress_dialog(operator, context)
+    return {"RUNNING_MODAL"}
+
+
+def finish_import_progress(operator, context):
+    window_manager = context.window_manager
+    timer = getattr(operator, "_import_progress_timer", None)
+    if timer is not None:
+        window_manager.event_timer_remove(timer)
+        operator._import_progress_timer = None
+    window_manager.progress_end()
+    context.workspace.status_text_set(None)
+    if hasattr(operator, "progress_window_open"):
+        operator.progress_window_open = False
+    end_progress_dialog(operator)
+
+
+def modal_import_progress(operator, context, event):
+    if progress_cancel_clicked(operator, context, event):
+        operator._cancel_requested = True
+    if event.type == "ESC" or getattr(operator, "_cancel_requested", False):
+        task = getattr(operator, "_import_progress_task", None)
+        if task is not None:
+            task.close()
+        finish_import_progress(operator, context)
+        operator.report({"WARNING"}, "Import cancelled; completed items remain in the scene")
+        return {"CANCELLED"}
+    if event.type != "TIMER":
+        return {"PASS_THROUGH"}
+
+    try:
+        completed, total, status = next(operator._import_progress_task)
+        total = max(1, total)
+        if total != operator._import_progress_total:
+            context.window_manager.progress_end()
+            context.window_manager.progress_begin(0, total)
+            operator._import_progress_total = total
+        update_import_progress(context, completed, total, status, redraw=False)
+        if hasattr(operator, "progress_text"):
+            operator.progress_text = status
+            operator.progress_value = min(1.0, max(0.0, completed / total))
+    except StopIteration as result:
+        finish_import_progress(operator, context)
+        operator._import_progress_task = None
+        if result.value and isinstance(result.value, str):
+            operator.report({"INFO"}, result.value)
+        return result.value if isinstance(result.value, set) else {"FINISHED"}
+    except Exception as error:
+        task = getattr(operator, "_import_progress_task", None)
+        if task is not None:
+            task.close()
+        finish_import_progress(operator, context)
+        append_import_log(f"model import failed: {error}\n{traceback.format_exc()}")
+        operator.report({"ERROR"}, str(error))
+        return {"CANCELLED"}
+    return {"RUNNING_MODAL"}
+
+
 @contextmanager
 def suspended_global_undo(context):
     edit_preferences = getattr(getattr(context, "preferences", None), "edit", None)
@@ -121,8 +308,8 @@ def suspended_global_undo(context):
         edit_preferences.use_global_undo = previous
 
 if __package__:
-    from . import g4_port_addon
-    from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
+    from .porting import g4_port_addon
+    from .porting.g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from .shading.character_profile import annotate_current_toon_material
     from .shading.character_textures import (
         character_texture_base_key,
@@ -136,8 +323,8 @@ if __package__:
     from .shading import playback
     from .shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 else:
-    import g4_port_addon
-    from g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
+    from porting import g4_port_addon
+    from porting.g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from shading.character_profile import annotate_current_toon_material
     from shading.character_textures import (
         character_texture_base_key,
@@ -152,11 +339,13 @@ else:
     from shading.character_outline import add_outline_outputs, configure_screen_outline, remove_screen_outline
 
 if __package__:
-    from . import g4_animation_addon
-    from .g4_model_probe import extract_g4tx, map_scene_placements
+    from .animation import g4_animation_addon
+    from .animation import humanoid_avatar_addon
+    from .porting.g4_model_probe import extract_g4tx, map_scene_placements
 else:
-    import g4_animation_addon
-    from g4_model_probe import extract_g4tx, map_scene_placements
+    from animation import g4_animation_addon
+    from animation import humanoid_avatar_addon
+    from porting.g4_model_probe import extract_g4tx, map_scene_placements
 
 g4_port_addon.ADDON_ID = ADDON_ID
 g4_animation_addon.ADDON_ID = ADDON_ID
@@ -176,7 +365,7 @@ def default_probe_script() -> str:
     addon_path = Path(__file__).resolve()
     candidates.extend(
         [
-            addon_path.parent / "g4_model_probe.py",
+            addon_path.parent / "porting" / "g4_model_probe.py",
         ]
     )
     for candidate in candidates:
@@ -230,7 +419,6 @@ def default_chara_model_lookup() -> str:
     addon_path = Path(__file__).resolve()
     candidates.extend(
         [
-            addon_path.parent / "chara_model_lookup.json",
             addon_path.parent / "data" / "chara_model_lookup.json",
             addon_path.parents[1] / "data" / "chara_model_lookup.json",
         ]
@@ -245,6 +433,15 @@ def default_chara_model_lookup() -> str:
         if candidate.exists():
             return str(candidate)
     return ""
+
+
+def resolve_chara_model_lookup(prefs) -> Path | None:
+    configured = bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or "")
+    path = Path(configured) if configured else Path()
+    if path.is_file():
+        return path
+    fallback = Path(default_chara_model_lookup())
+    return fallback if fallback.is_file() else None
 
 
 def default_python() -> str:
@@ -279,18 +476,19 @@ def addon_preferences() -> "G4ImporterPreferences":
 def resolve_probe_script(prefs: "G4ImporterPreferences") -> Path:
     configured_probe = bpy.path.abspath(getattr(prefs, "probe_script", "") or "")
     probe_script = Path(configured_probe) if configured_probe else Path()
-    if probe_script.exists():
+    if probe_script.is_file():
         return probe_script
 
     fallback_path = default_probe_script()
     if fallback_path:
         fallback = Path(fallback_path)
-        if fallback.exists():
+        legacy_path = Path(__file__).resolve().parent / "g4_model_probe.py"
+        if fallback.is_file() and (not configured_probe or probe_script == legacy_path):
             return fallback
 
     raise RuntimeError(
         "Exporter script not found. Set the addon preference 'Exporter Script' "
-        "to g4_model_probe.py, place g4_model_probe.py next to the addon, or define LEVEL5_G4_PROBE."
+        "to g4_model_probe.py, check the add-on's porting folder, or define LEVEL5_G4_PROBE."
     )
 
 
@@ -305,9 +503,9 @@ def exporter_environment(
             raw_data_root = str(inferred_roots[0])
     if raw_data_root:
         env["LEVEL5_G4_RAW_ROOT"] = raw_data_root
-    chara_model_lookup = bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or default_chara_model_lookup())
-    if chara_model_lookup:
-        env["LEVEL5_G4_CHARA_LOOKUP"] = chara_model_lookup
+    chara_model_lookup = resolve_chara_model_lookup(prefs)
+    if chara_model_lookup is not None:
+        env["LEVEL5_G4_CHARA_LOOKUP"] = str(chara_model_lookup)
     active_chara_models = sorted(
         (Path(raw_data_root) / "common" / "gamedata" / "character").glob("chara_model*.xml")
     ) if raw_data_root else []
@@ -686,28 +884,20 @@ def apply_custom_vertex_normals(mesh, flat_normals: list[float], vertex_count: i
     return False
 
 
-def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target_armature=None) -> set[str]:
-    payload = json.loads(native_path.read_text(encoding="utf-8"))
-    if payload.get("format") != "level5-g4-native-mesh" or payload.get("version") != 1:
-        raise RuntimeError(f"Unsupported native G4 mesh payload: {native_path}")
-
-    imported: set[str] = set()
-    conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
-    skeleton = payload.get("skeleton") or {}
+def create_native_g4_armature(skeleton):
     names = skeleton.get("names") or []
     parents = skeleton.get("parent_indices") or []
     bind_matrices = skeleton.get("bind_matrices") or []
-    armature = target_armature if target_armature is not None and target_armature.type == "ARMATURE" else None
-    if armature is not None and not names:
-        names = [bone.name for bone in armature.data.bones]
-    elif armature is None and names and bind_matrices:
-        armature_data = bpy.data.armatures.new("skeleton_root")
-        armature = bpy.data.objects.new("skeleton_root", armature_data)
-        bpy.context.collection.objects.link(armature)
-        armature.matrix_world = conversion
-        imported.add(armature.name)
-        bpy.context.view_layer.objects.active = armature
-        armature.select_set(True)
+    if not names or len(bind_matrices) < len(names):
+        raise ValueError("Original skeleton has incomplete bind matrices")
+    conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
+    armature_data = bpy.data.armatures.new("skeleton_root")
+    armature = bpy.data.objects.new("skeleton_root", armature_data)
+    bpy.context.collection.objects.link(armature)
+    armature.matrix_world = conversion
+    bpy.context.view_layer.objects.active = armature
+    armature.select_set(True)
+    try:
         bpy.ops.object.mode_set(mode="EDIT")
         global_matrices = [matrix_from_flat(values) for values in bind_matrices[: len(names)]]
         edit_bones = []
@@ -730,6 +920,31 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
             if 0 <= parent < len(edit_bones) and parent != index:
                 bone.parent = edit_bones[parent]
         bpy.ops.object.mode_set(mode="OBJECT")
+    except Exception:
+        if armature.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.data.objects.remove(armature, do_unlink=True)
+        bpy.data.armatures.remove(armature_data)
+        raise
+    return armature
+
+
+def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target_armature=None) -> set[str]:
+    payload = json.loads(native_path.read_text(encoding="utf-8"))
+    if payload.get("format") != "level5-g4-native-mesh" or payload.get("version") != 1:
+        raise RuntimeError(f"Unsupported native G4 mesh payload: {native_path}")
+
+    imported: set[str] = set()
+    conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
+    skeleton = payload.get("skeleton") or {}
+    names = skeleton.get("names") or []
+    bind_matrices = skeleton.get("bind_matrices") or []
+    armature = target_armature if target_armature is not None and target_armature.type == "ARMATURE" else None
+    if armature is not None and not names:
+        names = [bone.name for bone in armature.data.bones]
+    elif armature is None and names and bind_matrices:
+        armature = create_native_g4_armature(skeleton)
+        imported.add(armature.name)
 
     source_model = str(payload.get("source") or native_path)
     materials: dict[str, bpy.types.Material] = {}
@@ -3460,8 +3675,8 @@ def character_skin_color_from_model(
 
 
 def load_model_lookup(prefs: G4ImporterPreferences) -> dict:
-    lookup_path = Path(bpy.path.abspath(getattr(prefs, "chara_model_lookup", "") or ""))
-    if not lookup_path.is_file():
+    lookup_path = resolve_chara_model_lookup(prefs)
+    if lookup_path is None:
         return {}
     try:
         return json.loads(lookup_path.read_text(encoding="utf-8")).get("models") or {}
@@ -4236,6 +4451,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
     bl_label = "Import Level-5 G4 Model"
     bl_options = {"REGISTER", "UNDO"}
 
+    progress_text: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_value: FloatProperty(options={"HIDDEN", "SKIP_SAVE"}, min=0.0, max=1.0)
+    progress_window_open: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
+
     filename_ext = ".g4md"
     filter_glob: StringProperty(
         default="*.g4md;*.g4pkm",
@@ -4306,6 +4525,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         return ImportHelper.invoke(self, context, event)
 
     def draw(self, context):
+        if self.progress_window_open:
+            self.layout.label(text=self.progress_text, icon="FILE_REFRESH")
+            self.layout.progress(factor=self.progress_value, type="BAR", text="Model import")
+            return
         layout = self.layout
         layout.prop(self, "create_report_text")
 
@@ -4361,29 +4584,29 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
         selected_rig = context.active_object
         if selected_rig is None or selected_rig.type != "ARMATURE":
             selected_rig = None
+        return start_import_progress(
+            self,
+            context,
+            len(paths),
+            "Preparing G4 model import…",
+            self._import_models(context, paths, prefs, selected_rig),
+        )
+
+    def modal(self, context, event):
+        return modal_import_progress(self, context, event)
+
+    def _import_models(self, context, paths, prefs, selected_rig):
         imported_total = 0
         part_mesh_total = 0
         imported_parts = []
         summaries = []
-        window_manager = context.window_manager
         total_paths = len(paths)
-        window_manager.progress_begin(0, max(1, total_paths))
-        update_import_progress(context, 0, total_paths, "Preparing G4 model import…")
         try:
             undo_scope = suspended_global_undo(context) if total_paths > 1 else nullcontext()
             with undo_scope:
                 for index, path in enumerate(paths, start=1):
-                    redraw = should_redraw_import_progress(index - 1, total_paths)
-                    update_import_progress(
-                        context,
-                        index - 1,
-                        total_paths,
-                        f"Importing model {index}/{total_paths}: {path.name}",
-                        redraw=redraw,
-                    )
-                    append_import_log(
-                        f"model batch importing {index}/{total_paths}: {path}"
-                    )
+                    yield index - 1, total_paths, f"Importing model {index}/{total_paths}: {path.name}"
+                    append_import_log(f"model batch importing {index}/{total_paths}: {path}")
                     target_armature = selected_rig if is_modular_character_part(path) else None
                     if target_armature is not None:
                         append_import_trace("import.selected_rig", path=path, target=target_armature.name)
@@ -4421,22 +4644,10 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
                             if ball_path is None:
                                 raise RuntimeError("Default ball model b000001 was not found")
                             part_mesh_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
-                    update_import_progress(
-                        context,
-                        index,
-                        total_paths,
-                        f"Imported model {index}/{total_paths}: {path.name}",
-                        redraw=should_redraw_import_progress(index, total_paths),
-                    )
+                    yield index, total_paths, f"Imported model {index}/{total_paths}: {path.name}"
         except Exception as exc:
-            append_import_log(
-                f"model batch failed: {exc}\n{traceback.format_exc()}"
-            )
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        finally:
-            window_manager.progress_end()
-            context.workspace.status_text_set(None)
+            append_import_log(f"model batch failed: {exc}\n{traceback.format_exc()}")
+            raise
 
         summary = summaries[-1]
         materials = summary.get("material_textures", {})
@@ -4455,11 +4666,9 @@ class IMPORT_OT_level5_g4(Operator, ImportHelper):
             message += f"; missing: {', '.join(missing[:4])}"
         if imported_parts:
             message += f"; parts {len(imported_parts)} ({part_mesh_total} meshes)"
-        self.report({"INFO"}, message)
-        append_import_log(
-            f"model batch complete: models={len(summaries)}; objects={imported_total}"
-        )
-        return {"FINISHED"}
+        append_import_log(f"model batch complete: models={len(summaries)}; objects={imported_total}")
+        return message
+
 
 
 def collect_model_paths(directory: Path, recursive: bool) -> list[Path]:
@@ -4483,6 +4692,38 @@ def collect_model_paths_auto(directory: Path, recursive: bool) -> list[Path]:
     if paths or recursive:
         return paths
     return collect_model_paths(directory, True)
+
+
+def collect_model_paths_progress(directory: Path, recursive: bool):
+    paths = []
+    folders_scanned = 0
+
+    def scan(include_subfolders):
+        nonlocal folders_scanned
+        found = []
+        for current, directories, filenames in os.walk(directory):
+            if not include_subfolders:
+                directories[:] = []
+            folders_scanned += 1
+            found.extend(
+                Path(current) / filename
+                for filename in filenames
+                if Path(filename).suffix.lower() in MODEL_EXTENSIONS
+            )
+            yield 0, 1, f"Scanning folder {folders_scanned}: {Path(current).name or directory.name}"
+        return found
+
+    paths = yield from scan(recursive)
+    if not paths and not recursive:
+        paths = yield from scan(True)
+
+    by_folder_stem: dict[tuple[Path, str], Path] = {}
+    for path in paths:
+        key = (path.parent, path.stem)
+        previous = by_folder_stem.get(key)
+        if previous is None or (previous.suffix.lower() == ".g4md" and path.suffix.lower() == ".g4pkm"):
+            by_folder_stem[key] = path
+    return sorted(by_folder_stem.values(), key=lambda item: item.as_posix())
 
 
 def preferred_model_path(previous: Path | None, candidate: Path) -> Path:
@@ -4627,6 +4868,10 @@ class IMPORT_OT_level5_g4_folder(Operator):
     bl_label = "Import Level-5 G4 Model Folder"
     bl_options = {"REGISTER"}
 
+    progress_text: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    progress_value: FloatProperty(options={"HIDDEN", "SKIP_SAVE"}, min=0.0, max=1.0)
+    progress_window_open: BoolProperty(options={"HIDDEN", "SKIP_SAVE"})
+
     directory: StringProperty(
         name="Folder",
         subtype="DIR_PATH",
@@ -4669,6 +4914,10 @@ class IMPORT_OT_level5_g4_folder(Operator):
         return {"RUNNING_MODAL"}
 
     def draw(self, context):
+        if self.progress_window_open:
+            self.layout.label(text=self.progress_text, icon="FILE_REFRESH")
+            self.layout.progress(factor=self.progress_value, type="BAR", text="Folder import")
+            return
         layout = self.layout
         layout.prop(self, "recursive")
         layout.prop(self, "create_report_text")
@@ -4695,31 +4944,37 @@ class IMPORT_OT_level5_g4_folder(Operator):
             self.report({"ERROR"}, f"Folder not found: {directory}")
             return {"CANCELLED"}
 
-        paths = collect_model_paths_auto(directory, self.recursive)
+        prefs = addon_preferences()
+        return start_import_progress(
+            self,
+            context,
+            1,
+            "Scanning model folder…",
+            self._import_folder(context, directory, prefs),
+        )
+
+    def modal(self, context, event):
+        return modal_import_progress(self, context, event)
+
+    def _import_folder(self, context, directory, prefs):
+        paths = yield from collect_model_paths_progress(directory, self.recursive)
         if not paths:
             append_import_log("model folder batch cancelled: no models found")
-            self.report({"ERROR"}, f"No .g4md/.g4pkm models found in {directory}")
-            return {"CANCELLED"}
+            raise RuntimeError(f"No .g4md/.g4pkm models found in {directory}")
 
-        prefs = addon_preferences()
-        imported_total = 0
         paths, placements_by_asset, referenced_paths = append_referenced_map_paths(directory, paths)
+        total_paths = len(paths)
+        imported_total = 0
         placed_total = 0
         hidden_total = 0
-        window_manager = context.window_manager
-        total_paths = len(paths)
-        window_manager.progress_begin(0, max(1, total_paths))
-        update_import_progress(context, 0, total_paths, "Preparing G4 folder import…")
+        yield 0, total_paths, "Preparing G4 folder import…"
+        append_import_log(
+            f"model folder batch prepared: models={total_paths}; referenced={len(referenced_paths)}"
+        )
         try:
             with suspended_global_undo(context):
                 for index, path in enumerate(paths, start=1):
-                    update_import_progress(
-                        context,
-                        index - 1,
-                        total_paths,
-                        f"Importing model {index}/{total_paths}: {path.name}",
-                        redraw=should_redraw_import_progress(index - 1, total_paths),
-                    )
+                    yield index - 1, total_paths, f"Importing model {index}/{total_paths}: {path.name}"
                     character_model = is_character_model(path)
                     append_import_log(
                         f"model folder batch importing {index}/{total_paths}: {path}; character={character_model}"
@@ -4760,22 +5015,10 @@ class IMPORT_OT_level5_g4_folder(Operator):
                             if ball_path is None:
                                 raise RuntimeError("Default ball model b000001 was not found")
                             imported_total += attach_ball_to_armature(ball_path, armatures[0], prefs, self.create_report_text)
-                    update_import_progress(
-                        context,
-                        index,
-                        total_paths,
-                        f"Imported model {index}/{total_paths}: {path.name}",
-                        redraw=should_redraw_import_progress(index, total_paths),
-                    )
+                    yield index, total_paths, f"Imported model {index}/{total_paths}: {path.name}"
         except Exception as exc:
-            append_import_log(
-                f"model folder batch failed: {exc}\n{traceback.format_exc()}"
-            )
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
-        finally:
-            window_manager.progress_end()
-            context.workspace.status_text_set(None)
+            append_import_log(f"model folder batch failed: {exc}\n{traceback.format_exc()}")
+            raise
 
         message = f"Imported {len(paths)} G4 models from folder: {imported_total} objects"
         if referenced_paths:
@@ -4784,11 +5027,11 @@ class IMPORT_OT_level5_g4_folder(Operator):
             message += f"; reconstructed {placed_total} map placements"
         if hidden_total:
             message += f"; hidden {hidden_total} auxiliary map objects"
-        self.report({"INFO"}, message)
         append_import_log(
             f"model folder batch complete: models={len(paths)}; referenced={len(referenced_paths)}; objects={imported_total}"
         )
-        return {"FINISHED"}
+        return message
+
 
 
 class IMPORT_OT_level5_g4_character_parts(Operator):
@@ -5240,6 +5483,7 @@ def register():
         register_class_replacing_stale(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     g4_animation_addon.register()
+    humanoid_avatar_addon.register()
     g4_port_addon.register()
     from .shading import particle_nodes
     particle_nodes.register()
@@ -5256,8 +5500,9 @@ def unregister():
     particle_nodes.unregister()
     if refresh_level5_outlines_on_load in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(refresh_level5_outlines_on_load)
-    g4_animation_addon.unregister()
     g4_port_addon.unregister()
+    humanoid_avatar_addon.unregister()
+    g4_animation_addon.unregister()
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

@@ -1,13 +1,21 @@
 # Level-5 G4 Blender Tools
 
-Blender add-on for importing Level-5 G4 assets and porting edited geometry back to conservative native packages. It supports models, characters, maps and textures used by G4-based games.
+Blender add-on for importing Level-5 G4 models, characters, maps, animations and textures, then exporting edited assets against a compatible native base.
 
 The exporter patches a legally obtained native base instead of rebuilding unknown format tables from scratch. This preserves the original layout, material references, hashes, palettes and texture structure whenever possible.
 
-The current stabilization branch also contains a Blender-free native foundation
-under `formats/`, `shading/` and `effects/`. It records source evidence before
-admitting a format, keeps diagnostics separate from UI code, and treats G4MA
-as a controller for effect-shader parameters as well as material animation.
+## Current release (2.0.14)
+
+* Grouped runtime modules by function under `animation/`, `porting/` and `shared/`; only the Blender entry point stays at the project root.
+* Model, folder and event imports show one centered progress window with the current file or event phase and a Cancel button.
+* Import every animation in a G4MT/G4PK bank as a separate Blender Action, then choose the active clip from the 3D View sidebar.
+* Retarget an original animation-bank family to a custom rig. The search includes matching `common/chr` and `common/event` resources, and the bulk operation reports progress and can be cancelled.
+* Map joints with common-name suggestions or manual overrides, review native mesh records, and prepare textures and exports from the **G4 Port** panel.
+* Export recursively matched G4PK/G4MT resources immediately after the model when **Export Animation Family for VictoryTool** is enabled. `common/chr` uses the model's `CHARA_MOTION_INFO` animation family; `common/event` uses its generic G4SK ID and includes sibling resources from matching event cuts. Animation workers retarget against the exact G4SK produced with the model. Object scale is applied to exported geometry and joint positions, while skeleton and animation rest scales remain normalized. Explicit joint aliases are written to the VictoryTool profile and applied while the animation workers retarget; unmatched rig bones are kept in the G4SK but remain unmapped.
+* Event placement and root motion keep the same game-to-Blender orientation used by the imported character rig, including when sampling or exporting animation.
+* Event effects prefer the native one-cut offset between the effect asset ID and the event cut when both neighboring cuts are present.
+
+**Export Animation Family for VictoryTool** remains optional. Enable the family checkbox in G4 Port and export the model as usual. The add-on builds the target G4SK from the exported armature and writes a `.g4anim.json` profile beside the model. It then finds `common/chr` banks using the animation family associated with the original model's skeleton CRC in `CHARA_MOTION_INFO`; for `common/event`, it finds resources by the generic G4SK ID and includes sibling G4PK/G4MT files from those event cuts, such as point effects. Configured aliases are included in the profile and passed to retarget workers. The exporter merges source-family resources into the package's `data/common/chr` and `data/common/event` overlay without replacing existing files. VictoryTool's separate candidate export writes `.g4mt` files beside the model for VictoryTool to register on import. The two branches stay separate; an imported Action is not required. A centered progress window can be cancelled while the export is running.
 
 An untouched model imported from its original G4MD is preserved byte-for-byte on export by default. **Preserve Untouched Native Import** copies its original G4MD, G4MG and G4TX files only when every assigned imported mesh still matches its import snapshot. Moving geometry, changing UVs or assigning a different source mesh automatically falls back to the normal port process.
 
@@ -21,9 +29,8 @@ Install the release ZIP, or package the `G4_Blender` directory as a ZIP while ke
 2. Choose **Install from Disk** and select the ZIP.
 3. Enable **Level-5 G4 Blender Tools**.
 
-The add-on entry point remains the root `__init__.py`. Native readers and
-profiles live in the small `formats/`, `shading/` and `effects/` packages; the
-helper modules and `chara_model_lookup.json` must remain inside the add-on.
+Install the versioned release ZIP directly in Blender; it contains the add-on
+folder and the guide images.
 
 ### Menu entries
 
@@ -31,9 +38,25 @@ helper modules and `chara_model_lookup.json` must remain inside the add-on.
 File > Import > Level-5 G4 Model
 File > Import > Level-5 G4 Model Folder
 File > Import > Attach Level-5 G4 Character Parts
+File > Import > Level-5 G4 Animation (.g4mt/.g4pk)
+File > Import > Level-5 G4 Event Folder
+File > Import > Level-5 G4 Camera (.g4cm)
 File > Export > Level-5 G4 Port
+File > Export > Retarget Original Bank Family
+File > Export > Export Animation Family for VictoryTool
+File > Export > Level-5 G4 Animation Candidate (.g4mt)
+File > Export > Level-5 G4 Skeleton Candidate (.g4sk)
+File > Export > Level-5 G4 Scene (.fbx)
 View3D > Sidebar > Level-5 > G4 Port
+View3D > Sidebar > G4 > Imported G4MT Bank
 ```
+
+### Quick character-port workflow
+
+1. Import the character model you want to port and open **View3D > Sidebar > Level-5 > G4 Port**.
+2. Choose its original model as the native template. The exporter uses that file to identify mesh records, materials and texture entries.
+3. Assign each mesh to a record. **Auto-map Common Joints** fills recognized bone mappings; use the searchable target picker or per-bone source-joint override for the remaining rig-specific assignments.
+4. Review texture replacements and run **Analyze** before **Export**. To prepare the matching animation resources, enable **Export Animation Family for VictoryTool**; the resource-tree export starts automatically after the model export finishes.
 
 ## Importing assets
 
@@ -65,7 +88,7 @@ Character heads named `cXXXXXXXX` can be combined with separate components:
 
 Use the character-parts dialog during model import, or select **Attach Level-5 G4 Character Parts** to add components to an existing rig. The importer never guesses a uniform from an ID: cancelling a body or shoes selection simply skips that part. Secondary LOD meshes are discarded so multiple LODs do not deform together.
 
-Many character models reference a shared skeleton rather than embedding one locally. `chara_model_lookup.json` helps locate it, but the add-on still requires a complete legal game dump with the shared skeletons, typically under `data/common/chr/`. Joint names are resolved through the model's CRC32 palette, not by palette order or mesh shape, so modular parts can target the correct bones reliably.
+Many character models reference a shared skeleton rather than embedding one locally. `data/chara_model_lookup.json` helps locate it, but the add-on still requires a complete legal game dump with the shared skeletons, typically under `data/common/chr/`. Joint names are resolved through the model's CRC32 palette, not by palette order or mesh shape, so modular parts can target the correct bones reliably.
 
 `Apply Bone Orientation` is optional and improves the visual orientation of imported bones in the viewport.
 
@@ -85,7 +108,7 @@ Character meshes also receive a **Level-5 Character Parameters** Geometry Nodes 
 
 ## Map reconstruction
 
-For a complete map, select the world directory itself, such as `w10`, `w11` or `w12`, and enable recursive folder import. The importer reads the world-level `.g4pk` or `.g4pkm` hierarchy, matches scene nodes to model assets, composes transforms, converts G4 Y-up coordinates to Blender Z-up, and uses linked object data for repeated assets.
+For a complete map, select the world directory itself, such as `w10`, `w11` or `w12`, and enable recursive folder import. The importer reads the world-level `.g4pk` or `.g4pkm` hierarchy, matches scene nodes to model assets, composes transforms, and uses linked object data for repeated assets.
 
 Auxiliary shadow and culling objects are hidden automatically. Models absent from the render hierarchy still import unchanged; the add-on does not invent placements for them. When present, a matching native half-float DDS cubemap is converted to equirectangular Radiance HDR and used as a restrained world environment.
 
@@ -121,9 +144,9 @@ region. Marking enables **Authored Outlines** for export. Export creates narrow
 bands along marked edges with constant COLOR per triangle, and matches the new
 cuts on adjacent faces. UVs and skin weights are interpolated in the exported
 copy; the editable mesh remains unchanged. The red guide shows the marked edge;
-the exported band has a small width relative to its incident triangles. Loose edges without faces
-cannot produce surface outlines. Disable **Align Forward to Y Axis** for this
-export path. Other meshes retain the constant custom fallback.
+the exported band has a small width relative to its incident triangles. Loose
+edges without faces cannot produce surface outlines. Other meshes retain the
+constant custom fallback.
 
 The authored channel values remain experimental: Blender preview and parameter
 transport are validated, but native-game appearance still needs testing. The red
@@ -152,6 +175,11 @@ Atlas diagnostics are written to `atlas_uv_trace.log` in the configured export c
 
 Atlas offsets are authored in Blender image space and converted automatically when the G4 V flip is enabled, so the visible top row remains the top row in the exported model.
 
+Native normal, occlusion and specular textures are preserved when available;
+valid same-role replacements can also be supplied. Automatic atlas generation
+focuses on the base texture. It does not create a new normal map or reflection
+cubemap.
+
 ## Requirements
 
 * Blender 4.0 or newer
@@ -173,6 +201,14 @@ Provide your own legally obtained game files. This project is not affiliated wit
 * **DaniKH** — batch-importing and shading support, rigging testing and bug reporting.
 * **Victory Road España**.
 
+## Avatar animation preview
+
+Import the character normally and keep its original armature. In **Level-5 > AVATAR**, use **Build Avatar Representation**, review the bone assignments, and validate the mapping. Select the original game character model in **PORT**, then use **Import Avatar Animation** to choose a G4MT or G4PK file. The file selector's **Animation** and **Bank Entry** fields use indices starting at zero.
+
+The preview creates a new Action on the character's existing bone names. It preserves the original hierarchy, rest matrices, mesh geometry, skin weights, and bone rotation modes. The original character model supplies the source skeleton automatically. Animation preparation runs on a temporary armature; the completed Action is assigned only after its evaluation is checked. Cancel or an error removes the incomplete Action and temporary rigs. The progress display closes automatically when the operation ends.
+
+This preview is the representation phase of the new Avatar system. Finger and auxiliary assignments can be reviewed in the Avatar panel. It does not establish game-export compatibility or replace the existing animation-family exporter.
+
 ## Animation import (1.5.0)
 
 The G4MT/G4PK importer creates separate Actions for all independent clips in
@@ -180,6 +216,24 @@ its selected bank. Leave **Active Animation** empty to start with the first
 clip longer than two frames, or enter an exact name/index. Disable **Import All
 Animations** to import only that selection. Additive clips still require a
 base animation and are reported as skipped.
+
+When importing all clips, select the character armature and use **View3D >
+Sidebar > G4 > Imported G4MT Bank** to switch the active Action. That panel also
+opens **Retarget Original Bank Family**. Enter the source bank ID, the new
+`c00…` destination ID and a new output folder; the add-on searches matching
+character and event resources beneath the configured game data root. It writes
+to the new folder and leaves the source resources intact. For a single clip,
+use **File > Export > Level-5 G4 Animation Candidate**. **Export All Clips
+from Imported Bank** remains off unless enabled for that export.
+
+In **G4 Port > Export**, **Export Animation Family for VictoryTool** is
+optional and remains off by default. When enabled, the exported armature is
+serialized as the target G4SK and gets a `.g4anim.json` mapping profile. The
+original model resolves the `common/chr` animation family from its skeleton
+CRC and the `common/event` family from its generic G4SK ID. The export begins
+after the regular model export and merges both branches into the package's
+`data/common` overlay. The UI does not require an imported Action or a
+separate source G4SK selection for this workflow.
 
 Normal imports retain animated root bones. Event root extraction now uses
 the same bone delta and rest basis, preserving the resulting world pose
@@ -293,5 +347,5 @@ paths. Base FakeParticle meshes generate camera-facing particles with embedded
 G4TP stand animation where available. Other particle variants and PTLB simulation
 remain incomplete.
 
-To build the installation ZIP from the tracked runtime files, run
-`python3 build_release.py`. The ZIP is written to `dist/`.
+The installation ZIP includes this guide. To build it from a source checkout,
+run `python3 tools/build_release.py`; the versioned ZIP is written to `dist/`.
