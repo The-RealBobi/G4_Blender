@@ -11,6 +11,7 @@ from typing import Sequence
 
 HEADER_SIZE = 0x40
 MAX_FLOAT32 = 3.4028234663852886e38
+NATIVE_HELPER_NAMES = ("output", "boundingBox", "c_global_0_0", "c_ball_1_0")
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,54 @@ class G4SKNode:
     inverse_bind_matrix: tuple[float, ...]
     flags: int
     bounds_radius: float
+
+
+def copy_native_helper_fields(template: bytes, nodes: Sequence[G4SKNode]) -> list[G4SKNode]:
+    if len(template) < HEADER_SIZE or template[:4] != b"G4SK":
+        raise ValueError("template is not a G4SK resource")
+    if struct.unpack_from("<HHB", template, 4) != (HEADER_SIZE, 104, 0):
+        raise ValueError("template must be little-endian G4SK v104")
+
+    source_count = struct.unpack_from("<H", template, 0x20)[0]
+    sections = [
+        HEADER_SIZE + struct.unpack_from("<H", template, 0x24 + index * 2)[0] * 4
+        for index in range(11)
+    ]
+    source_names = {}
+    for index in range(source_count):
+        name_start = sections[7] + struct.unpack_from("<H", template, sections[7] + index * 2)[0]
+        name_end = template.find(b"\0", name_start)
+        if name_end < 0:
+            raise ValueError(f"template joint {index} has an unterminated name")
+        source_names[template[name_start:name_end].decode("ascii")] = index
+
+    target_indices = {node.name: index for index, node in enumerate(nodes)}
+    missing = [name for name in NATIVE_HELPER_NAMES if name not in source_names or name not in target_indices]
+    if missing:
+        raise ValueError(f"G4SK template or target is missing required helper joints: {', '.join(missing)}")
+
+    result = list(nodes)
+    for name in NATIVE_HELPER_NAMES:
+        index = source_names[name]
+        local_offset = sections[1] + index * 0x30
+        global_offset = HEADER_SIZE + index * 0x30
+        inverse_offset = sections[0] + index * 0x30
+        flags_offset = sections[5] + index
+        radius_offset = sections[6] + index * 4
+        if max(local_offset + 0x30, global_offset + 0x30, inverse_offset + 0x30,
+               flags_offset + 1, radius_offset + 4) > len(template):
+            raise ValueError(f"template helper joint {name} has truncated data")
+        target_index = target_indices[name]
+        result[target_index] = G4SKNode(
+            name=name,
+            parent_index=result[target_index].parent_index,
+            local_srt=struct.unpack_from("<12f", template, local_offset),
+            global_matrix=struct.unpack_from("<12f", template, global_offset),
+            inverse_bind_matrix=struct.unpack_from("<12f", template, inverse_offset),
+            flags=template[flags_offset],
+            bounds_radius=struct.unpack_from("<f", template, radius_offset)[0],
+        )
+    return result
 
 
 def write_g4sk_v104(template: bytes, nodes: Sequence[G4SKNode]) -> bytes:

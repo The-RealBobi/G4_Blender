@@ -203,3 +203,11 @@ MISSION.md
 !/tools/
 /tools/*
 !/tools/build_release.py
+
+# Portable regression entry points; fixtures remain external.
+!/tests/
+/tests/*
+!/tests/blender_victorytool_animation_recipe.py
+!/tests/blender_victorytool_reference_family.py
+!/tests/test_g4_port_joint_hash_uv_offsets.py
+/tests

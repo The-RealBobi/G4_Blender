@@ -34,10 +34,12 @@ def run(job_path: Path) -> int:
     bpy.context.view_layer.objects.active = armature
     armature.select_set(True)
 
-    resources = [
-        (Path(item["path"]), Path(item["data_root"]), bool(item["is_event"]))
-        for item in job["resources"]
-    ]
+    resources = []
+    for item in job["resources"]:
+        if item["kind"] in {"g4pk_entry", "g4mt_clip_group"}:
+            resources.append(item)
+        else:
+            resources.append((Path(item["path"]), Path(item["data_root"]), bool(item["is_event"])))
     generator = export_animation_bank_resources(
         resources,
         job["character_bank_id"],

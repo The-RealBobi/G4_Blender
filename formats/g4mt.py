@@ -99,6 +99,7 @@ class G4MTAnimationBank:
     header: G4MTHeader
     scales: tuple[float, ...]
     clips: tuple[G4MTClip, ...]
+    clip_order: tuple[int, ...]
     targets: tuple[G4MTTarget, ...]
     target_infos: tuple[G4MTTargetInfo, ...]
     channels: tuple[G4MTChannel, ...]
@@ -263,6 +264,7 @@ def parse_g4mt(data: BinaryData, source: str = "<memory>") -> G4MTAnimationBank:
         header=G4MTHeader(header_size, _u16(view, 0x06, source, "G4MT file type"), _u32(view, 0x08, source, "G4MT version"), _u32(view, 0x0C, source, "G4MT content size"), clip_count, target_count, target_info_offset, channel_offset, scale_offset, clip_hash_offset, target_hash_offset, name_offset, key_offset, data_offset, offset_shift),
         scales=tuple(scales),
         clips=clips,
+        clip_order=tuple(clip_order),
         targets=tuple(G4MTTarget(index, value) for index, value in enumerate(target_hashes)),
         target_infos=tuple(target_infos),
         channels=tuple(channels),

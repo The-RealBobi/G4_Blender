@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (2, 0, 17),
+    "version": (2, 0, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export; View3D > Sidebar > Level-5",
     "description": "Import, animate and port Level-5 G4 game assets.",
@@ -30,8 +30,10 @@ from mathutils import Matrix, Quaternion, Vector
 
 try:
     from .formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from .formats.g4_axes import blender_from_g4_matrix
 except ImportError:
     from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from formats.g4_axes import blender_from_g4_matrix
 
 ADDON_ID = __name__
 MODEL_EXTENSIONS = {".g4md", ".g4pkm"}
@@ -574,6 +576,11 @@ class G4ImporterPreferences(AddonPreferences):
         default=False,
         description="Orient bones for display; leave disabled when the rig will receive G4MT animation",
     )
+    legacy_animation_export: BoolProperty(
+        name="Enable legacy animation exporter",
+        default=False,
+        description="Enable the original Blender CHR/EVENT animation exporter",
+    )
     decoder_script: StringProperty(
         name="G4MT Decoder",
         subtype="FILE_PATH",
@@ -695,6 +702,7 @@ class G4ImporterPreferences(AddonPreferences):
         animation_box.prop(self, "decoder_script")
         animation_box.prop(self, "camera_decoder_script")
         animation_box.prop(self, "keep_decode_json")
+        animation_box.prop(self, "legacy_animation_export")
 
         port_box = layout.box()
         port_box.label(text="Port Export")
@@ -890,7 +898,7 @@ def create_native_g4_armature(skeleton):
     bind_matrices = skeleton.get("bind_matrices") or []
     if not names or len(bind_matrices) < len(names):
         raise ValueError("Original skeleton has incomplete bind matrices")
-    conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
+    conversion = blender_from_g4_matrix()
     armature_data = bpy.data.armatures.new("skeleton_root")
     armature = bpy.data.objects.new("skeleton_root", armature_data)
     bpy.context.collection.objects.link(armature)
@@ -935,7 +943,6 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
         raise RuntimeError(f"Unsupported native G4 mesh payload: {native_path}")
 
     imported: set[str] = set()
-    conversion = Matrix.Rotation(math.radians(90.0), 4, "X")
     skeleton = payload.get("skeleton") or {}
     names = skeleton.get("names") or []
     bind_matrices = skeleton.get("bind_matrices") or []
@@ -5476,6 +5483,51 @@ def register_class_replacing_stale(cls) -> None:
         bpy.utils.register_class(cls)
     except ValueError:
         pass
+
+
+if not hasattr(g4_animation_addon, "_legacy_export_menu"):
+    g4_animation_addon._legacy_export_menu = g4_animation_addon.menu_func_export
+    g4_animation_addon._legacy_bank_draw = g4_animation_addon.VIEW3D_PT_level5_g4mt_bank.draw
+_legacy_animation_menu = g4_animation_addon._legacy_export_menu
+_legacy_animation_bank_draw = g4_animation_addon._legacy_bank_draw
+
+
+def animation_export_menu(self, context):
+    if getattr(addon_preferences(), "legacy_animation_export", False):
+        _legacy_animation_menu(self, context)
+    else:
+        self.layout.operator(g4_animation_addon.EXPORT_OT_level5_g4sk.bl_idname,
+                             text="Level-5 G4 Skeleton Candidate (.g4sk)")
+        self.layout.operator(g4_animation_addon.EXPORT_OT_level5_g4_fbx.bl_idname,
+                             text="Level-5 G4 Scene (.fbx)")
+
+
+def animation_bank_draw(self, context):
+    if getattr(addon_preferences(), "legacy_animation_export", False):
+        _legacy_animation_bank_draw(self, context)
+        return
+    actions = g4_animation_addon.imported_g4mt_family_actions(context.active_object)
+    current = context.active_object.animation_data.action
+    index = actions.index(current) + 1 if current in actions else 0
+    self.layout.operator_menu_enum(
+        g4_animation_addon.VIEW3D_OT_level5_g4mt_select_action.bl_idname, "action_name",
+        text=f"{index}/{len(actions)}  {current.get('g4mt_clip_name', current.name)}", icon="ACTION",
+    )
+
+
+def legacy_animation_export_poll(cls, context):
+    return bool(getattr(addon_preferences(), "legacy_animation_export", False))
+
+
+# Keep the original exporters callable only when their preference is enabled.
+g4_animation_addon.menu_func_export = animation_export_menu
+g4_animation_addon.VIEW3D_PT_level5_g4mt_bank.draw = animation_bank_draw
+for _export_class in (
+    g4_animation_addon.EXPORT_OT_level5_g4mt,
+    g4_animation_addon.EXPORT_OT_level5_g4mt_bank_family,
+    g4_animation_addon.EXPORT_OT_level5_g4mt_victorytool_family,
+):
+    _export_class.poll = classmethod(legacy_animation_export_poll)
 
 
 def register():

@@ -12,15 +12,15 @@ from .g4mt import crc32b, parse_g4mt
 PRECISION_FACE_MARKERS = ("eye", "eld", "ebw", "lgt")
 
 
-def _clip_hash_order(clip_hashes: Sequence[int]) -> tuple[int, ...]:
-    return tuple(sorted(range(len(clip_hashes)), key=lambda index: (clip_hashes[index], index)))
+def _clip_hash_order(clip_hashes: Sequence[int], native_order: Sequence[int]) -> tuple[int, ...]:
+    return tuple(sorted(range(len(clip_hashes)), key=lambda index: (clip_hashes[index], native_order[index], index)))
 
 
-def _has_clip_hash_order(data: bytes, clip_hashes: Sequence[int]) -> bool:
+def _has_clip_hash_order(data: bytes, clip_hashes: Sequence[int], native_order: Sequence[int]) -> bool:
     header_words = struct.unpack_from("<H", data, 0x0A)[0]
     name_offset = (header_words + struct.unpack_from("<H", data, 0x2E)[0]) * 4
     order = struct.unpack_from(f"<{len(clip_hashes)}H", data, name_offset)
-    return order == _clip_hash_order(clip_hashes)
+    return order == _clip_hash_order(clip_hashes, native_order)
 
 
 def simplify_samples(frames: Sequence[int], samples: Sequence[Sequence[float]], tolerance: float) -> tuple[list[int], list[Sequence[float]]]:
@@ -416,7 +416,10 @@ def write_g4mt_family(template: bytes, clips: Sequence[G4MTClipSamples]) -> byte
     scales = struct.pack("<f", 1.0)
     clip_hash_table = struct.pack(f"<{len(clip_hashes)}I", *clip_hashes)
     target_hash_table = struct.pack(f"<{len(target_hashes)}I", *target_hashes)
-    name_table = bytearray(struct.pack(f"<{len(clips)}H", *_clip_hash_order(clip_hashes)))
+    native_rank = {clip_index: rank for rank, clip_index in enumerate(source.clip_order)}
+    clip_native_order = tuple(native_rank[clip.template_clip_index] for clip in clips)
+    name_order = _clip_hash_order(clip_hashes, clip_native_order)
+    name_table = bytearray(struct.pack(f"<{len(clips)}H", *name_order))
     name_table.extend(b"\0" * (-len(name_table) % 4))
     name_offsets_table = len(name_table)
     name_table.extend(b"\0" * (len(clips) * 2))
@@ -494,7 +497,7 @@ def write_g4mt_family(template: bytes, clips: Sequence[G4MTClipSamples]) -> byte
 
     result = bytes(output)
     readback = parse_g4mt(result, "generated G4MT family")
-    if not _has_clip_hash_order(result, clip_hashes):
+    if not _has_clip_hash_order(result, clip_hashes, clip_native_order):
         raise ValueError("Generated G4MT family has an invalid clip-hash search order")
     if tuple(clip.name for clip in readback.clips) != tuple(clip_names):
         raise ValueError("Generated G4MT family failed clip-name read-back")
@@ -517,10 +520,94 @@ def write_g4mt_family_preserving_additive(
     if len(generated_source_indices) != len(expected_generated) or set(generated_source_indices) != expected_generated:
         raise ValueError("G4MT family export must provide every non-additive source clip exactly once")
     generated_bytes = write_g4mt_family(template, clips)
-    generated = parse_g4mt(generated_bytes, "generated G4MT family")
-    generated_by_source_index = dict(zip(generated_source_indices, generated.clips))
+    return merge_g4mt_family_preserving_additive(template, (
+        (generated_source_indices, generated_bytes, g4mt_family_target_hierarchy(clips)),
+    ))
 
-    target_hashes = list(target.name_hash for target in generated.targets)
+
+def g4mt_family_target_hierarchy(clips: Sequence[G4MTClipSamples]) -> tuple[tuple[str, str | None, int, int], ...]:
+    hierarchy = {}
+    for clip in clips:
+        ordered_targets = _targets_parent_first(clip.targets)
+        for target_order, target in enumerate(ordered_targets):
+            parent_name = (
+                ordered_targets[target.parent_index].name
+                if target.parent_index is not None else None
+            )
+            previous = hierarchy.get(target.name)
+            if previous is not None and previous[0] != parent_name:
+                raise ValueError(f"G4MT target {target.name!r} has conflicting parents across clips")
+            first_order = (clip.template_clip_index, target_order)
+            if previous is None or first_order < previous[1]:
+                hierarchy[target.name] = (parent_name, first_order)
+    return tuple(
+        (name, parent, order[0], order[1])
+        for name, (parent, order) in hierarchy.items()
+    )
+
+
+def merge_g4mt_family_preserving_additive(
+    template: bytes,
+    parts: Sequence[tuple[Sequence[int], bytes, Sequence[tuple[str, str | None, int, int]]]],
+) -> bytes:
+    source = parse_g4mt(template, "G4MT family template")
+    additive = {clip.index for clip in source.clips if clip.flags & 1}
+    expected_generated = {clip.index for clip in source.clips} - additive
+    generated_by_source_index = {}
+    target_parents = {}
+    first_target_order = {}
+    generated_banks = []
+
+    for part_indices, generated_bytes, target_hierarchy in parts:
+        generated = parse_g4mt(generated_bytes, "generated G4MT family part")
+        if len(part_indices) != len(generated.clips):
+            raise ValueError("G4MT part clip-index table does not match its clip count")
+        part_bank_index = len(generated_banks) + 1
+        generated_banks.append((generated_bytes, generated))
+        for source_index, generated_clip in zip(part_indices, generated.clips):
+            if source_index not in expected_generated or source_index in generated_by_source_index:
+                raise ValueError("G4MT family part refers to an additive, duplicate, or invalid clip")
+            if generated_clip.name != source.clips[source_index].name:
+                raise ValueError(f"G4MT family part changed source clip {source.clips[source_index].name!r}")
+            generated_by_source_index[source_index] = (
+                part_bank_index, generated_bytes, generated, generated_clip
+            )
+        for name, parent_name, clip_index, target_order in target_hierarchy:
+            if not 0 <= clip_index < len(source.clips) or clip_index not in expected_generated:
+                raise ValueError("G4MT target hierarchy refers to an invalid source clip")
+            previous_parent = target_parents.setdefault(name, parent_name)
+            if previous_parent != parent_name:
+                raise ValueError(f"G4MT target {name!r} has conflicting parents across parts")
+            order = (clip_index, target_order)
+            if name not in first_target_order or order < first_target_order[name]:
+                first_target_order[name] = order
+
+    if set(generated_by_source_index) != expected_generated:
+        raise ValueError("G4MT family export must provide every non-additive source clip exactly once")
+
+    target_names = []
+    target_states = {}
+
+    def visit_target(name: str) -> None:
+        state = target_states.get(name, 0)
+        if state == 2:
+            return
+        if state == 1:
+            raise ValueError("G4MT family target hierarchy contains a cycle")
+        target_states[name] = 1
+        parent_name = target_parents.get(name)
+        if parent_name is not None:
+            if parent_name not in first_target_order:
+                raise ValueError(f"G4MT target {name!r} has an unavailable parent {parent_name!r}")
+            visit_target(parent_name)
+        target_states[name] = 2
+        target_names.append(name)
+
+    for name in sorted(first_target_order, key=first_target_order.__getitem__):
+        visit_target(name)
+    target_hashes = [crc32b(name) for name in target_names]
+    if len(set(target_hashes)) != len(target_hashes):
+        raise ValueError("G4SK target names contain a CRC32 collision")
     target_index = {value: index for index, value in enumerate(target_hashes)}
     for target in source.targets:
         if target.name_hash not in target_index:
@@ -531,8 +618,8 @@ def write_g4mt_family_preserving_additive(
 
     scales = list(source.scales)
     scale_indices = {value: index for index, value in enumerate(scales)}
-    scale_maps = []
-    for bank in (source, generated):
+    scale_maps = [[scale_indices[value] for value in source.scales]]
+    for _generated_bytes, bank in generated_banks:
         mapping = []
         for value in bank.scales:
             if value not in scale_indices:
@@ -552,12 +639,12 @@ def write_g4mt_family_preserving_additive(
     shared_channel_blocks = {}
     for source_clip in source.clips:
         passthrough = source_clip.index in additive
-        bank = source if passthrough else generated
-        bank_bytes = template if passthrough else generated_bytes
-        bank_clip = source_clip if passthrough else generated_by_source_index.get(source_clip.index)
+        if passthrough:
+            bank_index, bank_bytes, bank, bank_clip = 0, template, source, source_clip
+        else:
+            bank_index, bank_bytes, bank, bank_clip = generated_by_source_index[source_clip.index]
         if bank_clip is None or bank_clip.name != source_clip.name:
             raise ValueError(f"G4MT family is missing source clip {source_clip.name!r}")
-        bank_index = 0 if passthrough else 1
         target_info_start = len(target_infos) // 8
         if target_info_start > 0xFFFFFF:
             raise ValueError("G4MT family target-info table exceeds its 24-bit index limit")
@@ -566,6 +653,8 @@ def write_g4mt_family_preserving_additive(
         ]
         for info in info_slice:
             target_hash = bank.targets[info.target_index].name_hash
+            if target_hash not in target_index:
+                raise ValueError(f"G4MT family target {target_hash:08x} is missing from its target table")
             if info.channel_count > 0xFF:
                 raise ValueError("G4MT target has more than 255 animation channels")
             block_key = (bank_index, info.channel_start, info.channel_count)
@@ -601,7 +690,9 @@ def write_g4mt_family_preserving_additive(
         rows.extend(row)
         clip_hashes.append(source_clip.name_hash)
 
-    names = bytearray(struct.pack(f"<{len(source.clips)}H", *_clip_hash_order(clip_hashes)))
+    native_order = tuple(source.clip_order.index(index) for index in range(len(source.clips)))
+    name_order = _clip_hash_order(clip_hashes, native_order)
+    names = bytearray(struct.pack(f"<{len(source.clips)}H", *name_order))
     names.extend(b"\0" * (-len(names) % 4))
     name_offsets = len(names)
     names.extend(b"\0" * (len(source.clips) * 2))
@@ -677,7 +768,7 @@ def write_g4mt_family_preserving_additive(
     struct.pack_into("<I", output, 0x0C, len(output) - 0x40)
     result = bytes(output)
     readback = parse_g4mt(result, "G4MT family with additive passthrough")
-    if not _has_clip_hash_order(result, clip_hashes):
+    if not _has_clip_hash_order(result, clip_hashes, native_order):
         raise ValueError("G4MT family with additive passthrough has an invalid clip-hash search order")
     if tuple(clip.name for clip in readback.clips) != tuple(clip.name for clip in source.clips):
         raise ValueError("G4MT family clip order changed during additive passthrough")

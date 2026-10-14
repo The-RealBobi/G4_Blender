@@ -30,6 +30,7 @@ from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup, UIList
 from bpy_extras.io_utils import ImportHelper
 
 try:
+    from ..formats.g4_axes import blender_from_g4_matrix, g4_from_blender_matrix
     from .g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from ..shading import viewport_outline
     from .outline_regions import (
@@ -37,6 +38,7 @@ try:
         STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, native_outline_edges,
     )
 except ImportError:
+    from formats.g4_axes import blender_from_g4_matrix, g4_from_blender_matrix
     from porting.g4_roundtrip import NATIVE_ROUNDTRIP_SIGNATURE_VERSION, native_mesh_signature
     from shading import viewport_outline
     from porting.outline_regions import (
@@ -82,7 +84,7 @@ EXPRESSION_PREVIEW_SOURCE_UV_KEY = "g4_expression_preview_source_uv"
 ATLAS_GUTTER_PIXELS = 2
 G4_PORT_ADDON_MARKER = "mesh-json-v1-handoff"
 G4_BLENDER_PLUGIN_VERSION_FALLBACK = (2, 0, 0)
-G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.11"
+G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.14"
 STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 
 
@@ -417,8 +419,17 @@ def export_pose_armature(source: bpy.types.Object, collection, rig_copies: dict)
         rig.data = original_rig.data.copy()
         rig.matrix_world = original_rig.matrix_world.copy()
         collection.objects.link(rig)
-        sides = neutralize_armature_t_pose(rig)
-        port_log(None, f"Temporary export rig {original_rig.name}: neutralized {'/'.join(sides) if sides else 'no standard arm chains'} to T-pose")
+        props = getattr(bpy.context.scene, "level5_g4_port", None)
+        if props is not None and props.prepare_victorytool_profile:
+            rig.animation_data_clear()
+            rig.constraints.clear()
+            rig.parent = None
+            rig.matrix_world = original_rig.matrix_world.copy()
+            rig.data.pose_position = "REST"
+            port_log(None, f"Temporary export rig {original_rig.name}: using authored bind pose")
+        else:
+            sides = neutralize_armature_t_pose(rig)
+            port_log(None, f"Temporary export rig {original_rig.name}: neutralized {'/'.join(sides) if sides else 'no standard arm chains'} to T-pose")
         rig_copies[original_rig.name_full] = rig
     return rig
 
@@ -643,8 +654,18 @@ def export_port_meshes(path: Path, selected_only: bool, apply_modifiers: bool) -
     if not objects:
         raise RuntimeError("No mesh objects were found to export.")
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    g4_from_blender = Matrix.Rotation(-math.pi / 2.0, 4, "X")
+    conversion = g4_from_blender_matrix()
     settings = getattr(bpy.context.scene, "level5_g4_port", None)
+    if settings is not None and settings.prepare_victorytool_profile:
+        try:
+            from ..animation.humanoid_avatar_pose import avatar_export_alignment
+        except ImportError:
+            from animation.humanoid_avatar_pose import avatar_export_alignment
+        original = resolve_file(settings.original_model)
+        skeleton = active_rig_skeleton_path(settings, original) if original.is_file() else None
+        conversion = conversion @ avatar_export_alignment(
+            export_armature(), skeleton.read_bytes() if skeleton is not None else None
+        )
     authored = getattr(settings, "use_authored_outlines", False)
     geometries = []
     for object_index, obj in enumerate(objects):
@@ -657,7 +678,7 @@ def export_port_meshes(path: Path, selected_only: bool, apply_modifiers: bool) -
         for face, corner_colors in zip(mesh.polygons, face_colors):
             for loop_index, color in zip(face.loop_indices, corner_colors):
                 colors[loop_index] = [value / 255 for value in color]
-        object_matrix = g4_from_blender @ obj.matrix_world
+        object_matrix = conversion @ obj.matrix_world
         normal_matrix = object_matrix.to_3x3().inverted_safe().transposed()
         positions = [list(object_matrix @ vertex.co) for vertex in mesh.vertices]
         normals = []
@@ -1385,10 +1406,12 @@ class G4PortSceneSettings(PropertyGroup):
     )
     joint_target_options: CollectionProperty(type=G4PortJointTarget, options={"HIDDEN"})
     prepare_victorytool_profile: BoolProperty(
-        name="Export Animation Family for VictoryTool",
+        name="Prepare animations for VictoryTool",
         default=False,
-        description="After exporting the model, recursively retarget its matching character and event animation resources",
+        description="Export the model and adaptation profile for VictoryTool to prepare its animations",
     )
+    export_chr_animations: BoolProperty(name="Character animations (chr)", default=True)
+    export_event_animations: BoolProperty(name="Event animations (event)", default=True)
     use_preset_file: BoolProperty(
         name="Use Preset File Directly",
         default=True,
@@ -2107,6 +2130,17 @@ def write_animation_profile(
         },
         "joints": joints,
     }
+    if not getattr(addon_preferences(), "legacy_animation_export", False):
+        from ..animation.g4_animation_addon import resolve_animation_family_ids
+        from ..animation.victorytool_animation_recipe import build_avatar_recipe
+
+        chr_family, event_skeleton = resolve_animation_family_ids(reference, [raw_root])
+        profile["schemaVersion"] = 7
+        profile["avatarRecipe"] = build_avatar_recipe(
+            source_path, target_skeleton_path, target_model, source_for_target,
+            chr_family, event_skeleton, True, True,
+        )
+
     output_path = target_model.with_suffix(".g4anim.json")
     handle, temporary_path = tempfile.mkstemp(prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent)
     try:
@@ -2145,7 +2179,7 @@ def native_rest_corrections(props: "G4PortSceneSettings", original_model: Path) 
         return {}
 
     # G4SK bind matrices are Y-up; the importer wraps them in this conversion.
-    blender_from_g4 = Matrix.Rotation(math.radians(90.0), 4, "X")
+    blender_from_g4 = blender_from_g4_matrix()
     g4_from_blender = blender_from_g4.inverted()
     corrections: dict[str, list[float]] = {}
     for source_name, target_name in effective_joint_aliases(props).items():
@@ -2185,7 +2219,7 @@ def local_g4sk_bind_translations(props: "G4PortSceneSettings", original_model: P
     target_names = set(skeleton.get("names") or ())
     if not target_names:
         return {}
-    g4_from_blender = Matrix.Rotation(-math.pi / 2.0, 4, "X")
+    g4_from_blender = g4_from_blender_matrix()
     aliases = effective_joint_aliases(props)
     source_by_target: dict[str, list[str]] = {}
     for source_name, target_name in aliases.items():
@@ -2324,17 +2358,33 @@ def animation_source_joint_map(
     armature = export_armature()
     if armature is None:
         return {}
-    aliases = effective_joint_aliases(props)
     parents = armature_joint_parents(armature)
-    explicit = {
-        target_name: source_name
-        for target_name, source_name in aliases.items()
-        if target_name in parents and source_name in source_joint_names
-    }
-    for bone in armature.data.bones:
-        source_name = str(bone.get("g4_animation_source_joint", "")).strip()
-        if source_name in source_joint_names:
-            explicit[bone.name] = source_name
+    profile = getattr(armature, "level5_humanoid_avatar", None)
+    if profile is not None and profile.has_representation:
+        if not profile.mapping_valid or profile.mapping_dirty or profile.pose_stale:
+            raise RuntimeError("Validate the humanoid Avatar mapping and rest pose before exporting animations")
+        try:
+            from ..animation.humanoid_avatar import target_animation_joint_map
+            from ..animation.humanoid_avatar_addon import mapping_from_profile
+        except ImportError:
+            from animation.humanoid_avatar import target_animation_joint_map
+            from animation.humanoid_avatar_addon import mapping_from_profile
+        explicit = target_animation_joint_map(
+            mapping_from_profile(profile), source_joint_names, target_joint_names
+        )
+        if not explicit:
+            raise RuntimeError("The Avatar mapping has no joints in the selected source and target G4SKs")
+    else:
+        aliases = effective_joint_aliases(props)
+        explicit = {
+            target_name: source_name
+            for target_name, source_name in aliases.items()
+            if target_name in parents and source_name in source_joint_names
+        }
+        for bone in armature.data.bones:
+            source_name = str(bone.get("g4_animation_source_joint", "")).strip()
+            if source_name in source_joint_names:
+                explicit[bone.name] = source_name
     drivers = resolve_animation_joint_drivers(parents, explicit)
     effective = resolve_effective_joint_mappings(parents, drivers)
     return {
@@ -4410,7 +4460,10 @@ class EXPORT_OT_level5_g4_port(Operator):
         animation_armature = None
         source_bank_id = ""
         source_event_skeleton_id = ""
-        if props.prepare_victorytool_profile:
+        if props.prepare_victorytool_profile and getattr(addon_preferences(), "legacy_animation_export", False):
+            if not (props.export_chr_animations or props.export_event_animations):
+                self.report({"ERROR"}, "Select character or event animations to export")
+                return {"CANCELLED"}
             animation_armature = export_armature()
             try:
                 from ..animation.g4_animation_addon import resolve_animation_family_ids
@@ -4466,6 +4519,8 @@ class EXPORT_OT_level5_g4_port(Operator):
                 ) or source_bank_id
             original_model = resolve_file(props.original_model)
             raw_root = infer_data_root(original_model)
+            export_chr_animations = props.export_chr_animations
+            export_event_animations = props.export_event_animations
             def start_animation_export():
                 data_overlay = next(
                     (parent for parent in model_path.parents if parent.name.casefold() == "data"),
@@ -4488,6 +4543,9 @@ class EXPORT_OT_level5_g4_port(Operator):
                     target_bank_id=target_bank_id,
                     output_directory=str(data_overlay),
                     source_data_root=str(raw_root) if raw_root else "",
+                    export_chr_animations=export_chr_animations,
+                    export_event_animations=export_event_animations,
+                    chain_victorytool_candidates=export_chr_animations,
                 )
                 if "CANCELLED" in result:
                     try:
@@ -4768,8 +4826,12 @@ def draw_export_settings(layout, props: G4PortSceneSettings) -> None:
     if props.disable_edge2:
         box.label(text="edge2 outline displacement will be zeroed on export", icon="INFO")
     box.prop(props, "preserve_native_roundtrip")
-    box.prop(props, "prepare_victorytool_profile")
-    if props.prepare_victorytool_profile:
+    legacy = getattr(prefs, "legacy_animation_export", False)
+    box.prop(props, "prepare_victorytool_profile", text="Export Animation Family for VictoryTool" if legacy else "Prepare animations for VictoryTool")
+    if props.prepare_victorytool_profile and legacy:
+        column = box.column(align=True)
+        column.prop(props, "export_chr_animations")
+        column.prop(props, "export_event_animations")
         box.label(text="The active imported animation determines the family to export", icon="ACTION")
 
     if not props.original_model:

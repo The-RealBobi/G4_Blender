@@ -49,6 +49,27 @@ class MappingSuggestion:
     missing_required: tuple[str, ...]
 
 
+def target_animation_joint_map(
+    native_to_target_bone: Mapping[str, str],
+    source_joint_names: Collection[str],
+    target_bone_names: Collection[str],
+) -> dict[str, str]:
+    source_names = set(source_joint_names)
+    target_names = set(target_bone_names)
+    result = {}
+    for native_joint, target_bone in native_to_target_bone.items():
+        if native_joint not in source_names or target_bone not in target_names:
+            continue
+        existing = result.get(target_bone)
+        if existing is not None and existing != native_joint:
+            raise ValueError(
+                f"Target bone {target_bone!r} is assigned to multiple native joints: "
+                f"{existing!r} and {native_joint!r}"
+            )
+        result[target_bone] = native_joint
+    return result
+
+
 def _role(native_joint: str, role: str, aliases: tuple[str, ...], required: bool, side: str = "") -> RoleSpec:
     return RoleSpec(native_joint, role, aliases, required, side)
 
@@ -156,6 +177,48 @@ def _matching_alias_length(name: str, aliases: Sequence[str], finger_role: bool)
         if _alias_matches(name, alias, finger_role)
     ]
     return max(lengths, default=0)
+
+
+def suggest_finger_mapping(
+    bones: Sequence[BoneNode], hand_assignments: Mapping[str, str],
+) -> MappingSuggestion:
+    try:
+        from ..shared.g4_joint_aliases import load_joint_alias_catalog, resolve_catalog_alias
+    except ImportError:
+        from shared.g4_joint_aliases import load_joint_alias_catalog, resolve_catalog_alias
+
+    bones_by_name = _index_bones(bones)
+    specs = {spec.native_joint: spec for spec in ROLE_SPECS
+             if re.fullmatch(r"[lr]_(thb|idx|mid|rng|pky)_1_[0-2]", spec.native_joint)}
+    catalog = load_joint_alias_catalog()
+    signatures: dict[tuple[tuple[str, ...], str], set[str]] = {}
+    for alias, joint in catalog.aliases.items():
+        if joint in specs:
+            signatures.setdefault(_name_parts(alias), set()).add(joint)
+    candidates: dict[str, list[str]] = {}
+    for bone in bones:
+        direct = resolve_catalog_alias(bone.name, catalog, set(specs))
+        joints = {direct} if direct else signatures.get(_name_parts(bone.name), set())
+        if not joints:
+            tokens, side = _name_parts(bone.name)
+            joints = {joint for joint, spec in specs.items()
+                      if (not side or side == spec.side)
+                      and any(_alias_matches(bone.name, alias, True) for alias in spec.aliases)}
+        for joint in joints:
+            hand = hand_assignments.get(f"{joint[0]}_w_1_0")
+            if hand is not None and _is_descendant(bones_by_name, hand, bone.name):
+                candidates.setdefault(joint, []).append(bone.name)
+    assignments: dict[str, str] = {}
+    ambiguities: dict[str, tuple[str, ...]] = {}
+    for joint, names in candidates.items():
+        chosen = hand_assignments.get(joint)
+        if chosen in names:
+            assignments[joint] = chosen
+        elif len(names) == 1:
+            assignments[joint] = names[0]
+        else:
+            ambiguities[joint] = tuple(sorted(names))
+    return MappingSuggestion(assignments, ambiguities, ())
 
 
 def _is_descendant(bones_by_name: Mapping[str, BoneNode], ancestor: str, descendant: str) -> int | None:
@@ -277,6 +340,12 @@ def suggest_native_mapping(bones: Sequence[BoneNode], native_joint_names: Collec
         else:
             ambiguities[spec.native_joint] = tuple(best)
 
+    fingers = suggest_finger_mapping(bones, {joint: name for joint, name in assignments.items()
+                                          if not re.fullmatch(r"[lr]_(thb|idx|mid|rng|pky)_1_[0-2]", joint)})
+    assignments = {joint: name for joint, name in assignments.items()
+                   if not re.fullmatch(r"[lr]_(thb|idx|mid|rng|pky)_1_[0-2]", joint)}
+    assignments.update({joint: name for joint, name in fingers.assignments.items() if joint in native_joint_names})
+    ambiguities.update({joint: names for joint, names in fingers.ambiguous.items() if joint in native_joint_names})
     chain_assignments = _suggest_limb_chain_roles(bones_by_name, assignments)
     assignments.update(chain_assignments)
     for joint in chain_assignments:
@@ -284,6 +353,7 @@ def suggest_native_mapping(bones: Sequence[BoneNode], native_joint_names: Collec
     landmarks = [assignments.get(joint) for joint in ("c_c_1_1", "l_l_1_0", "r_l_1_0")]
     if all(landmarks):
         common = [name for name in bones_by_name
+                  if name not in landmarks
                   if all(_is_descendant(bones_by_name, name, landmark) is not None for landmark in landmarks)]
         if common:
             hips = min(common, key=lambda name: sum(_is_descendant(bones_by_name, name, landmark) for landmark in landmarks))

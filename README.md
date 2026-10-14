@@ -4,7 +4,7 @@ Blender add-on for importing Level-5 G4 models, characters, maps, animations and
 
 The exporter patches a legally obtained native base instead of rebuilding unknown format tables from scratch. This preserves the original layout, material references, hashes, palettes and texture structure whenever possible.
 
-## Current release (2.0.14)
+## Current release (2.0.0)
 
 * Grouped runtime modules by function under `animation/`, `porting/` and `shared/`; only the Blender entry point stays at the project root.
 * Model, folder and event imports show one centered progress window with the current file or event phase and a Cancel button.
@@ -15,7 +15,9 @@ The exporter patches a legally obtained native base instead of rebuilding unknow
 * Event placement and root motion keep the same game-to-Blender orientation used by the imported character rig, including when sampling or exporting animation.
 * Event effects prefer the native one-cut offset between the effect asset ID and the event cut when both neighboring cuts are present.
 
-**Export Animation Family for VictoryTool** remains optional. Enable the family checkbox in G4 Port and export the model as usual. The add-on builds the target G4SK from the exported armature and writes a `.g4anim.json` profile beside the model. It then finds `common/chr` banks using the animation family associated with the original model's skeleton CRC in `CHARA_MOTION_INFO`; for `common/event`, it finds resources by the generic G4SK ID and includes sibling G4PK/G4MT files from those event cuts, such as point effects. Configured aliases are included in the profile and passed to retarget workers. The exporter merges source-family resources into the package's `data/common/chr` and `data/common/event` overlay without replacing existing files. VictoryTool's separate candidate export writes `.g4mt` files beside the model for VictoryTool to register on import. The two branches stay separate; an imported Action is not required. A centered progress window can be cancelled while the export is running.
+Animation preparation for **VictoryTool** writes a `.g4anim.json` profile beside the exported model, containing the rig and retargeting details needed to generate animations during incorporation. VictoryTool lets users select CHR animations, EVENT animations, or both. Animation banks do not need to be included in the portable character package.
+
+The legacy Blender animation exporter remains available through **Edit > Preferences > Add-ons > Level-5 G4 Blender Tools > Enable legacy animation exporter**. Enabling it exposes the CHR and EVENT export options in G4 Port. It uses the character animation family for CHR and the generic skeleton ID for EVENT, exports against the model's custom G4SK, and reports cancellable progress.
 
 An untouched model imported from its original G4MD is preserved byte-for-byte on export by default. **Preserve Untouched Native Import** copies its original G4MD, G4MG and G4TX files only when every assigned imported mesh still matches its import snapshot. Moving geometry, changing UVs or assigning a different source mesh automatically falls back to the normal port process.
 

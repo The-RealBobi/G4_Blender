@@ -59,7 +59,7 @@ NON_FACE_NAME_INDEX = 95
 FACE_NAME_INDEX = 96
 EYE_NAME_INDEX = 97
 G4_PORT_CONVERTER_MARKER = "mesh-json-v1-handoff"
-G4_PORT_SCRIPT_VERSION = "1.0.11"
+G4_PORT_SCRIPT_VERSION = "1.0.14"
 STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 VERTEX_COLOR_MODES = {"native", "constant", "authored"}
 
@@ -1975,6 +1975,19 @@ def palette_compatible_joint(
     return None
 
 
+def resolved_palette_joint(
+    name: str, native_palette: list[int], aliases: dict[str, str | int],
+    native_joint_indices: dict[str, int] | None,
+) -> int | None:
+    resolved = compact_joint_index(name, aliases, native_joint_indices=native_joint_indices)
+    compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
+    if compatible is not None:
+        return compatible
+    if native_joint_indices and resolved not in native_joint_indices.values():
+        return None
+    return resolved
+
+
 def configured_record_palettes(
     native_palettes: list[list[int]],
     records: list[RecordRule],
@@ -1986,23 +1999,15 @@ def configured_record_palettes(
 
     def used_palette_joints(mesh: Mesh, rule: RecordRule, native_palette: list[int]) -> set[int]:
         used_joints: set[int] = set()
-        influences = [
+        influences = {
             joint_name
             for vertex in mesh.vertices
             for joint_name, _ in vertex.influences
-        ]
+        }
         if rule.rigid_joint is not None:
-            influences.append(rule.rigid_joint)
+            influences.add(rule.rigid_joint)
         for joint_name in influences:
-            resolved = compact_joint_index(joint_name, aliases, native_joint_indices=native_joint_indices)
-            compatible = palette_compatible_joint(resolved, native_palette, native_joint_indices or {})
-            if compatible is not None:
-                resolved = compatible
-            elif native_joint_indices and resolved not in native_joint_indices.values():
-                # A compact name that is absent from the native hash table
-                # cannot be represented by merely appending its compact
-                # ordinal to a physical G4MD palette.
-                continue
+            resolved = resolved_palette_joint(joint_name, native_palette, aliases, native_joint_indices)
             if resolved is not None:
                 used_joints.add(resolved)
         return used_joints
@@ -2134,7 +2139,8 @@ def rewrite_g4md_joint_hashes(md: bytes, joint_names: list[str]) -> bytes:
     struct.pack_into("<H", out, 0x24, len(hashes))
     for field in range(0x76, 0x8C, 2):
         value = struct.unpack_from("<H", md, field)[0]
-        if value:
+        pointer = name_base + value * 4
+        if value and pointer >= end:
             updated = value + delta // 4
             if updated > 0xFFFF:
                 raise ValueError(f"G4MD offset overflow at 0x{field:02X}")
@@ -2367,6 +2373,68 @@ def split_mesh_by_vertex_limit(mesh: Mesh, output_names: list[str], max_vertices
             indices.append(target_index)
     flush()
     return chunks
+
+
+def split_mesh_by_palette_limit(
+    mesh: Mesh, rule: RecordRule, native_palette: list[int],
+    aliases: dict[str, str | int], native_joint_indices: dict[str, int],
+) -> list[Mesh]:
+    baseline = set(native_palette)
+    if rule.rigid_joint is not None:
+        rigid = resolved_palette_joint(rule.rigid_joint, native_palette, aliases, native_joint_indices)
+        if rigid is not None:
+            baseline.add(rigid)
+    if len(baseline) > 0xFF:
+        raise ValueError(f"native palette for {rule.output_name} exceeds 255 joints")
+
+    resolved_names = {}
+    vertex_joints = []
+    for vertex in mesh.vertices:
+        joints = set()
+        for name, _weight in vertex.influences:
+            if name not in resolved_names:
+                resolved_names[name] = resolved_palette_joint(name, native_palette, aliases, native_joint_indices)
+            if resolved_names[name] is not None:
+                joints.add(resolved_names[name])
+        vertex_joints.append(joints)
+
+    chunks: list[Mesh] = []
+    vertices: list[Vertex] = []
+    indices: list[int] = []
+    remap: dict[int, int] = {}
+    joints = set(baseline)
+
+    def flush() -> None:
+        nonlocal vertices, indices, remap, joints
+        if not vertices:
+            return
+        name = mesh.name if not chunks else f"{mesh.name}_{len(chunks)}"
+        chunks.append(Mesh(
+            name, vertices, indices, mesh.material_index, mesh.material_name,
+            mesh.source_names, mesh.uv_transform_trace, mesh.source_record_index,
+        ))
+        vertices, indices, remap, joints = [], [], {}, set(baseline)
+
+    for start in range(0, len(mesh.indices), 3):
+        triangle = mesh.indices[start:start + 3]
+        if len(triangle) < 3:
+            continue
+        needed = set().union(*(vertex_joints[index] for index in triangle))
+        missing = len(set(triangle).difference(remap))
+        if vertices and (len(joints | needed) > 0xFF or len(vertices) + missing > 0xFFFF):
+            flush()
+        if len(joints | needed) > 0xFF:
+            raise ValueError(f"triangle in {mesh.name} exceeds 255 joints")
+        joints.update(needed)
+        for source_index in triangle:
+            target_index = remap.get(source_index)
+            if target_index is None:
+                target_index = len(vertices)
+                remap[source_index] = target_index
+                vertices.append(mesh.vertices[source_index])
+            indices.append(target_index)
+    flush()
+    return chunks or [mesh]
 
 
 def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
@@ -2841,14 +2909,13 @@ def build_base_g4md(meshes: list[Mesh], records: list[dict], raw_root: Path, con
         native_records_end = header_size + native_mesh_count * 0x50
         md = bytearray(native[:header_size] + b"\0" * (mesh_count * 0x50) + native[native_records_end:])
         struct.pack_into("<H", md, 0x20, mesh_count)
-        for field in (
-            0x62, 0x64, 0x66, 0x68, 0x6A, 0x6C, 0x6E, 0x70, 0x72,
-            0x74, 0x76, 0x78, 0x7A, 0x7C, 0x7E, 0x80, 0x82, 0x84, 0x86,
-        ):
-            value = struct.unpack_from("<H", native, field)[0]
-            struct.pack_into("<H", md, field, value + extra_bytes // 4)
-
         name_base = struct.unpack_from("<H", md, 0x0A)[0] * 4
+        # UV matrices are referenced by 0x88/0x8A, outside the name-table fields.
+        for field in range(0x62, 0x8C, 2):
+            value = struct.unpack_from("<H", native, field)[0]
+            if value and name_base + value * 4 >= native_records_end:
+                struct.pack_into("<H", md, field, value + extra_bytes // 4)
+
         mesh_name_table = name_base + struct.unpack_from("<H", md, 0x84)[0] * 4
         material_name_table = name_base + struct.unpack_from("<H", md, 0x86)[0] * 4
         if not mesh_name_table <= material_name_table <= len(md):
@@ -3415,6 +3482,24 @@ def prepare_port_geometry(
         skeleton_joint_name_indices(target_skeleton)
         if target_skeleton else native_joint_name_indices(native_g4md)
     )
+    additional_meshes = []
+    additional_rules = []
+    for index, mesh in enumerate(meshes):
+        source_index = _source_record_index(mesh, index, len(config.records))
+        rule = config.records[source_index]
+        if rule.palette_joints is not None and not rule.auto_palette:
+            continue
+        native_palette = native_palettes[source_index] if source_index < len(native_palettes) else native_palettes[-1]
+        chunks = split_mesh_by_palette_limit(
+            mesh, rule, native_palette, config.joint_aliases or {}, native_joint_indices,
+        )
+        meshes[index] = chunks[0]
+        for chunk in chunks[1:]:
+            additional_meshes.append(chunk)
+            additional_rules.append(replace(rule, output_name=chunk.name, native_template_record_index=source_index))
+            native_palettes.append(list(native_palette))
+    meshes.extend(additional_meshes)
+    config.records.extend(additional_rules)
     palettes = configured_record_palettes(native_palettes, config.records, meshes, config.joint_aliases or {}, native_joint_indices)
     resolved_records = []
     for mesh, palette in zip(meshes, palettes):
