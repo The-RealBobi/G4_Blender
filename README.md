@@ -1,6 +1,6 @@
 # Level-5 G4 Blender Tools
 
-<p align="center">
+<p>
   <a href="LICENSE.MD"><img alt="Licence GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue"></a>
   <img alt="Blender 4.1 or newer" src="https://img.shields.io/badge/Blender-4.1%2B-orange">
 </p>
