@@ -47,9 +47,3 @@ Compatibility can vary between games and assets, so support for every file isn't
 ## License
 
 G4_Blender is licensed under the **GNU General Public License v3.0 or later**. See [LICENSE.MD](LICENSE.MD) for details.
-
-## v2.1.0
-
-The G4 Port exporter now preserves the original model's vertex stride, secondary vertex colors and UV placement. This fixes armor exports that failed with a vertex-buffer range or skin-weight validation error. The release also includes the current model, expression-atlas and animation workflows, including G4PK animation export.
-
-Download `G4_Blender_v2.1.0.zip` from [Releases](https://github.com/The-RealBobi/G4_Blender/releases/tag/v2.1.0), then use **Edit > Preferences > Add-ons > Install from Disk** in Blender and select the ZIP. Enable **Level-5 G4 Blender Tools** and restart Blender after replacing an older version.
