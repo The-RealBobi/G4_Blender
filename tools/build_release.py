@@ -23,7 +23,7 @@ def main() -> None:
         name = path.as_posix()
         if path.suffix in ('.py', '.json') and name != 'tools/build_release.py':
             files.append(path)
-        elif name == 'README.md' or (
+        elif name in {'README.md', 'LICENSE.md'} or (
             path.parts[0] == 'img' and path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.webp'}
         ):
             files.append(path)

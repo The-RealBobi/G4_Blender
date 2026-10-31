@@ -88,12 +88,12 @@ ROLE_SPECS = (
     _role("r_a_1_0", "right_upper_arm", ("upper arm", "uparm", "arm"), True, "right"),
     _role("r_a_1_1", "right_lower_arm", ("lower arm", "lowarm", "forearm", "fore arm", "elbow"), True, "right"),
     _role("r_w_1_0", "right_hand", ("wrist", "hand"), True, "right"),
-    _role("l_l_1_0", "left_upper_leg", ("upper leg", "upleg", "up leg", "thigh", "leg"), True, "left"),
-    _role("l_l_1_1", "left_lower_leg", ("lower leg", "lowerleg", "calf", "shin", "knee", "leg"), True, "left"),
+    _role("l_l_1_0", "left_upper_leg", ("upper leg", "upleg", "up leg", "thigh", "leg", "leg 1"), True, "left"),
+    _role("l_l_1_1", "left_lower_leg", ("lower leg", "lowerleg", "calf", "shin", "knee", "leg", "leg 2"), True, "left"),
     _role("l_foot_1_0", "left_foot", ("foot", "ankle"), True, "left"),
     _role("l_foot_1_1", "left_toe", ("toe base", "toe", "ball of foot"), False, "left"),
-    _role("r_l_1_0", "right_upper_leg", ("upper leg", "upleg", "up leg", "thigh", "leg"), True, "right"),
-    _role("r_l_1_1", "right_lower_leg", ("lower leg", "lowerleg", "calf", "shin", "knee", "leg"), True, "right"),
+    _role("r_l_1_0", "right_upper_leg", ("upper leg", "upleg", "up leg", "thigh", "leg", "leg 1"), True, "right"),
+    _role("r_l_1_1", "right_lower_leg", ("lower leg", "lowerleg", "calf", "shin", "knee", "leg", "leg 2"), True, "right"),
     _role("r_foot_1_0", "right_foot", ("foot", "ankle"), True, "right"),
     _role("r_foot_1_1", "right_toe", ("toe base", "toe", "ball of foot"), False, "right"),
 )
@@ -198,12 +198,14 @@ def suggest_finger_mapping(
     candidates: dict[str, list[str]] = {}
     for bone in bones:
         direct = resolve_catalog_alias(bone.name, catalog, set(specs))
-        joints = {direct} if direct else signatures.get(_name_parts(bone.name), set())
+        joints = {direct} if direct else set()
         if not joints:
             tokens, side = _name_parts(bone.name)
             joints = {joint for joint, spec in specs.items()
                       if (not side or side == spec.side)
                       and any(_alias_matches(bone.name, alias, True) for alias in spec.aliases)}
+        if not joints:
+            joints = signatures.get(_name_parts(bone.name), set())
         for joint in joints:
             hand = hand_assignments.get(f"{joint[0]}_w_1_0")
             if hand is not None and _is_descendant(bones_by_name, hand, bone.name):
@@ -287,6 +289,29 @@ def _candidate_score(
     return score
 
 
+def incompatible_body_assignments(
+    bones: Sequence[BoneNode], native_to_source: Mapping[str, str],
+) -> dict[str, str]:
+    bones_by_name = _index_bones(bones)
+    errors = {}
+    for side in ('l', 'r'):
+        for upper, middle, end in ((f'{side}_a_1_0', f'{side}_a_1_1', f'{side}_w_1_0'),
+                                   (f'{side}_l_1_0', f'{side}_l_1_1', f'{side}_foot_1_0')):
+            if not all(joint in native_to_source for joint in (upper, middle, end)):
+                continue
+            start, center, finish = (native_to_source[joint] for joint in (upper, middle, end))
+            path = _path_between(bones_by_name, start, finish)
+            if path is None or center not in path[1:-1]:
+                errors[middle] = f'{center} must lie between {start} and {finish} in the bone hierarchy'
+    hips, spine, head = (native_to_source.get(joint) for joint in ('c_c_1_0', 'c_c_1_1', 'c_head_1_0'))
+    if hips and spine and head and all(name in bones_by_name for name in (hips, spine, head)):
+        def distance(name: str) -> float:
+            return sum((a-b)**2 for a,b in zip(bones_by_name[name].head, bones_by_name[hips].head))
+        if distance(spine) < max(1e-12, distance(head) * 1e-4):
+            errors['c_c_1_1'] = f'{spine} shares the hip pivot; choose the torso deformation bone'
+    return errors
+
+
 def suggest_native_mapping(bones: Sequence[BoneNode], native_joint_names: Collection[str]) -> MappingSuggestion:
     bones_by_name = _index_bones(bones)
 
@@ -345,6 +370,8 @@ def suggest_native_mapping(bones: Sequence[BoneNode], native_joint_names: Collec
     assignments = {joint: name for joint, name in assignments.items()
                    if not re.fullmatch(r"[lr]_(thb|idx|mid|rng|pky)_1_[0-2]", joint)}
     assignments.update({joint: name for joint, name in fingers.assignments.items() if joint in native_joint_names})
+    for joint in fingers.assignments:
+        ambiguities.pop(joint, None)
     ambiguities.update({joint: names for joint, names in fingers.ambiguous.items() if joint in native_joint_names})
     chain_assignments = _suggest_limb_chain_roles(bones_by_name, assignments)
     assignments.update(chain_assignments)
@@ -361,6 +388,22 @@ def suggest_native_mapping(bones: Sequence[BoneNode], native_joint_names: Collec
             ambiguities.pop("c_c_1_0", None)
             if assignments.get("c_global_0_0") == hips:
                 assignments.pop("c_global_0_0")
+    hips_name = assignments.get("c_c_1_0")
+    spine_name = assignments.get("c_c_1_1")
+    neck_name = assignments.get("c_n_1_0")
+    if hips_name and spine_name and neck_name:
+        hips_head = bones_by_name[hips_name].head
+        def distance_squared(name: str) -> float:
+            return sum((a - b) ** 2 for a, b in zip(bones_by_name[name].head, hips_head))
+        minimum = max(1e-12, distance_squared(neck_name) * 1e-4)
+        if distance_squared(spine_name) < minimum:
+            path = _path_between(bones_by_name, spine_name, neck_name)
+            candidates = [name for name in path or () if name != neck_name
+                          and distance_squared(name) >= minimum
+                          and _matching_alias_length(re.sub(r"[_ .-]*[0-9]+$", "", name), _ROLE_BY_JOINT["c_c_1_1"].aliases, False)]
+            if candidates:
+                assignments["c_c_1_1"] = candidates[0]
+                ambiguities.pop("c_c_1_1", None)
     source_targets: dict[str, list[str]] = {}
     for native_joint, bone_name in assignments.items():
         source_targets.setdefault(bone_name, []).append(native_joint)
@@ -429,8 +472,27 @@ def _suggest_limb_chain_roles(
             if len(members) == 3:
                 suggestions[f"{prefix}_a_1_0"] = members[1]
 
+        upper_arm = assignments.get(f"{prefix}_a_1_0") or suggestions.get(f"{prefix}_a_1_0")
+        hand = assignments.get(f"{prefix}_w_1_0")
+        if upper_arm and hand and (not elbow or _is_descendant(bones_by_name, elbow, hand) is None):
+            path = _path_between(bones_by_name, upper_arm, hand)
+            members = [name for name in path or () if _auxiliary_category(name) not in {"twist", "control"}]
+            if len(members) == 3:
+                suggestions[f"{prefix}_a_1_1"] = members[1]
+            elif len(members) > 3 and all(re.fullmatch(r"arm[ _.-]*[0-9]+", " ".join(_name_parts(name)[0]))
+                                         for name in members[:-1]):
+                distances = [0.]
+                for first, second in zip(members, members[1:]):
+                    distances.append(distances[-1] + sum((a-b)**2 for a,b in zip(
+                        bones_by_name[first].head, bones_by_name[second].head)) ** .5)
+                if distances[-1] > 1e-8:
+                    middle = min(range(1, len(members)-1), key=lambda i: abs(distances[i]-distances[-1]*.5))
+                    suggestions[f"{prefix}_a_1_1"] = members[middle]
+
         thigh = assignments.get(f"{prefix}_l_1_0")
-        if not thigh or (f"{prefix}_l_1_1" in assignments and f"{prefix}_foot_1_0" in assignments):
+        shin = assignments.get(f"{prefix}_l_1_1")
+        foot = assignments.get(f"{prefix}_foot_1_0")
+        if not thigh or (shin and foot and _is_descendant(bones_by_name, shin, foot) is not None):
             continue
         toes = []
         for bone in bones_by_name.values():
@@ -452,8 +514,7 @@ def _suggest_limb_chain_roles(
         expected = {
             f"{prefix}_l_1_1": members[1], f"{prefix}_foot_1_0": members[2], f"{prefix}_foot_1_1": members[3],
         }
-        if any(assignments.get(joint, expected[joint]) != expected[joint]
-               for joint in (f"{prefix}_l_1_1", f"{prefix}_foot_1_0")):
+        if foot and foot != expected[f"{prefix}_foot_1_0"]:
             continue
         previous_toe = assignments.get(f"{prefix}_foot_1_1")
         if previous_toe and previous_toe not in members[2:]:

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (4, 0, 0),
     "location": "File > Import/Export; View3D > Sidebar > Level-5",
     "description": "Import, animate and port Level-5 G4 game assets.",
@@ -24,7 +24,7 @@ from pathlib import Path
 import bpy
 from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
-from bpy.types import AddonPreferences, Operator, OperatorFileListElement
+from bpy.types import AddonPreferences, Menu, Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper
 from mathutils import Matrix, Quaternion, Vector
 
@@ -319,7 +319,7 @@ if __package__:
         character_texture_role,
     )
     from .shading.map_surfaces import classify_map_surface
-    from .shading.map_nodes import apply_map_surface_nodes
+    from .shading.map_nodes import build_native_map_material
     from .shading.character_lighting import build_character_lighting, color_transfer
     from .shading import viewport_outline
     from .shading import playback
@@ -334,7 +334,7 @@ else:
         character_texture_role,
     )
     from shading.map_surfaces import classify_map_surface
-    from shading.map_nodes import apply_map_surface_nodes
+    from shading.map_nodes import build_native_map_material
     from shading.character_lighting import build_character_lighting, color_transfer
     from shading import viewport_outline
     from shading import playback
@@ -928,6 +928,8 @@ def create_native_g4_armature(skeleton):
             if 0 <= parent < len(edit_bones) and parent != index:
                 bone.parent = edit_bones[parent]
         bpy.ops.object.mode_set(mode="OBJECT")
+        for name, matrix in zip(names, bind_matrices):
+            armature_data.bones[name]['g4_bind_matrix'] = matrix
     except Exception:
         if armature.mode != "OBJECT":
             bpy.ops.object.mode_set(mode="OBJECT")
@@ -935,6 +937,49 @@ def create_native_g4_armature(skeleton):
         bpy.data.armatures.remove(armature_data)
         raise
     return armature
+
+
+def validate_native_skin_bindings(meshes: list[dict], names: list[str], target_names: set[str]) -> None:
+    for mesh in meshes:
+        indices = mesh.get("indices") or []
+        faces = [indices[index:index + 3] for index in range(0, len(indices) - 2, 3)]
+        used = {index for face in faces if len(set(face)) == 3 for index in face}
+        if not used:
+            continue
+        mesh_name = mesh.get("name", "mesh")
+        influences = mesh.get("skin_influences") or []
+        palette = mesh.get("joint_palette") or []
+        palette_base = int(mesh.get("palette_base") or 0)
+        required: set[int] = set()
+        vertex_count = len(mesh.get("positions") or []) // 3
+        rigid_joint = mesh.get("rigid_joint")
+        if rigid_joint is not None:
+            required.add(rigid_joint)
+        for vertex in used:
+            if not 0 <= vertex < vertex_count:
+                raise ValueError(f"Mesh '{mesh_name}' has an out-of-range triangle index")
+            if vertex >= len(influences):
+                continue
+            for local_index, weight in influences[vertex]:
+                if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
+                    raise ValueError(f"Mesh '{mesh_name}' has an invalid skin weight at vertex {vertex}")
+                if weight <= 0.0:
+                    continue
+                if local_index < 0 or (palette and local_index >= len(palette)):
+                    raise ValueError(f"Mesh '{mesh_name}' references invalid skin palette slot {local_index}")
+                required.add(palette[local_index] if palette else palette_base + local_index)
+        for index in sorted(required):
+            if not 0 <= index < len(names):
+                raise ValueError(
+                    f"Mesh '{mesh_name}' has an unresolved skin joint ({index}). "
+                    "Import it with a skeleton that contains its original weighted bones."
+                )
+            name = names[index] or f"joint_{index:03d}"
+            if name not in target_names:
+                raise ValueError(
+                    f"Mesh '{mesh_name}' needs bone '{name}', which is absent from the selected rig. "
+                    "Select the matching rig or import the character with its own skeleton."
+                )
 
 
 def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target_armature=None) -> set[str]:
@@ -949,11 +994,19 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
     armature = target_armature if target_armature is not None and target_armature.type == "ARMATURE" else None
     if armature is not None and not names:
         names = [bone.name for bone in armature.data.bones]
-    elif armature is None and names and bind_matrices:
+    if names:
+        target_names = (
+            set(armature.data.bones.keys()) if armature is not None
+            else {name or f"joint_{index:03d}" for index, name in enumerate(names)}
+        )
+        validate_native_skin_bindings(payload.get("meshes", []), names, target_names)
+    source_model = str(payload.get("source") or native_path)
+    if armature is None and names and bind_matrices:
         armature = create_native_g4_armature(skeleton)
+        armature.name = Path(source_model).stem
+        armature.data.name = armature.name
         imported.add(armature.name)
 
-    source_model = str(payload.get("source") or native_path)
     materials: dict[str, bpy.types.Material] = {}
     for material_name in payload.get("materials", {}):
         existing = bpy.data.materials.get(material_name)
@@ -967,6 +1020,28 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
         materials[material_name] = material
 
     for mesh_payload in payload.get("meshes", []):
+        indices = mesh_payload.get("indices") or []
+        faces = [indices[index:index + 3] for index in range(0, len(indices) - 2, 3)]
+        faces = [face for face in faces if len(set(face)) == 3]
+        if not faces:
+            continue
+        used = sorted({index for face in faces for index in face})
+        vertex_count = len(mesh_payload.get("positions") or []) // 3
+        if used[0] < 0 or used[-1] >= vertex_count:
+            raise RuntimeError("Native mesh contains an out-of-range triangle index")
+        if len(used) != vertex_count:
+            mesh_payload = dict(mesh_payload)
+            remap = {old: new for new, old in enumerate(used)}
+            for key, stride in [("positions", 3), ("normals", 3), ("vertex_colors", 4), ("vertex_colors1", 4),
+                                *(("texcoords" + (str(channel) if channel else ""), 2) for channel in range(6))]:
+                values = mesh_payload.get(key) or []
+                if len(values) == vertex_count * stride:
+                    mesh_payload[key] = [value for index in used for value in values[index * stride:(index + 1) * stride]]
+            influences = mesh_payload.get("skin_influences") or []
+            if len(influences) == vertex_count:
+                mesh_payload["skin_influences"] = [influences[index] for index in used]
+            faces = [[remap[index] for index in face] for face in faces]
+        mesh_payload = {**mesh_payload, "indices": [index for face in faces for index in face]}
         name = mesh_payload.get("name") or "G4 Mesh"
         flat_positions = mesh_payload.get("positions") or []
         positions = [
@@ -1044,17 +1119,18 @@ def import_native_g4_mesh(native_path: Path, custom_normals: bool = True, target
             influences = mesh_payload.get("skin_influences") or []
             groups: dict[int, bpy.types.VertexGroup] = {}
             for vertex_index, vertex_influences in enumerate(influences[: len(positions)]):
+                weights: dict[int, float] = {}
                 for local_index, weight in vertex_influences:
                     if weight <= 0.0:
                         continue
-                    global_index = palette[local_index] if local_index < len(palette) else palette_base + local_index
-                    if not 0 <= global_index < len(names):
-                        continue
+                    global_index = palette[local_index] if palette else palette_base + local_index
+                    weights[global_index] = weights.get(global_index, 0.0) + float(weight)
+                for global_index, weight in weights.items():
                     group = groups.get(global_index)
                     if group is None:
                         group = obj.vertex_groups.new(name=names[global_index] or f"joint_{global_index:03d}")
                         groups[global_index] = group
-                    group.add([vertex_index], float(weight), "REPLACE")
+                    group.add([vertex_index], min(weight, 1.0), "REPLACE")
             modifier = obj.modifiers.new(name="Armature", type="ARMATURE")
             modifier.object = armature
             obj.parent = armature
@@ -1610,9 +1686,42 @@ def configure_victory_road_map_surface(material, principled, diffuse_path: Path,
         material["g4_victory_road_terrain_mix"] = True
     elif kind == "map_pbr":
         material["g4_victory_road_map_pbr"] = True
-    apply_map_surface_nodes(material, principled, profile)
     if debug is not None:
         debug.append(f"[map-surface] {material.name}: configured {kind} surface")
+
+
+def apply_native_map_materials(imported_names: set[str], summary: dict, source: Path, debug: list[str]) -> set[str]:
+    from .shading.map_surfaces import native_map_material
+    records = {blender_base_name(record.get("name") or ""): record for record in summary.get("material_records", [])}
+    objects = [obj for name in imported_names if (obj := bpy.data.objects.get(name)) is not None and obj.type == "MESH"]
+    is_map = "map" in {part.casefold() for part in source.parts}
+    map_objects = set()
+    for obj in objects:
+        for slot in obj.material_slots:
+            material = slot.material
+            if material is None:
+                continue
+            record = records.get(blender_base_name(material.name))
+            profile = native_map_material(record) if record else None
+            if not is_map and profile is None:
+                continue
+            material["g4_map_source"] = True
+            map_objects.add(obj.name)
+            if material.get("g4_map_native_shader"):
+                continue
+            owners = [owner for owner in objects if any(s.material == material for s in owner.material_slots)]
+            vertex_layer = "G4 Outline Parameters" if all(
+                "G4 Outline Parameters" in owner.data.color_attributes
+                for owner in owners
+            ) else None
+            complete_uvs = not (profile and profile.grass) or all("UVMap1" in owner.data.uv_layers for owner in owners)
+            if profile and complete_uvs and build_native_map_material(material, profile, vertex_layer):
+                debug.append(f"[map] {material.name}: {profile.family}, textures={len(profile.textures)}, nodes={len(material.node_tree.nodes)}")
+            else:
+                material["g4_map_surface_fidelity"] = "incomplete"
+                material["g4_map_surface_evidence"] = "Unsupported native family, texture or UV contract; ordinary material retained"
+                debug.append(f"[map] {material.name}: ordinary fallback; shader={record and record.get('shader_hash')}")
+    return map_objects
 
 
 def build_texture_index(paths: list[Path]) -> dict[str, dict[str, Path]]:
@@ -1735,71 +1844,51 @@ def apply_level5_toon_shader(
             normal_texture.location = (-980, -160)
             normal_channels = nodes.new("ShaderNodeSeparateColor")
             normal_channels.name = "G4 DXT5nm Channels"
-            normal_channels.location = (-780, -160)
-            normal_x = nodes.new("ShaderNodeMath")
-            normal_x.name = "G4 Normal X"
-            normal_x.operation = "MULTIPLY_ADD"
-            normal_x.inputs[1].default_value = 2.0
-            normal_x.inputs[2].default_value = -1.0
-            normal_x.location = (-580, -200)
-            normal_y = nodes.new("ShaderNodeMath")
-            normal_y.name = "G4 Normal Y"
-            normal_y.operation = "MULTIPLY_ADD"
-            normal_y.inputs[1].default_value = 2.0
-            normal_y.inputs[2].default_value = -1.0
-            normal_y.location = (-580, -280)
-            normal_x2 = nodes.new("ShaderNodeMath")
-            normal_x2.operation = "MULTIPLY"
-            normal_x2.location = (-390, -200)
-            normal_y2 = nodes.new("ShaderNodeMath")
-            normal_y2.operation = "MULTIPLY"
-            normal_y2.location = (-390, -280)
-            normal_xy2 = nodes.new("ShaderNodeMath")
-            normal_xy2.operation = "ADD"
-            normal_xy2.location = (-210, -240)
+            normal_channels.location = (-800, -160)
+            links.new(normal_texture.outputs["Color"], normal_channels.inputs["Color"])
+            normal_xy = nodes.new("ShaderNodeCombineXYZ")
+            normal_xy.name = "G4 Normal XY"
+            normal_xy.location = (-620, -160)
+            normal_source = normal_channels.outputs["Red"] if normal_is_rgb else normal_texture.outputs["Alpha"]
+            links.new(normal_source, normal_xy.inputs["X"])
+            links.new(normal_channels.outputs["Green"], normal_xy.inputs["Y"])
+            signed_xy = nodes.new("ShaderNodeVectorMath")
+            signed_xy.operation = "MULTIPLY_ADD"
+            signed_xy.location = (-440, -160)
+            signed_xy.inputs[1].default_value = (2.0, 2.0, 0.0)
+            signed_xy.inputs[2].default_value = (-1.0, -1.0, 0.0)
+            links.new(normal_xy.outputs[0], signed_xy.inputs[0])
+            length_squared = nodes.new("ShaderNodeVectorMath")
+            length_squared.operation = "DOT_PRODUCT"
+            length_squared.location = (-260, -160)
+            links.new(signed_xy.outputs[0], length_squared.inputs[0])
+            links.new(signed_xy.outputs[0], length_squared.inputs[1])
             normal_z2 = nodes.new("ShaderNodeMath")
             normal_z2.operation = "SUBTRACT"
             normal_z2.inputs[0].default_value = 1.0
-            normal_z2.location = (-30, -240)
             normal_z2.use_clamp = True
+            normal_z2.location = (-80, -160)
+            links.new(length_squared.outputs["Value"], normal_z2.inputs[1])
             normal_z = nodes.new("ShaderNodeMath")
             normal_z.operation = "SQRT"
-            normal_z.location = (150, -240)
+            normal_z.location = (100, -160)
+            links.new(normal_z2.outputs[0], normal_z.inputs[0])
             encoded_z = nodes.new("ShaderNodeMath")
             encoded_z.operation = "MULTIPLY_ADD"
+            encoded_z.location = (280, -160)
             encoded_z.inputs[1].default_value = 0.5
             encoded_z.inputs[2].default_value = 0.5
-            encoded_z.location = (330, -240)
+            links.new(normal_z.outputs[0], encoded_z.inputs[0])
             packed_normal = nodes.new("ShaderNodeCombineColor")
             packed_normal.name = "G4 Reconstructed Normal"
-            packed_normal.location = (510, -180)
-            normal_map = nodes.new("ShaderNodeNormalMap")
-            normal_map.name = "G4 Surface Normal"
-            normal_map.location = (700, -180)
-            normal_map.inputs["Strength"].default_value = 1.0
-            links.new(normal_texture.outputs["Color"], normal_channels.inputs["Color"])
-            # The native character set contains both packed DXT5nm normals
-            # (.2: X in alpha, Y in green) and occasional conventional nml
-            # maps (X in red, Y in green).  Applying the packed route to nml
-            # makes X stick at +1 and visibly flattens the surface.
-            if normal_is_rgb:
-                links.new(normal_channels.outputs["Red"], normal_x.inputs[0])
-                links.new(normal_channels.outputs["Red"], packed_normal.inputs["Red"])
-            else:
-                links.new(normal_texture.outputs["Alpha"], normal_x.inputs[0])
-                links.new(normal_texture.outputs["Alpha"], packed_normal.inputs["Red"])
-            links.new(normal_channels.outputs["Green"], normal_y.inputs[0])
-            links.new(normal_x.outputs[0], normal_x2.inputs[0])
-            links.new(normal_x.outputs[0], normal_x2.inputs[1])
-            links.new(normal_y.outputs[0], normal_y2.inputs[0])
-            links.new(normal_y.outputs[0], normal_y2.inputs[1])
-            links.new(normal_x2.outputs[0], normal_xy2.inputs[0])
-            links.new(normal_y2.outputs[0], normal_xy2.inputs[1])
-            links.new(normal_xy2.outputs[0], normal_z2.inputs[1])
-            links.new(normal_z2.outputs[0], normal_z.inputs[0])
-            links.new(normal_z.outputs[0], encoded_z.inputs[0])
+            packed_normal.location = (460, -160)
+            links.new(normal_source, packed_normal.inputs["Red"])
             links.new(normal_channels.outputs["Green"], packed_normal.inputs["Green"])
             links.new(encoded_z.outputs[0], packed_normal.inputs["Blue"])
+            normal_map = nodes.new("ShaderNodeNormalMap")
+            normal_map.name = "G4 Surface Normal"
+            normal_map.location = (640, -160)
+            normal_map.inputs["Strength"].default_value = 1.0
             links.new(packed_normal.outputs["Color"], normal_map.inputs["Color"])
             surface_normal = normal_map.outputs["Normal"]
 
@@ -1962,7 +2051,7 @@ def apply_level5_toon_shader(
             links.new(specular_shape.outputs["Color"], shape_multiply.inputs[1])
             links.new(specular_mask.outputs["Color"], shape_multiply.inputs[2])
             links.new(shape_multiply.outputs["Color"], lit_specular.inputs[1])
-            links.new(shadow_mix.outputs["Color"], lit_specular.inputs[2])
+            links.new(shadow_mix.outputs[2], lit_specular.inputs[2])
             spec_multiply = nodes.new("ShaderNodeMixRGB")
             spec_multiply.name = "G4 Specular Strength"
             spec_multiply.blend_type = "MULTIPLY"
@@ -2054,7 +2143,7 @@ def apply_level5_toon_shader(
             alpha_separate.location = (610, 600)
             links.new(alpha_texture.outputs["Color"], alpha_separate.inputs["Color"])
             alpha_output = alpha_separate.outputs["Red"]
-    if alpha_output is not None and (alpha_path is not None or name_implies_alpha(material.name, base_path)):
+    if alpha_output is not None and (alpha_path is not None or material.get("g4_native_alpha_blend", False) or name_implies_alpha(material.name, base_path)):
         transparent = nodes.new("ShaderNodeBsdfTransparent")
         transparent.location = (820, 20)
         mix_shader = nodes.new("ShaderNodeMixShader")
@@ -2247,6 +2336,8 @@ def apply_auxiliary_textures_to_imported_materials(
             roles = ", ".join(f"{role}:{path.name}" for role, path in sorted(by_key[key].items()))
             debug.append(f"[texture-key] {key} -> {roles}")
     for material in materials:
+        if material.get("g4_map_source"):
+            continue
         material.use_nodes = True
         tree = material.node_tree
         if tree is None:
@@ -2267,6 +2358,14 @@ def apply_auxiliary_textures_to_imported_materials(
                 ]
                 debug.append(f"[post-pass] {material.name}: no base image path; nodes={image_nodes}")
             continue
+        native_record = next((record for record in summary.get("material_records", [])
+                              if blender_base_name(record.get("name") or "") == blender_base_name(material.name)), None)
+        if native_record is not None:
+            states = dict(native_record.get("render_states", []))
+            material["g4_native_alpha_blend"] = states.get(6) == 1 and states.get(9) == 4 and states.get(10) == 5
+            if material["g4_native_alpha_blend"]:
+                connect_base_texture_alpha(material, principled)
+                set_transparent_material(material)
         variants = material_variants_from_index(material.name, base_path, by_key)
         keys = material_variant_keys(material.name, base_path)
         if debug is not None:
@@ -3273,10 +3372,12 @@ def refresh_level5_outlines_on_load(_unused) -> None:
     from .shading.effect_nodes import disable_effect_transparent_shadows
     from .shading.character_lighting import optimize_event_lighting
     from .shading.effect_animation import optimize_effect_animation
+    from .shading.effect_visibility import configure_effect_opacity_culling
     disable_effect_transparent_shadows(bpy.data.materials)
     for scene in bpy.data.scenes:
         optimize_event_lighting(scene)
         optimize_effect_animation(scene)
+        configure_effect_opacity_culling(scene)
     if bpy.data.node_groups.get("Level-5 Character Parameters") is not None:
         character_parameter_node_group()
         for material in bpy.data.materials:
@@ -3417,7 +3518,7 @@ def import_g4_model(
     if native_path is not None and native_path.is_file():
         imported_names = import_native_g4_mesh(
             native_path,
-            custom_normals=apply_styling or "effect" in {part.lower() for part in path.parts},
+            custom_normals=apply_styling or bool({"effect", "map"} & {part.lower() for part in path.parts}),
             target_armature=target_armature,
         )
         import_method = "native"
@@ -3438,6 +3539,12 @@ def import_g4_model(
     compact_skeleton_summary(summary)
     collapse_duplicate_materials(imported_names)
     apply_material_texture_variants(summary, debug, imported_names)
+    if 'map' in {part.casefold() for part in path.parts}:
+        from .shading.map_environment import configure_native_map_environment
+        if configure_native_map_environment(bpy.context.scene, path):
+            debug.append('[map] native base-weather sun and ambient loaded')
+    map_names = apply_native_map_materials(imported_names, summary, path, debug)
+    styled_names = imported_names - map_names
     outline_mode = getattr(prefs, "outline_mode", "SCREEN") if apply_styling else "OFF"
     apply_auxiliary_textures_to_imported_materials(
         imported_names,
@@ -3519,21 +3626,22 @@ def import_g4_model(
                 curves = animate_particle_texture_clock(path, obj, record, bpy.context.scene)
                 clock = 'native G4TP stand' if curves else 'explicit preview range'
                 debug.append(f'[effects] {obj.name}: particle geometry with {clock}')
-    if apply_styling:
-        modifier_count = configure_character_parameter_modifiers(imported_names, force_character=True)
+    if apply_styling and styled_names:
+        modifier_count = configure_character_parameter_modifiers(styled_names, force_character=True)
         debug.append(f"[character-controls] geometry-node modifiers={modifier_count}")
     if apply_styling:
         configure_character_color_management(debug)
+    if apply_styling and styled_names:
         if outline_mode == "SCREEN":
-            configure_game_outlines(imported_names, debug)
+            configure_game_outlines(styled_names, debug)
         elif outline_mode != "OFF":
             remove_screen_outline(bpy.context.scene)
-            configure_level5_outlines(imported_names, False, debug)
-            configure_viewport_outlines(imported_names, False, debug)
-            remove_edge2_preview(imported_names)
+            configure_level5_outlines(styled_names, False, debug)
+            configure_viewport_outlines(styled_names, False, debug)
+            remove_edge2_preview(styled_names)
         else:
             remove_screen_outline(bpy.context.scene)
-            remove_edge2_preview(imported_names)
+            remove_edge2_preview(styled_names)
         if outline_mode == "SCREEN":
             debug.append("[outline] character screen-space composition enabled")
         elif outline_mode == "SIMPLE":
@@ -4815,19 +4923,10 @@ def auto_hide_map_parts(imported_names: set[str]) -> int:
     return hidden
 
 
-G4_TO_BLENDER = Matrix(
-    (
-        (1.0, 0.0, 0.0, 0.0),
-        (0.0, 0.0, -1.0, 0.0),
-        (0.0, 1.0, 0.0, 0.0),
-        (0.0, 0.0, 0.0, 1.0),
-    )
-)
-
-
 def placement_matrix(values: list[float]) -> Matrix:
     native = Matrix(tuple(tuple(values[row * 4 : row * 4 + 4]) for row in range(4)))
-    return G4_TO_BLENDER @ native @ G4_TO_BLENDER.inverted()
+    conversion = blender_from_g4_matrix()
+    return conversion @ native @ conversion.inverted()
 
 
 def duplicate_imported_objects(objects: list[bpy.types.Object]) -> list[bpy.types.Object]:
@@ -4855,9 +4954,9 @@ def apply_map_placements(
         return 0
     source_objects = [bpy.data.objects.get(name) for name in imported_names]
     source_objects = [obj for obj in source_objects if obj is not None]
+    instances = [source_objects] + [duplicate_imported_objects(source_objects) for _ in placements[1:]]
     placed = 0
-    for placement_index, placement in enumerate(placements):
-        objects = source_objects if placement_index == 0 else duplicate_imported_objects(source_objects)
+    for placement, objects in zip(placements, instances):
         object_set = set(objects)
         matrix = placement_matrix(placement["matrix"])
         for obj in objects:
@@ -5233,18 +5332,18 @@ def set_character_texture_node_image(material, node_name: str, role: str, path: 
         normal_channels = material.node_tree.nodes.get("G4 DXT5nm Channels")
         normal_x = material.node_tree.nodes.get("G4 Normal X")
         packed_normal = material.node_tree.nodes.get("G4 Reconstructed Normal")
-        if normal_channels is not None and normal_x is not None and packed_normal is not None:
+        normal_xy = material.node_tree.nodes.get("G4 Normal XY")
+        if normal_channels is not None and packed_normal is not None and (normal_xy is not None or normal_x is not None):
             links = material.node_tree.links
-            for socket in (normal_x.inputs[0], packed_normal.inputs["Red"]):
-                for link in tuple(socket.links):
-                    links.remove(link)
             source = (
                 normal_channels.outputs["Red"]
                 if character_normal_encoding(path) == "rgb_nml"
                 else normal_texture.outputs["Alpha"]
             )
-            links.new(source, normal_x.inputs[0])
-            links.new(source, packed_normal.inputs["Red"])
+            targets = (normal_xy.inputs["X"] if normal_xy is not None else normal_x.inputs[0],
+                       packed_normal.inputs["Red"])
+            for socket in targets:
+                links.new(source, socket)
     elif role == "line":
         material["g4_line_texture"] = str(path)
         material["g4_line_informative"] = max(image.size) > 8
@@ -5386,6 +5485,12 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="Toon Lighting", icon="LIGHT_SUN")
+        direction = nodes.get("G4 Light Direction")
+        if direction is not None:
+            box.prop(direction.inputs[0], "default_value", text="Light Direction")
+        self_shadow = nodes.get("G4 Self Shadow")
+        if self_shadow is not None:
+            box.prop(self_shadow.outputs[0], "default_value", text="Self Shadow")
         ambient = nodes.get("G4 Toon Ambient")
         if ambient is not None:
             box.prop(ambient.inputs[1], "default_value", text="Light Floor")
@@ -5433,16 +5538,57 @@ class MATERIAL_PT_level5_character(bpy.types.Panel):
             box.prop(outline.inputs[1], "default_value", text="Width Threshold")
 
 
+class G4_MT_import_models(Menu):
+    bl_label = 'Models'
+    def draw(self, context):
+        self.layout.operator(IMPORT_OT_level5_g4.bl_idname, text='G4MD / G4PKM file')
+        self.layout.operator(IMPORT_OT_level5_g4_folder.bl_idname, text='Model folder')
+
+
+class G4_MT_import_animations(Menu):
+    bl_label = 'Animations'
+    def draw(self, context):
+        self.layout.operator(g4_animation_addon.IMPORT_OT_level5_g4mt.bl_idname, text='G4MT/G4PK (Motion) file')
+        self.layout.operator(g4_animation_addon.IMPORT_OT_level5_g4cm.bl_idname, text='G4CM (Camera) file')
+        self.layout.operator(g4_animation_addon.IMPORT_OT_level5_g4_event_folder.bl_idname, text='Event folder')
+
+
+class G4_MT_import_files(Menu):
+    bl_label = 'LEVEL5 files'
+    def draw(self, context):
+        self.layout.menu(G4_MT_import_models.__name__)
+        self.layout.menu(G4_MT_import_animations.__name__)
+
+
+class G4_MT_export_models(Menu):
+    bl_label = 'Models'
+    def draw(self, context):
+        self.layout.operator('export_scene.level5_g4_model', text='G4MD file')
+        row = self.layout.row()
+        row.enabled = False
+        row.operator('export_scene.level5_g4_model', text='G4PKM file')
+
+
+class G4_MT_export_animations(Menu):
+    bl_label = 'Animations'
+    def draw(self, context):
+        self.layout.operator('export_scene.level5_g4pk', text='G4PK file')
+
+
+class G4_MT_export_files(Menu):
+    bl_label = 'LEVEL5 files'
+    def draw(self, context):
+        self.layout.menu(G4_MT_export_models.__name__)
+        self.layout.menu(G4_MT_export_animations.__name__)
+
+
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_level5_g4.bl_idname, text="Level-5 G4 Model (.g4md/.g4pkm)")
-    self.layout.operator(IMPORT_OT_level5_g4_folder.bl_idname, text="Level-5 G4 Model Folder")
-    self.layout.operator(
-        IMPORT_OT_level5_g4_character_parts.bl_idname,
-        text="Attach Level-5 G4 Character Parts",
-    )
+    self.layout.menu(G4_MT_import_files.__name__)
 
 
 classes = [
+    G4_MT_import_models, G4_MT_import_animations, G4_MT_import_files,
+    G4_MT_export_models, G4_MT_export_animations, G4_MT_export_files,
     G4ImporterPreferences,
     IMPORT_OT_level5_g4_character_setup,
     IMPORT_OT_level5_g4,
@@ -5493,13 +5639,7 @@ _legacy_animation_bank_draw = g4_animation_addon._legacy_bank_draw
 
 
 def animation_export_menu(self, context):
-    if getattr(addon_preferences(), "legacy_animation_export", False):
-        _legacy_animation_menu(self, context)
-    else:
-        self.layout.operator(g4_animation_addon.EXPORT_OT_level5_g4sk.bl_idname,
-                             text="Level-5 G4 Skeleton Candidate (.g4sk)")
-        self.layout.operator(g4_animation_addon.EXPORT_OT_level5_g4_fbx.bl_idname,
-                             text="Level-5 G4 Scene (.fbx)")
+    self.layout.menu(G4_MT_export_files.__name__)
 
 
 def animation_bank_draw(self, context):

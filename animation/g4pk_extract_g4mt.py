@@ -279,5 +279,28 @@ def main() -> None:
     print(f"extracted={extracted}")
 
 
+def pack_g4mt(name: str, motion: bytes) -> bytes:
+    """Build a single-motion G4PK with its native name directory."""
+    if not name or '\0' in name or '/' in name or '\\' in name or not name.endswith('.g4mt'):
+        raise ValueError('G4PK motion requires a .g4mt entry filename')
+    encoded = name.encode('utf-8')
+    if len(encoded) > 32764 or motion[:4] != b'G4MT':
+        raise ValueError('Invalid G4PK entry name or G4MT payload')
+    output = bytearray(0x50)
+    struct.pack_into('<4sHH', output, 0, b'G4PK', 0x40, 100)
+    struct.pack_into('<H', output, 0x0A, 0x10)
+    struct.pack_into('<I4H', output, 0x20, 1, 1, 2, 3, 4)
+    struct.pack_into('<II', output, 0x44, len(motion), zlib.crc32(encoded) & 0xffffffff)
+    output.extend(struct.pack('<h', 2) + encoded + b'\0')
+    output.extend(bytes(-len(output) % 16))
+    struct.pack_into('<I', output, 0x40, (len(output) - 0x40) // 4)
+    output.extend(motion)
+    struct.pack_into('<I', output, 0x0C, len(output) - 0x40)
+    result = bytes(output)
+    if select_g4mt_entry(result, '0') != (name, motion):
+        raise ValueError('G4PK motion failed read-back validation')
+    return result
+
+
 if __name__ == "__main__":
     main()

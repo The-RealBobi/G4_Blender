@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import math
 from pathlib import Path
 
 import bpy
@@ -11,7 +12,7 @@ from mathutils import Matrix
 from ..formats.g4_axes import blender_from_g4_matrix
 from .g4_animation_addon import (
     create_motion_armature, create_victorytool_target_armature,
-    primary_avatar_target_mapping,
+    primary_avatar_target_mapping, native_bind_correction,
 )
 from .humanoid_avatar import suggest_finger_mapping
 from .humanoid_avatar_addon import bone_nodes
@@ -39,6 +40,7 @@ def build_avatar_recipe(
     source_data = source_path.read_bytes()
     target_data = target_path.read_bytes()
     parsed_source = parse_skeleton(source_path)
+    parsed_target = parse_skeleton(target_path)
     source_indices = {name: index for index, name in enumerate(parsed_source["names"])}
     selected = tuple(bpy.context.selected_objects)
     active = bpy.context.view_layer.objects.active
@@ -92,9 +94,30 @@ def build_avatar_recipe(
 
         def nodes(rig, track_rest: bool) -> list[dict]:
             result = []
-            for bone in rig.data.bones:
+            rests = {}
+            # The external consumer requires exact embedded-skeleton node order.
+            names = parsed_source['names'] if track_rest else parsed_target['names']
+            for name in names:
+                bone = rig.data.bones[name]
                 rest = bone.matrix_local
-                local = bone.parent.matrix_local.inverted() @ bone.matrix_local if bone.parent else bone.matrix_local
+                if not track_rest:
+                    correction = native_bind_correction(bone)
+                    if correction is not None:
+                        scale = sum(correction[index][index] for index in range(3)) / 3.0
+                        expected = Matrix.Diagonal((scale, scale, scale, 1.0))
+                        if (not math.isfinite(scale) or scale <= 0
+                                or any(not math.isfinite(correction[row][column])
+                                       or abs(correction[row][column] - expected[row][column]) > 1e-5 * max(1.0, abs(scale))
+                                       for row in range(4) for column in range(4))):
+                            raise ValueError(
+                                f"The humanoid-avatar-v1 recipe cannot represent the native bind correction "
+                                f"for bone {bone.name!r}; only positive uniform scale with unchanged axes and origin is supported"
+                            )
+                        # The v1 baker inherits native scale while applying absolute
+                        # Avatar rotations. Uniform bind corrections commute with them.
+                        rest = rest @ correction
+                rests[bone.name] = rest
+                local = rests[bone.parent.name].inverted() @ rest if bone.parent else rest
                 item = {
                     "name": bone.name, "parent": bone.parent.name if bone.parent else None,
                     "restMatrix": [float(rest[row][column]) for row in range(4) for column in range(4)],

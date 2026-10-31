@@ -337,6 +337,21 @@ def update_validated_representation(context, armature_object, profile: G4Humanoi
     return {"valid": profile.mapping_valid, "pose_stale": pose_stale, "representation": representation}
 
 
+def capture_avatar_representation(context, armature_object, native_joint_names) -> dict:
+    profile = armature_object.level5_humanoid_avatar
+    bones = bone_nodes(armature_object)
+    meshes = mesh_nodes(context, armature_object)
+    profile.native_joints.clear()
+    for joint in sorted(native_joint_names):
+        profile.native_joints.add().name = joint
+    populate_suggestions(profile, armature_object, bones, native_joint_names)
+    profile.schema_version = 2
+    update_pose_snapshot(profile, armature_object, bones, meshes)
+    profile.has_representation = True
+    profile.mapping_dirty = True
+    return update_validated_representation(context, armature_object, profile)
+
+
 class OBJECT_OT_level5_humanoid_analyze(Operator):
     bl_idname = "object.level5_humanoid_analyze"
     bl_label = "Build Avatar Representation"
@@ -357,15 +372,7 @@ class OBJECT_OT_level5_humanoid_analyze(Operator):
         except (OSError, ValueError, struct.error) as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
-        profile.native_joints.clear()
-        for joint in sorted(native_joint_names):
-            profile.native_joints.add().name = joint
-        populate_suggestions(profile, armature_object, bones, native_joint_names)
-        profile.schema_version = 2
-        update_pose_snapshot(profile, armature_object, bones, meshes)
-        profile.has_representation = True
-        profile.mapping_dirty = True
-        result = update_validated_representation(context, armature_object, profile)
+        result = capture_avatar_representation(context, armature_object, native_joint_names)
         if result["valid"]:
             self.report({"INFO"}, f"Avatar representation captured: {len(bones)} bones and {len(meshes)} bound meshes")
         else:
@@ -435,103 +442,6 @@ class OBJECT_UL_level5_humanoid_auxiliary(UIList):
         row.prop_search(item, "native_joint", item.id_data.level5_humanoid_avatar, "native_joints", text="")
 
 
-class VIEW3D_PT_level5_humanoid_avatar(Panel):
-    bl_label = "AVATAR"
-    bl_idname = "VIEW3D_PT_level5_humanoid_avatar"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Level-5"
-    bl_order = 0
-
-    def draw(self, context):
-        layout = self.layout
-        armature_object = context.active_object
-        if armature_object is None or armature_object.type != "ARMATURE":
-            layout.label(text="Select an armature to characterize its humanoid rig", icon="INFO")
-            return
-
-        profile = armature_object.level5_humanoid_avatar
-        if not profile.has_representation or profile.schema_version < 2:
-            layout.operator(OBJECT_OT_level5_humanoid_analyze.bl_idname, icon="ARMATURE_DATA")
-            return
-
-        status = "Valid Avatar" if profile.mapping_valid else "Needs Mapping Review"
-        layout.label(text=f"{status} · {profile.bone_count} bones · {profile.mesh_count} bound meshes", icon="ARMATURE_DATA")
-        layout.label(text=f"Captured rest pose · {len(profile.rest_pose)} bones · {len(profile.chains)} chains")
-        if profile.mapping_dirty:
-            layout.label(text="Assignments changed; validate to update chains", icon="INFO")
-        if profile.unresolved_ambiguities:
-            layout.label(text=f"{profile.unresolved_ambiguities} ambiguous suggestions", icon="ERROR")
-            for item in profile.roles:
-                candidates = json.loads(item.ambiguous_candidates or "[]")
-                if candidates and not item.source_bone:
-                    layout.label(text=f"{item.role}: {', '.join(candidates[:3])}")
-        missing = json.loads(profile.missing_required_json) if profile.missing_required_json else []
-        if missing:
-            layout.label(text=f"{len(missing)} required game joints unresolved", icon="ERROR")
-            layout.label(text=", ".join(missing[:5]))
-
-        validation = json.loads(profile.validation_json) if profile.validation_json else {}
-        if validation.get("duplicate_sources"):
-            layout.label(text="One source bone is assigned to multiple G4 joints", icon="ERROR")
-        if validation.get("duplicate_native_targets"):
-            layout.label(text="A G4 joint has multiple source bones assigned", icon="ERROR")
-        if validation.get("chain_warnings"):
-            layout.label(text=f"{len(validation['chain_warnings'])} chain hierarchy issues", icon="ERROR")
-        if profile.pose_stale:
-            layout.label(text="Rig pose or object transforms changed since capture", icon="INFO")
-
-        row = layout.row(align=True)
-        row.operator(OBJECT_OT_level5_humanoid_validate.bl_idname, icon="CHECKMARK")
-        row.operator(OBJECT_OT_level5_humanoid_capture_pose.bl_idname, icon="FILE_REFRESH")
-        layout.operator(OBJECT_OT_level5_humanoid_analyze.bl_idname, text="Rebuild Suggestions", icon="ARMATURE_DATA")
-
-        animation_row = layout.row()
-        animation_row.enabled = profile.mapping_valid and not profile.mapping_dirty and not profile.pose_stale
-        animation_row.operator(IMPORT_SCENE_OT_level5_humanoid_animation.bl_idname, icon="ACTION")
-
-        specs_by_role = {spec.native_joint: spec for spec in ROLE_SPECS}
-        groups = (
-            ("Root & Torso", {"root", "hips", "spine", "neck", "head"}),
-            ("Arms", {"left_shoulder", "left_upper_arm", "left_lower_arm", "left_hand", "right_shoulder", "right_upper_arm", "right_lower_arm", "right_hand"}),
-            ("Legs", {"left_upper_leg", "left_lower_leg", "left_foot", "left_toe", "right_upper_leg", "right_lower_leg", "right_foot", "right_toe"}),
-        )
-        for title, roles in groups:
-            box = layout.box()
-            box.label(text=title)
-            for item in profile.roles:
-                if specs_by_role[item.native_joint].role not in roles:
-                    continue
-                row = box.row(align=True)
-                row.label(text=f"{item.role.replace('_', ' ').title()} · {item.native_joint}")
-                row.prop_search(item, "source_bone", armature_object.data, "bones", text="")
-
-        fingers = layout.box()
-        fingers.prop(profile, "show_fingers", toggle=True, icon="HAND")
-        if profile.show_fingers:
-            for item in profile.roles:
-                if "_thumb_" not in item.role and "_index_" not in item.role and "_middle_" not in item.role and "_ring_" not in item.role and "_little_" not in item.role:
-                    continue
-                row = fingers.row(align=True)
-                row.label(text=f"{item.role.replace('_', ' ').title()} · {item.native_joint}")
-                row.prop_search(item, "source_bone", armature_object.data, "bones", text="")
-
-        auxiliary_box = layout.box()
-        auxiliary_box.label(text=f"Secondary bones · {len(profile.auxiliaries)} (hair, face, twist and other branches)")
-        auxiliary_box.template_list(
-            OBJECT_UL_level5_humanoid_auxiliary.__name__,
-            "",
-            profile,
-            "auxiliaries",
-            profile,
-            "active_auxiliary_index",
-            rows=5,
-        )
-        if profile.chains:
-            chain_box = layout.box()
-            chain_box.label(text=f"Chains · {len(profile.chains)}")
-            for chain in profile.chains[:8]:
-                chain_box.label(text=f"{chain.name}: {len(json.loads(chain.bones_json))} bones")
 
 
 CLASSES = (
@@ -547,7 +457,6 @@ CLASSES = (
     OBJECT_OT_level5_humanoid_validate,
     OBJECT_OT_level5_humanoid_capture_pose,
     IMPORT_SCENE_OT_level5_humanoid_animation,
-    VIEW3D_PT_level5_humanoid_avatar,
 )
 
 
@@ -567,6 +476,9 @@ def register_class_replacing_stale(cls) -> None:
 
 
 def register() -> None:
+    panel = getattr(bpy.types, 'VIEW3D_PT_level5_humanoid_avatar', None)
+    if panel is not None:
+        bpy.utils.unregister_class(panel)
     for cls in CLASSES:
         register_class_replacing_stale(cls)
     bpy.types.Object.level5_humanoid_avatar = bpy.props.PointerProperty(type=G4HumanoidAvatarProfile)

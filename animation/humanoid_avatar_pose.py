@@ -8,7 +8,7 @@ from bpy.types import Action, Context, Object
 from mathutils import Matrix, Quaternion, Vector
 
 
-def avatar_export_alignment(rig: Object | None, native_skeleton: bytes | None) -> Matrix:
+def avatar_export_alignment(rig: Object | None) -> Matrix:
     profile = getattr(rig, 'level5_humanoid_avatar', None) if rig is not None else None
     if profile is None or not profile.has_representation:
         return Matrix.Identity(4)
@@ -16,24 +16,8 @@ def avatar_export_alignment(rig: Object | None, native_skeleton: bytes | None) -
         raise ValueError("Validate the humanoid Avatar mapping and rest pose before exporting")
     from .humanoid_avatar_addon import mapping_from_profile
 
-    frame, height, _hip_height = body_frame(rig, mapping_from_profile(profile))
-    scale = 1.0
-    if native_skeleton is not None:
-        from ..porting.g4_model_probe import parse_g4sk
-        from ..formats.g4_axes import blender_from_g4_matrix
-
-        skeleton = parse_g4sk(native_skeleton)
-        names = {name: index for index, name in enumerate(skeleton['names'])}
-        required = ('c_head_1_0', 'l_foot_1_0', 'r_foot_1_0')
-        if all(name in names for name in required):
-            points = {}
-            for name in required:
-                matrix = skeleton['bind_matrices'][names[name]]
-                points[name] = blender_from_g4_matrix() @ Vector((matrix[3], matrix[7], matrix[11]))
-            up = (points['c_head_1_0'] - (points['l_foot_1_0'] + points['r_foot_1_0']) * .5).length
-            if up > 1e-6 and height > 1e-6:
-                scale = up / height
-    return Matrix.Scale(scale, 4) @ frame.inverted().to_matrix().to_4x4()
+    frame, _height, _hip_height = body_frame(rig, mapping_from_profile(profile))
+    return frame.inverted().to_matrix().to_4x4()
 
 
 def twist_segments(rig: Object, mapping: Mapping[str, str]) -> dict[str, tuple[str, str, float]]:
@@ -101,7 +85,7 @@ def reference_pose_rotations(
     for prefix in ['l', 'r']:
         pairs.update({f'{prefix}_s_1_0': f'{prefix}_a_1_0', f'{prefix}_a_1_0': f'{prefix}_a_1_1',
                       f'{prefix}_a_1_1': f'{prefix}_w_1_0', f'{prefix}_l_1_0': f'{prefix}_l_1_1',
-                      f'{prefix}_l_1_1': f'{prefix}_foot_1_0', f'{prefix}_foot_1_0': f'{prefix}_foot_1_1'})
+                      f'{prefix}_l_1_1': f'{prefix}_foot_1_0'})
         for finger in ['thb', 'idx', 'mid', 'rng', 'pky']:
             for segment in [0, 1]:
                 pairs[f'{prefix}_{finger}_1_{segment}'] = f'{prefix}_{finger}_1_{segment + 1}'
@@ -116,8 +100,15 @@ def reference_pose_rotations(
     for bone in sorted(target.data.bones, key=lambda b: len(b.parent_recursive)):
         joint = inverse_target.get(bone.name)
         endpoint = pairs.get(joint)
+        if joint == 'c_c_1_0' and endpoint in target_mapping:
+            torso = target.data.bones[target_mapping['c_head_1_0']].head_local - bone.head_local
+            spine = target.data.bones[target_mapping[endpoint]].head_local - bone.head_local
+            # Some rigs start the spine at a hip pivot or below the pelvis.
+            if spine.dot(torso) <= torso.length_squared * .01:
+                endpoint = 'c_head_1_0'
         offset = offsets.get(bone.parent.name, Quaternion()) if bone.parent else Quaternion()
-        if joint == 'c_global_0_0':
+        # Ankle/toe joint placement does not define the mesh's neutral sole angle.
+        if joint in {'c_global_0_0', 'l_foot_1_0', 'r_foot_1_0'}:
             offset = Quaternion()
         if endpoint in source_mapping and endpoint in target_mapping and joint in source_mapping:
             target_direction = target.matrix_world.to_3x3() @ (target.data.bones[target_mapping[endpoint]].head_local - bone.head_local)
@@ -229,6 +220,7 @@ def bake_avatar_action(
             bone.matrix_basis = Matrix.Identity(4)
         source_root = source.pose.bones.get(source_mapping.get("c_global_0_0", ""))
         target_root = target_mapping.get('c_global_0_0')
+        source_up = source_frame @ Vector((0.0, 0.0, 1.0))
         original_rotation_modes = {bone.name: bone.rotation_mode for bone in target.pose.bones}
         previous_rotations = {}
         expected_rotations = {}
@@ -261,7 +253,8 @@ def bake_avatar_action(
                         source_local_rest = parent.bone.matrix_local.inverted() @ source_bone.bone.matrix_local if parent else source_bone.bone.matrix_local
                         expected = source.matrix_world @ (parent.matrix @ source_local_rest if parent else source_local_rest)
                         hip_displacement = source_pose_world.translation - expected.translation
-                        displacement = alignment @ hip_displacement * hip_scale
+                        vertical = source_up * hip_displacement.dot(source_up)
+                        displacement = alignment @ ((hip_displacement - vertical) * body_scale + vertical * hip_scale)
                         if not target_root:
                             displacement += alignment @ root_displacement * body_scale
                         position += target.matrix_world.inverted().to_3x3() @ displacement

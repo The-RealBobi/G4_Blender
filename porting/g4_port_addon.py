@@ -75,16 +75,17 @@ except ImportError:
 ADDON_ID = __name__.split(".", 1)[0] if "." in __name__ else __name__
 IS_STANDALONE_ADDON = False
 MODEL_EXTENSIONS = {".g4md", ".g4pkm"}
-MAX_GENERATED_TEXTURE_SIZE = 2048
+MAX_GENERATED_TEXTURE_SIZE = 8192
 FACE_ATLAS_COLUMNS = 4
 FACE_ATLAS_ROWS = 2
 FACE_ATLAS_SLOTS = FACE_ATLAS_COLUMNS * FACE_ATLAS_ROWS
 EXPRESSION_PREVIEW_BACKUP_UV = "__G4ExpressionPreviewUV"
 EXPRESSION_PREVIEW_SOURCE_UV_KEY = "g4_expression_preview_source_uv"
+EXPRESSION_PREVIEW_ACTIVE_UV_KEY = "g4_expression_preview_active_uv"
 ATLAS_GUTTER_PIXELS = 2
 G4_PORT_ADDON_MARKER = "mesh-json-v1-handoff"
 G4_BLENDER_PLUGIN_VERSION_FALLBACK = (2, 0, 0)
-G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.14"
+G4_PORT_SCRIPT_VERSION_EXPECTED = "1.0.20"
 STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 
 
@@ -241,9 +242,126 @@ def material_image_path(material) -> str:
     if material is None or material.node_tree is None:
         return ""
     for node in material.node_tree.nodes:
+        if node.type in {"BSDF_PRINCIPLED", "EMISSION"}:
+            color = node.inputs.get("Base Color") if node.type == "BSDF_PRINCIPLED" else node.inputs.get("Color")
+            if color is not None:
+                for link in color.links:
+                    source = link.from_node
+                    if source.type == "TEX_IMAGE" and source.image is not None and source.image.filepath:
+                        return bpy.path.abspath(source.image.filepath, library=source.image.library)
+    for node in material.node_tree.nodes:
         if node.type == "TEX_IMAGE" and node.image is not None and node.image.filepath:
-            return bpy.path.abspath(node.image.filepath)
+            return bpy.path.abspath(node.image.filepath, library=node.image.library)
     return ""
+
+
+def material_normal_source(material, base_path: str) -> tuple[str, float]:
+    if material is not None and material.node_tree is not None:
+        outputs = [node for node in material.node_tree.nodes if node.type == 'OUTPUT_MATERIAL' and node.is_active_output]
+        pending = [link.from_node for node in outputs for socket in node.inputs for link in socket.links]
+        visited = set()
+        while pending:
+            node = pending.pop()
+            if node in visited:
+                continue
+            visited.add(node)
+            if node.type == 'NORMAL_MAP':
+                color = node.inputs.get('Color')
+                sources = [link.from_node for link in color.links] if color else []
+                sources = [source for source in sources if source.type == 'TEX_IMAGE' and source.image is not None]
+                if len(sources) != 1 or node.space != 'TANGENT' or node.inputs['Strength'].is_linked:
+                    raise RuntimeError(f"{material.name}: normal export requires a tangent-space Normal Map with one image and constant strength")
+                return bpy.path.abspath(sources[0].image.filepath, library=sources[0].image.library), float(node.inputs['Strength'].default_value)
+            pending.extend(link.from_node for socket in node.inputs for link in socket.links)
+    if base_path:
+        source = Path(base_path)
+        stem = re.sub(r'(?:_alb|_albedo|_basecolor|_diffuse|_c)$', '', source.stem, flags=re.IGNORECASE)
+        candidates = {f'{stem}{suffix}{source.suffix}'.casefold() for suffix in ('_Nrm', '_Normal', '_nml', '_n')}
+        for image in bpy.data.images:
+            if image.filepath and Path(bpy.path.abspath(image.filepath, library=image.library)).parent == source.parent and Path(image.filepath).name.casefold() in candidates:
+                return bpy.path.abspath(image.filepath, library=image.library), 1.0
+        if source.parent.is_dir():
+            for path in source.parent.iterdir():
+                if path.is_file() and path.name.casefold() in candidates:
+                    return str(path), 1.0
+    return '', 1.0
+
+
+def build_normal_atlas(path: Path, normal_name: str, records, props, output_dir: Path) -> bool:
+    base_name = base_texture_name(normal_name)
+    base = load_image_pixels(str(output_dir / f'{base_name}.png'))
+    if base is None:
+        raise RuntimeError(f"Cannot generate {normal_name}: its color atlas must be generated with matching UVs first")
+    width, height = base[:2]
+    pixels = image_pixels(width, height, (0.5, 0.5, 1.0, 1.0))
+    processed = set()
+    for record, obj, material_name, material_index, base_path in texture_material_items_for_records(records):
+        material = obj.data.materials[material_index] if material_index < len(obj.data.materials) else None
+        source_path, strength = material_normal_source(material, base_path)
+        if not source_path:
+            continue
+        source = load_image_pixels(source_path, data_texture=True)
+        if source is None:
+            raise RuntimeError(f"Cannot read normal map for {obj.name}::{material_name}: {source_path}")
+        transform = json.loads(obj.level5_g4_port.material_uv_transforms or '{}').get(material_name)
+        scale = transform['scale'] if transform else [1.0, 1.0]
+        offset = transform['offset'] if transform else [0.0, 0.0]
+        bounds = material_uv_bounds(obj, material_index)
+        if uv_bounds_require_projection(bounds, object_image_extension_for_material(obj, material_index)):
+            source = projected_source_image(source, bounds, object_image_extension_for_material(obj, material_index))
+            offset = [offset[0] + bounds[0] * scale[0], offset[1] + bounds[2] * scale[1]]
+            scale = [(bounds[1] - bounds[0]) * scale[0], (bounds[3] - bounds[2]) * scale[1]]
+        rectangle = tuple(round(value) for value in (offset[0] * width, offset[1] * height, scale[0] * width, scale[1] * height))
+        key = (rectangle, source_path, strength)
+        if key in processed:
+            continue
+        processed.add(key)
+        x0, y0, draw_width, draw_height = rectangle
+        if draw_width < 1 or draw_height < 1 or x0 < 0 or y0 < 0 or x0 + draw_width > width or y0 + draw_height > height:
+            raise RuntimeError(f"Normal-map UV rectangle is outside the color atlas for {obj.name}")
+        source_width, source_height, source_pixels = source
+        for y in range(draw_height):
+            sy = min(source_height - 1, y * source_height // draw_height)
+            for x in range(draw_width):
+                sx = min(source_width - 1, x * source_width // draw_width)
+                i = (sy * source_width + sx) * 4
+                nx = (source_pixels[i] * 2 - 1) * strength
+                ny = (source_pixels[i + 1] * 2 - 1) * strength
+                nz = source_pixels[i + 2] * 2 - 1
+                length = math.sqrt(nx * nx + ny * ny + nz * nz)
+                if length <= 1e-8:
+                    nx, ny, nz, length = 0.0, 0.0, 1.0, 1.0
+                if props.global_uv_flip_x:
+                    nx = -nx
+                if props.global_uv_flip_y:
+                    ny = -ny
+                normal = (nx / length * 0.5 + 0.5, ny / length * 0.5 + 0.5, nz / length * 0.5 + 0.5, 1.0)
+                j = ((y0 + y) * width + x0 + x) * 4
+                pixels[j:j + 4] = array('f', normal)
+        extend_rect_border(pixels, width, height, x0, y0, draw_width, draw_height, ATLAS_GUTTER_PIXELS)
+    save_png(path, width, height, pixels, data_texture=True)
+    return bool(processed)
+
+
+def material_uses_alpha(material) -> bool:
+    if material is None or not material.use_nodes:
+        return False
+    outputs = [node for node in material.node_tree.nodes if node.type == "OUTPUT_MATERIAL" and node.is_active_output]
+    pending = [link.from_node for output in outputs for socket in output.inputs for link in socket.links]
+    visited = set()
+    while pending:
+        node = pending.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        if node.type == "BSDF_TRANSPARENT":
+            return True
+        if node.type == "BSDF_PRINCIPLED":
+            alpha = node.inputs.get("Alpha")
+            if alpha is not None and (alpha.is_linked or alpha.default_value < 1.0):
+                return True
+        pending.extend(link.from_node for socket in node.inputs for link in socket.links)
+    return False
 
 
 def first_used_material_image(obj: bpy.types.Object) -> str:
@@ -661,11 +779,7 @@ def export_port_meshes(path: Path, selected_only: bool, apply_modifiers: bool) -
             from ..animation.humanoid_avatar_pose import avatar_export_alignment
         except ImportError:
             from animation.humanoid_avatar_pose import avatar_export_alignment
-        original = resolve_file(settings.original_model)
-        skeleton = active_rig_skeleton_path(settings, original) if original.is_file() else None
-        conversion = conversion @ avatar_export_alignment(
-            export_armature(), skeleton.read_bytes() if skeleton is not None else None
-        )
+        conversion = conversion @ avatar_export_alignment(export_armature())
     authored = getattr(settings, "use_authored_outlines", False)
     geometries = []
     for object_index, obj in enumerate(objects):
@@ -1295,9 +1409,16 @@ def refresh_joint_target_options(props, context) -> None:
 
 class G4PortRecord(PropertyGroup):
     output_name: StringProperty(name="Output", default="c01000010_20")
-    material_name: StringProperty(name="Material", default="c01000010_20M")
+    material_name: StringProperty(
+        name="Material name",
+        default="c01000010_20M",
+        description="Output material name; renaming does not change the native shader or texture bindings",
+    )
     match_names: StringProperty(name="Objects", default="*", description="Comma-separated object or material names")
     original_index: IntProperty(name="Original Mesh", default=-1, min=-1)
+    native_template_record_index: IntProperty(default=-1, min=-1, options={"HIDDEN"})
+    source_object: StringProperty(name="Source Object", default="")
+    source_material: StringProperty(name="Source Material", default="")
     texture_key: StringProperty(name="Texture Key", default="", description="Native texture name to replace in custom mode")
     texture_file: StringProperty(name="Texture File", subtype="FILE_PATH", default="")
     uv_flip_x: BoolProperty(name="Flip U", default=False)
@@ -1311,7 +1432,10 @@ class G4PortRecord(PropertyGroup):
     auto_palette: BoolProperty(name="Auto Palette", default=True)
     force_layout_material: BoolProperty(name="Force Layout/Material", default=False)
     layout_index: IntProperty(name="Layout", default=1, min=0)
-    material_index: IntProperty(name="Material Slot", default=1, min=0)
+    material_index: IntProperty(
+        name="Material Slot", default=1, min=0,
+        description="Material slot in the original model, including its shader and texture bindings",
+    )
     secondary_weight_scale: FloatProperty(
         name="Dynamic Weight",
         default=1.0,
@@ -1332,7 +1456,15 @@ class G4PortRecord(PropertyGroup):
             "material_name": self.material_name,
             "match_names": split_csv(self.match_names) or ["*"],
             "fallback_degenerate": self.fallback_degenerate,
+            "texture_key": self.texture_key,
         }
+        template_index = self.native_template_record_index if self.native_template_record_index >= 0 else self.original_index
+        if template_index >= 0:
+            item["native_template_record_index"] = template_index
+        item["original_index"] = self.original_index
+        if self.source_object:
+            item["source_object"] = self.source_object
+            item["source_material"] = self.source_material
         if self.uv_flip_x or self.uv_flip_y:
             item["uv_flip"] = [self.uv_flip_x, self.uv_flip_y]
         if self.uv_scale_u != 1.0 or self.uv_scale_v != 1.0:
@@ -1368,6 +1500,28 @@ class G4PortRecord(PropertyGroup):
         if not self.outline_enabled:
             item["outline_enabled"] = False
         return item
+
+
+def source_submesh_mode_changed(props, context) -> None:
+    if props.keep_source_submeshes:
+        return
+    originals = {record.original_index: record.output_name for record in props.records if record.original_index >= 0}
+    for record in props.records:
+        if not record.source_object:
+            continue
+        obj = bpy.data.objects.get(record.source_object)
+        template_index = record.native_template_record_index if record.native_template_record_index >= 0 else record.original_index
+        if obj is not None and template_index in originals:
+            obj.level5_g4_port.target_record = originals[template_index]
+    for index in reversed(range(len(props.records))):
+        record = props.records[index]
+        if record.source_object and record.original_index < 0:
+            props.records.remove(index)
+        else:
+            record.source_object = ""
+            record.source_material = ""
+    sync_assignment_table(context)
+    props.active_record = min(props.active_record, max(0, len(props.records) - 1))
 
 
 class G4PortSceneSettings(PropertyGroup):
@@ -1472,6 +1626,10 @@ class G4PortSceneSettings(PropertyGroup):
         description="Copy the original G4MD/G4MG/G4TX byte-for-byte when all assigned imported meshes are unchanged",
     )
     selected_only: BoolProperty(name="Selected Meshes Only", default=False)
+    keep_source_submeshes: BoolProperty(
+        name="Keep Source Submeshes", default=True, update=source_submesh_mode_changed,
+        description="Automatically create a separate export record for each source object and used material",
+    )
 
     analyze_only: BoolProperty(name="Analyze Only", default=False)
     generate_tangents: BoolProperty(name="Generate Tangents", default=True)
@@ -1517,7 +1675,7 @@ class G4PortSceneSettings(PropertyGroup):
                 continue
             if item.atlas_signature and atlas_states.get(item.texture_name) != "ready":
                 continue
-            if self.replace_special_textures or not is_special_texture(item.texture_name):
+            if self.replace_special_textures or is_normal_texture(item.texture_name) or not is_special_texture(item.texture_name):
                 result[item.texture_name] = bpy.path.basename(replacement_path)
         for item in split_csv(self.texture_replacements):
             if "=" in item:
@@ -1528,7 +1686,7 @@ class G4PortSceneSettings(PropertyGroup):
                 entry = texture_entry(self, key)
                 if entry is not None and entry.atlas_signature and atlas_states.get(key) == "warning":
                     continue
-                if self.replace_special_textures or not is_special_texture(key):
+                if self.replace_special_textures or is_normal_texture(key) or not is_special_texture(key):
                     result[key] = value.strip()
         return result
 
@@ -1550,6 +1708,9 @@ class G4PortSceneSettings(PropertyGroup):
                 and (not is_face_atlas_record(record) or face_expression_pool or face_expression_transform)
             )
             item = record.to_config(atlas_transform)
+            normal_name = effective_texture_key + "nml"
+            if normal_name in active_texture_keys:
+                item["normal_texture"] = normal_name
             if face_expression_pool:
                 # Pool expressions are serialized entirely at record level.
                 # eye_10 is a face mask, so fit its complete authored UV island
@@ -1587,7 +1748,14 @@ class G4PortSceneSettings(PropertyGroup):
             for obj in mesh_objects(self.selected_only)
             if obj.level5_g4_port.target_record not in {"", "__none__"}
         }
-        return {
+        if self.keep_source_submeshes:
+            source_mesh_assignments.clear()
+        for record in self.records:
+            if record.source_object and record.source_material:
+                source_mesh_assignments[f"{record.source_object}::{mesh_symbol(record.source_material, 'material')}"] = record.output_name
+        config = {
+            "keep_source_submeshes": self.keep_source_submeshes,
+            "unique_material_per_mesh": self.keep_source_submeshes or any(record.get("normal_texture") for record in records),
             "model_rel": self.model_rel,
             "native_material_names": split_csv(self.native_material_names),
             "records": records,
@@ -1605,6 +1773,40 @@ class G4PortSceneSettings(PropertyGroup):
             "vertex_color_mode": "authored" if self.use_authored_outlines else "constant" if self.texture_mode == "custom" else "native",
             "vertex_color": list(STABLE_CUSTOM_VERTEX_COLOR),
         }
+
+        alpha_records = []
+        for index, record in enumerate(self.records):
+            if self.texture_mode != "custom":
+                continue
+            objects = objects_for_record(record)
+            alpha_objects = [obj for obj in objects if any(
+                material_uses_alpha(material) for material in obj.data.materials
+                if not record.source_material or material is not None and material.name == record.source_material
+            )]
+            if not alpha_objects:
+                continue
+            if len(alpha_objects) == len(objects):
+                alpha_records.append(record.output_name)
+                continue
+            alpha_name = record.output_name + "_alpha"
+            alpha_rule = dict(records[index])
+            alpha_rule.update(output_name=alpha_name, match_names=[obj.name for obj in alpha_objects],
+                              native_template_record_index=index, outline_enabled=False)
+            records.append(alpha_rule)
+            alpha_records.append(alpha_name)
+            for obj in alpha_objects:
+                source_mesh_assignments[obj.name] = alpha_name
+        if alpha_records:
+            separate_materials = config["unique_material_per_mesh"] or len(records) > len(self.records)
+            config["unique_material_per_mesh"] = separate_materials
+            config["alpha_material_indices"] = sorted({
+                index if separate_materials else split_csv(self.native_material_names).index(record["material_name"])
+                for index, record in enumerate(records) if record["output_name"] in alpha_records
+            })
+        if any(record.get("normal_texture") for record in records):
+            config["unique_material_per_mesh"] = True
+            config["generate_tangents"] = True
+        return config
 
 
 def settings(context) -> G4PortSceneSettings:
@@ -1667,12 +1869,17 @@ def apply_config_to_settings(target: G4PortSceneSettings, config: dict) -> None:
     uv_flip = config.get("uv_flip") or [False, True]
     target.global_uv_flip_x = bool(uv_flip[0]) if len(uv_flip) > 0 else False
     target.global_uv_flip_y = bool(uv_flip[1]) if len(uv_flip) > 1 else False
+    target.keep_source_submeshes = bool(config.get("keep_source_submeshes", False))
     target.records.clear()
     for source in config.get("records", []):
         record = target.records.add()
         record.output_name = source.get("output_name", "")
+        record.original_index = int(source.get("original_index", -1))
+        record.native_template_record_index = int(source.get("native_template_record_index", -1))
+        record.source_object = str(source.get("source_object", ""))
+        record.source_material = str(source.get("source_material", ""))
         record.material_name = source.get("material_name", "")
-        record.texture_key = record.output_name
+        record.texture_key = source.get("texture_key", record.output_name)
         record.match_names = join_csv(source.get("match_names", []))
         record.fallback_degenerate = bool(source.get("fallback_degenerate", False))
         record.rigid_joint = str(source.get("rigid_joint", ""))
@@ -1931,6 +2138,9 @@ def sync_assignment_table(context) -> None:
 
 
 def objects_for_record(record: G4PortRecord) -> list[bpy.types.Object]:
+    if record.source_object:
+        obj = bpy.data.objects.get(record.source_object)
+        return [obj] if obj is not None and obj.type == "MESH" else []
     explicit = set(split_csv(record.match_names))
     assigned = [
         obj for obj in mesh_objects(False)
@@ -2508,8 +2718,12 @@ def auto_assign_record_texture_files(props: G4PortSceneSettings) -> int:
     return assigned
 
 
+def is_normal_texture(name: str) -> bool:
+    return name.casefold().endswith(("nml", "_normal", ".2"))
+
+
 def is_special_texture(name: str) -> bool:
-    return name.endswith(("line", "oc", "sp", "dp", "spm"))
+    return is_normal_texture(name) or name.endswith(("line", "oc", "sp", "dp", "spm"))
 
 
 def special_texture_suffix(name: str) -> str:
@@ -2520,6 +2734,8 @@ def special_texture_suffix(name: str) -> str:
 
 
 def base_texture_name(name: str) -> str:
+    if is_normal_texture(name):
+        return re.sub(r"(?:_?nml|_normal|\.2)$", "", name, flags=re.IGNORECASE)
     suffix = special_texture_suffix(name)
     return name[: -len(suffix)] if suffix else name
 
@@ -2638,9 +2854,11 @@ def draw_object_uvs(
             draw_line(pixels, width, height, point, points[(index + 1) % len(points)], color)
 
 
-def save_png(path: Path, width: int, height: int, pixels: array) -> None:
+def save_png(path: Path, width: int, height: int, pixels: array, data_texture: bool = False) -> None:
     image = bpy.data.images.new(path.stem, width=width, height=height, alpha=True)
     try:
+        if data_texture:
+            image.colorspace_settings.name = "Non-Color"
         image.pixels.foreach_set(pixels)
         image.filepath_raw = str(path)
         image.file_format = "PNG"
@@ -2649,18 +2867,29 @@ def save_png(path: Path, width: int, height: int, pixels: array) -> None:
         bpy.data.images.remove(image)
 
 
-def load_image_pixels(path: str) -> tuple[int, int, array] | None:
+def load_image_pixels(path: str, data_texture: bool = False) -> tuple[int, int, array] | None:
     if not path:
         return None
     source = Path(bpy.path.abspath(path))
-    if not source.is_file():
-        return None
-    image = bpy.data.images.load(str(source), check_existing=True)
+    image = next((image for image in bpy.data.images
+                  if image.packed_file and image.filepath
+                  and Path(bpy.path.abspath(image.filepath, library=image.library)) == source), None)
+    if image is None:
+        if not source.is_file():
+            return None
+        image = bpy.data.images.load(str(source), check_existing=True)
     width, height = image.size
     if width <= 0 or height <= 0 or len(image.pixels) < int(width) * int(height) * 4:
         return None
     pixels = array("f", [0.0]) * (int(width) * int(height) * 4)
-    image.pixels.foreach_get(pixels)
+    color_space = image.colorspace_settings.name
+    try:
+        if data_texture:
+            image.colorspace_settings.name = "Non-Color"
+        image.pixels.foreach_get(pixels)
+    finally:
+        if data_texture:
+            image.colorspace_settings.name = color_space
     return int(width), int(height), pixels
 
 
@@ -2773,8 +3002,8 @@ def atlas_grid(count: int) -> tuple[int, int]:
 def capped_atlas_dimensions(
     entry_width: int, entry_height: int, source_width: int, source_height: int, columns: int, rows: int
 ) -> tuple[int, int, int, int]:
-    cell_width = max(1, max(entry_width, source_width * columns) // columns)
-    cell_height = max(1, max(entry_height, source_height * rows) // rows)
+    cell_width = max(1, max(entry_width, (source_width + 2 * ATLAS_GUTTER_PIXELS) * columns) // columns)
+    cell_height = max(1, max(entry_height, (source_height + 2 * ATLAS_GUTTER_PIXELS) * rows) // rows)
     limit = min(MAX_GENERATED_TEXTURE_SIZE, 0xFFFF)
     if cell_width * columns > limit:
         cell_width = max(1, limit // columns)
@@ -2866,7 +3095,7 @@ def expression_preview_backup(mesh: bpy.types.Mesh, source_uv: bpy.types.MeshUVL
     return backup
 
 
-def apply_expression_preview(cell: int) -> int:
+def apply_expression_preview(cell: int, surfaces: list[tuple[bpy.types.Object, set[int] | None, str]] | None = None) -> int:
     """Offset expression-mesh UVs to one visual 4x2 atlas cell.
 
     The backup is a temporary UV layer rather than an in-memory cache so the
@@ -2878,20 +3107,27 @@ def apply_expression_preview(cell: int) -> int:
     index = cell - 1
     origin_u = (index % FACE_ATLAS_COLUMNS) / FACE_ATLAS_COLUMNS
     origin_v = (index // FACE_ATLAS_COLUMNS) / FACE_ATLAS_ROWS
-    for obj in expression_preview_targets():
+    targets = surfaces if surfaces is not None else [(obj, None, '') for obj in expression_preview_targets()]
+    for obj, slots, uv_name in targets:
         mesh = obj.data
         source_name = str(obj.get(EXPRESSION_PREVIEW_SOURCE_UV_KEY, ""))
-        source_uv = mesh.uv_layers.get(source_name) if source_name else mesh.uv_layers.active
+        source_uv = mesh.uv_layers.get(uv_name or source_name) if uv_name or source_name else mesh.uv_layers.active
         if source_uv is None or source_uv.name == EXPRESSION_PREVIEW_BACKUP_UV:
             continue
+        if EXPRESSION_PREVIEW_ACTIVE_UV_KEY not in obj:
+            obj[EXPRESSION_PREVIEW_ACTIVE_UV_KEY] = mesh.uv_layers.active.name
         backup = expression_preview_backup(mesh, source_uv)
         obj[EXPRESSION_PREVIEW_SOURCE_UV_KEY] = source_uv.name
-        for target, source in zip(source_uv.data, backup.data):
+        loops = {index for polygon in mesh.polygons if slots is None or polygon.material_index in slots
+                 for index in polygon.loop_indices}
+        for index, (target, source) in enumerate(zip(source_uv.data, backup.data)):
+            if index not in loops:
+                continue
             target.uv = (
                 source.uv.x + origin_u,
                 source.uv.y + origin_v,
             )
-        mesh.uv_layers.active = source_uv
+        mesh.uv_layers.active = mesh.uv_layers.get(obj[EXPRESSION_PREVIEW_ACTIVE_UV_KEY]) or source_uv
         applied += 1
     return applied
 
@@ -2909,10 +3145,12 @@ def restore_expression_preview() -> int:
         if source_uv is not None and backup is not None:
             for target, source in zip(source_uv.data, backup.data):
                 target.uv = source.uv
-            mesh.uv_layers.active = source_uv
+            mesh.uv_layers.active = mesh.uv_layers.get(str(obj.get(EXPRESSION_PREVIEW_ACTIVE_UV_KEY, source_name))) or source_uv
             mesh.uv_layers.remove(backup)
             restored += 1
         del obj[EXPRESSION_PREVIEW_SOURCE_UV_KEY]
+        if EXPRESSION_PREVIEW_ACTIVE_UV_KEY in obj:
+            del obj[EXPRESSION_PREVIEW_ACTIVE_UV_KEY]
     return restored
 
 
@@ -3319,7 +3557,9 @@ def texture_material_items_for_records(records: list[G4PortRecord]) -> list[tupl
                 material_indices = [0]
             for material_index in material_indices:
                 material = obj.data.materials[material_index] if material_index < len(obj.data.materials) else None
-                material_name = material.name if material is not None else "material"
+                material_name = material.name if material is not None else f"material_{material_index}"
+                if record.source_material and material_name != record.source_material:
+                    continue
                 override = bpy.path.abspath(obj.level5_g4_port.source_texture)
                 source_path = (
                     override if override and Path(override).is_file()
@@ -3359,10 +3599,19 @@ def build_texture_spritesheet(
         )
         started = time.perf_counter()
         cache_key = str(Path(bpy.path.abspath(source_path)).resolve()) if source_path else ""
+        material = obj.data.materials[material_index] if material_index < len(obj.data.materials) else None
+        opaque = source_path_for_item is None and not material_uses_alpha(material)
+        if cache_key and opaque:
+            cache_key += "|opaque"
+        if cache_key and source_path_for_item is None:
+            normal_path, normal_strength = material_normal_source(material, source_path)
+            cache_key += f"|normal:{normal_path}:{normal_strength}"
         source = source_cache.get(cache_key) if cache_key else None
         if source is None and cache_key:
             source = load_image_pixels(source_path)
             if source is not None:
+                if opaque:
+                    source[2][3::4] = array("f", [1.0]) * (source[0] * source[1])
                 source = bleed_transparent_pixels(source)
                 source_cache[cache_key] = source
         if source is not None and uv_bounds_require_projection(bounds, extension):
@@ -3383,7 +3632,10 @@ def build_texture_spritesheet(
             log_path,
             f"{entry['name']}: skipped spritesheet; unreadable source image for {', '.join(unreadable)}",
         )
-        return False
+        raise RuntimeError(
+            f"Cannot generate {entry['name']}: unreadable source image for {', '.join(unreadable)}. "
+            "Pack the source images into the blend file or restore their file paths."
+        )
 
     if not props.auto_pack_source_uvs:
         distinct_sources = {cache_key for _, _, _, _, _, cache_key in sources}
@@ -3506,6 +3758,8 @@ def discard_generated_atlas(entry: G4PortTextureReplacement | None, generated_pa
 
 def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = None) -> int:
     props = settings(context)
+    if props.keep_source_submeshes and not props.use_preset_file:
+        prepare_source_submeshes(props)
     normalize_shared_face_record_keys(props)
     port_log(log_path, "Generate PNG set started")
     port_log(log_path, f"Output folder: {output_dir}")
@@ -3544,6 +3798,8 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
         name = entry["name"]
         path = output_dir / f"{name}.png"
         port_log(log_path, f"[{index}/{len(entries)}] Processing {name} ({entry['width']}x{entry['height']})")
+        if is_normal_texture(name):
+            continue
         if is_special_texture(name):
             if not props.replace_special_textures:
                 port_log(log_path, f"{name}: preserving native special map")
@@ -3570,9 +3826,11 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
                 if not source
             ]
             if missing_sources:
-                port_log(log_path, f"{name}: missing source image for {', '.join(missing_sources)}; preserving native G4TX entry")
                 discard_generated_atlas(texture_entry(props, name), path)
-                continue
+                raise RuntimeError(
+                    f"Cannot generate {name}: no source image for {', '.join(missing_sources)}. "
+                    "Assign a source texture before exporting."
+                )
             if build_texture_spritesheet(path, entry, records, props, log_path=log_path):
                 replacements.append(f"{name}={path.name}")
                 atlas_entry = texture_entry(props, name)
@@ -3586,6 +3844,22 @@ def generate_texture_png_set(context, output_dir: Path, log_path: Path | None = 
             else:
                 port_log(log_path, f"{name}: unreadable source; preserving native G4TX entry")
                 discard_generated_atlas(texture_entry(props, name), path)
+    normal_names = set()
+    for base_name, records in records_by_texture.items():
+        if any(material_normal_source(obj.data.materials[index] if index < len(obj.data.materials) else None, source)[0]
+               for _, obj, _, index, source in texture_material_items_for_records(records)):
+            normal_names.add(base_name + "nml")
+    for normal_name in sorted(normal_names):
+        base_name = base_texture_name(normal_name)
+        records = records_by_texture.get(base_name, [])
+        if not records:
+            continue
+        path = output_dir / f"{normal_name}.png"
+        build_normal_atlas(path, normal_name, records, props, output_dir)
+        replacements.append(f"{normal_name}={path.name}")
+        if texture_entry(props, normal_name) is None:
+            props.texture_entries.add().texture_name = normal_name
+        props.generate_tangents = True
     props.texture_source_dir = str(output_dir)
     props.texture_replacements = join_csv(replacements)
     generated = dict(item.split("=", 1) for item in replacements)
@@ -3846,6 +4120,8 @@ def enforce_g4_uv_orientation(props: G4PortSceneSettings) -> bool:
 def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     prefs = addon_preferences()
     props = ensure_scene_defaults(context)
+    if props.keep_source_submeshes and not props.use_preset_file:
+        prepare_source_submeshes(props)
     explicit_texture_replacements = props.texture_mode == "custom" and has_explicit_texture_replacements(props)
     if not explicit_texture_replacements:
         props.use_source_uv_transforms = True
@@ -3874,6 +4150,25 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     source_g4tx = original_g4tx_path(raw_root, props.model_rel)
     if source_g4tx is None:
         raise RuntimeError(f"Original G4TX not found in DX11 or NX for {props.model_rel}")
+    if props.prepare_victorytool_profile:
+        try:
+            from ..animation.humanoid_avatar_addon import (
+                capture_avatar_representation, reference_joint_names, update_validated_representation,
+            )
+        except ImportError:
+            from animation.humanoid_avatar_addon import (
+                capture_avatar_representation, reference_joint_names, update_validated_representation,
+            )
+        armature = export_armature()
+        if armature is None:
+            raise RuntimeError("Select a rigged character before preparing its animations")
+        profile = armature.level5_humanoid_avatar
+        if not profile.has_representation:
+            validation = capture_avatar_representation(context, armature, reference_joint_names(context, armature))
+        else:
+            validation = update_validated_representation(context, armature, profile)
+        if not validation["valid"]:
+            raise RuntimeError("Review the character's Avatar assignments and capture its rest pose before exporting animations")
     adopt_existing_face_atlas(props)
 
     package_root = Path(bpy.path.abspath(filepath)) if filepath else resolve_file(getattr(prefs, "output_root", ""))
@@ -4215,6 +4510,111 @@ class LEVEL5_G4PORT_OT_load_original_model(Operator, ImportHelper):
         return {"FINISHED"}
 
 
+def prepare_source_submeshes(props: G4PortSceneSettings) -> int:
+    if not props.records:
+        raise RuntimeError("Choose an original model before preparing source submeshes")
+    objects = sorted((obj for obj in mesh_objects(props.selected_only)
+                      if not obj.hide_get() and not obj.hide_render and obj.data.polygons), key=lambda obj: obj.name)
+    surfaces = []
+    for obj in objects:
+        material_names = []
+        symbols = {}
+        for index in sorted({polygon.material_index for polygon in obj.data.polygons}):
+            material = obj.data.materials[index] if index < len(obj.data.materials) else None
+            name = material.name if material is not None else f"material_{index}"
+            symbol = mesh_symbol(name, f"material_{index}")
+            if symbol in symbols and symbols[symbol] != name:
+                raise RuntimeError(f"{obj.name}: material names {symbols[symbol]!r} and {name!r} share an export identifier; rename one material")
+            symbols[symbol] = name
+            if name not in material_names:
+                material_names.append(name)
+                surfaces.append((obj, name))
+    if not surfaces:
+        raise RuntimeError("Select visible mesh objects with faces to export")
+    wanted = {(obj.name, material) for obj, material in surfaces}
+    for index in reversed(range(len(props.records))):
+        record = props.records[index]
+        if record.source_object and (record.source_object, record.source_material) not in wanted:
+            if record.original_index < 0:
+                props.records.remove(index)
+            else:
+                record.source_object = ""
+                record.source_material = ""
+    by_name = {record.output_name: index for index, record in enumerate(props.records)}
+    existing = {(record.source_object, record.source_material): index for index, record in enumerate(props.records) if record.source_object}
+    fallback = next((index for index, record in enumerate(props.records)
+                     if record.original_index >= 0 and not is_face_atlas_record(record)), 0)
+    names = set(by_name)
+    preferred = {}
+    for obj in objects:
+        target = by_name.get(obj.level5_g4_port.target_record)
+        if target is None:
+            object_name = blender_base_name(obj.name).casefold()
+            target = next((index for index, record in enumerate(props.records)
+                           if record.output_name.casefold() == object_name), None)
+        if target is None and obj.active_material is not None:
+            target = next((index for index, record in enumerate(props.records)
+                           if record.material_name == obj.active_material.name), None)
+        preferred[obj.name] = fallback if target is None else target
+    created = 0
+    primary = {}
+    for obj, material in surfaces:
+        record_index = existing.get((obj.name, material))
+        if record_index is None:
+            template_index = preferred[obj.name]
+            template = props.records[template_index]
+            if not template.source_object:
+                record_index = template_index
+            else:
+                if len(props.records) >= 256:
+                    raise RuntimeError("Source submesh export exceeds 256 native material slots; reduce the number of object/material surfaces")
+                values = {prop.identifier: getattr(template, prop.identifier)
+                          for prop in template.bl_rna.properties if prop.identifier != "rna_type" and not prop.is_readonly}
+                native_index = template.native_template_record_index if template.native_template_record_index >= 0 else template.original_index
+                record_index = len(props.records)
+                record = props.records.add()
+                for key, value in values.items():
+                    setattr(record, key, value)
+                record.original_index = -1
+                record.native_template_record_index = native_index
+                stem = mesh_symbol(f"{obj.name}_{material}", "submesh")
+                name = stem
+                number = 1
+                while name in names:
+                    name = f"{stem}_{number}"
+                    number += 1
+                record.output_name = name
+                names.add(name)
+                created += 1
+            record = props.records[record_index]
+            record.source_object = obj.name
+            record.source_material = material
+            record.match_names = obj.name
+            existing[obj.name, material] = record_index
+        primary.setdefault(obj.name, props.records[record_index].output_name)
+    for obj in objects:
+        obj.level5_g4_port.target_record = primary[obj.name]
+    props.active_record = min(props.active_record, len(props.records) - 1)
+    props.use_preset_file = False
+    return created
+
+
+class LEVEL5_G4PORT_OT_prepare_submeshes(Operator):
+    bl_idname = "level5_g4_port.prepare_submeshes"
+    bl_label = "Update Source Submeshes"
+    bl_description = "Create export records from visible source objects and used materials without joining Blender meshes"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        try:
+            created = prepare_source_submeshes(settings(context))
+        except (ValueError, RuntimeError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Prepared source submeshes; {created} new record(s)")
+        return {"FINISHED"}
+
+
 class LEVEL5_G4PORT_OT_add_record(Operator):
     bl_idname = "level5_g4_port.add_record"
     bl_label = "Add Record"
@@ -4491,6 +4891,8 @@ class EXPORT_OT_level5_g4_port(Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         validation = report.get("validation") or {}
+        for warning in report.get("warnings", []):
+            self.report({"WARNING"}, warning)
         vertices = validation.get("vertices_checked", report.get("vertices", "?"))
         indices = validation.get("indices_checked", report.get("indices", "?"))
         self.report({"INFO"}, f"G4 port exported: {vertices} vertices, {indices} indices. {report_path}")
@@ -4677,6 +5079,9 @@ def draw_record_settings_subsection(layout, props: G4PortSceneSettings) -> None:
     if record.original_index >= 0:
         box.label(text=f"Original mesh #{record.original_index}", icon="MESH_DATA")
     box.prop(record, "output_name")
+    if record.source_object:
+        box.label(text=record.source_object, icon="MESH_DATA")
+        box.label(text=record.source_material, icon="MATERIAL")
     box.prop(record, "material_name")
     box.prop(record, "match_names")
     row = box.row(align=True)
@@ -4715,6 +5120,9 @@ def draw_mapping_section(layout, context, props: G4PortSceneSettings) -> None:
     if not props.records:
         box.label(text="Load the original model first to create native target records", icon="INFO")
     else:
+        box.prop(props, "keep_source_submeshes")
+        if props.keep_source_submeshes:
+            box.operator("level5_g4_port.prepare_submeshes", text="Update Source Submeshes", icon="FILE_REFRESH")
         box.label(text="Assign each Blender mesh to its native G4MD record", icon="OUTLINER_OB_MESH")
         for obj in mesh_objects(False):
             row = box.row(align=True)
@@ -4897,17 +5305,6 @@ def draw_outline_workflow(layout, context) -> None:
         box.label(text="Select edges in Edit Mode to mark outlines")
 
 
-class LEVEL5_G4PORT_PT_panel(Panel):
-    bl_label = "PORT"
-    bl_idname = "LEVEL5_G4PORT_PT_panel"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Level-5"
-
-    def draw(self, context):
-        draw_port_workflow(self.layout, context, include_actions=True)
-
-
 class LEVEL5_G4PORT_PT_outline(Panel):
     bl_label = "OUTLINE"
     bl_idname = "LEVEL5_G4PORT_PT_outline"
@@ -4920,22 +5317,12 @@ class LEVEL5_G4PORT_PT_outline(Panel):
         draw_outline_workflow(self.layout, context)
 
 
-class LEVEL5_G4PORT_PT_expression(Panel):
-    bl_label = "EXPRESSION"
-    bl_idname = "LEVEL5_G4PORT_PT_expression"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "Level-5"
-    bl_order = 2
-
-    def draw(self, context):
-        props = settings(context)
-        draw_expression_pool(self.layout, props)
-        draw_expression_preview_section(self.layout, props)
-
-
 def menu_func_export(self, context):
-    self.layout.operator(EXPORT_OT_level5_g4_port.bl_idname, text="Level-5 G4 Port")
+    if IS_STANDALONE_ADDON:
+        self.layout.operator(EXPORT_OT_level5_g4_model.bl_idname, text='Level-5 Export Model')
+
+
+from .g4_model_export import EXPORT_OT_level5_g4_model
 
 
 classes = []
@@ -4957,6 +5344,7 @@ classes.extend([
     LEVEL5_G4PORT_UL_records,
     LEVEL5_G4PORT_UL_joint_aliases,
     LEVEL5_G4PORT_OT_load_original_model,
+    LEVEL5_G4PORT_OT_prepare_submeshes,
     LEVEL5_G4PORT_OT_add_record,
     LEVEL5_G4PORT_OT_remove_record,
     LEVEL5_G4PORT_OT_assign_selected,
@@ -4972,9 +5360,8 @@ classes.extend([
     LEVEL5_G4PORT_OT_remove_joint_alias,
     LEVEL5_G4PORT_OT_analyze,
     EXPORT_OT_level5_g4_port,
-    LEVEL5_G4PORT_PT_panel,
+    EXPORT_OT_level5_g4_model,
     LEVEL5_G4PORT_PT_outline,
-    LEVEL5_G4PORT_PT_expression,
 ])
 
 
@@ -4994,6 +5381,12 @@ def register_class_replacing_stale(cls) -> None:
 
 
 def register():
+    from . import g4_export_workflow
+    g4_export_workflow.register()
+    for name in ('LEVEL5_G4PORT_PT_panel', 'LEVEL5_G4PORT_PT_expression'):
+        panel = getattr(bpy.types, name, None)
+        if panel is not None:
+            bpy.utils.unregister_class(panel)
     for cls in classes:
         register_class_replacing_stale(cls)
     bpy.types.Object.level5_g4_port = bpy.props.PointerProperty(type=G4PortObjectSettings)
@@ -5005,6 +5398,8 @@ def register():
 
 
 def unregister():
+    from . import g4_export_workflow
+    g4_export_workflow.unregister()
     for scene in bpy.data.scenes:
         viewport_outline.configure_authored(scene, False)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)

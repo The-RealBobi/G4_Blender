@@ -12,6 +12,15 @@ from .g4mt import crc32b, parse_g4mt
 PRECISION_FACE_MARKERS = ("eye", "eld", "ebw", "lgt")
 
 
+def _append_shared_payload(buffer: bytearray, offsets: dict[bytes, int], payload: bytes) -> int:
+    offset = offsets.get(payload)
+    if offset is None:
+        offset = len(buffer)
+        offsets[payload] = offset
+        buffer.extend(payload)
+    return offset
+
+
 def _clip_hash_order(clip_hashes: Sequence[int], native_order: Sequence[int]) -> tuple[int, ...]:
     return tuple(sorted(range(len(clip_hashes)), key=lambda index: (clip_hashes[index], native_order[index], index)))
 
@@ -224,18 +233,18 @@ def write_g4mt_clip(
     target_info_records = bytearray()
     key_records = bytearray()
     data_records = bytearray()
+    key_offsets: dict[bytes, int] = {}
+    data_offsets: dict[bytes, int] = {}
     for target_index, encoded_channels in enumerate(encoded_targets):
         if len(channel_records) // 20 > 0xFFFFFF:
             raise ValueError("G4MT channel table exceeds its 24-bit index limit")
         channel_start = len(channel_records) // 20
         for header, key_bytes, data_bytes in encoded_channels:
-            key_start = len(key_records) // 2
-            data_start = len(data_records)
+            key_start = _append_shared_payload(key_records, key_offsets, key_bytes) // 2
+            data_start = _append_shared_payload(data_records, data_offsets, data_bytes)
             key_count = len(key_bytes) // 2
             channel_records.extend(header)
             channel_records.extend(struct.pack("<III", key_start, data_start, key_count))
-            key_records.extend(key_bytes)
-            data_records.extend(data_bytes)
         target_info_records.extend(struct.pack(
             "<HHBBH", target_index, channel_start & 0xFFFF,
             len(encoded_channels), channel_start >> 16, 0
@@ -371,6 +380,8 @@ def write_g4mt_family(template: bytes, clips: Sequence[G4MTClipSamples]) -> byte
     keys = bytearray()
     data = bytearray()
     shared_channel_blocks: dict[EncodedG4MTTarget, int] = {}
+    key_offsets: dict[bytes, int] = {}
+    data_offsets: dict[bytes, int] = {}
     for clip in clips:
         if not 0 <= clip.template_clip_index < len(source.clips):
             raise IndexError("G4MT template clip index is out of range")
@@ -401,13 +412,11 @@ def write_g4mt_family(template: bytes, clips: Sequence[G4MTClipSamples]) -> byte
                     raise ValueError("G4MT family channel table exceeds its 24-bit index limit")
                 shared_channel_blocks[signature] = channel_start
                 for header, key_bytes, data_bytes in encoded_channels:
-                    key_start = len(keys) // 2
-                    data_start = len(data)
+                    key_start = _append_shared_payload(keys, key_offsets, key_bytes) // 2
+                    data_start = _append_shared_payload(data, data_offsets, data_bytes)
                     key_count = len(key_bytes) // 2
                     channels.extend(header)
                     channels.extend(struct.pack("<III", key_start, data_start, key_count))
-                    keys.extend(key_bytes)
-                    data.extend(data_bytes)
             target_infos.extend(struct.pack(
                 "<HHBBH", target_index_by_name[target.name], channel_start & 0xFFFF,
                 len(encoded_channels), channel_start >> 16, 0
@@ -637,6 +646,8 @@ def merge_g4mt_family_preserving_additive(
     rows = bytearray()
     clip_hashes = []
     shared_channel_blocks = {}
+    key_offsets: dict[bytes, int] = {}
+    data_offsets: dict[bytes, int] = {}
     for source_clip in source.clips:
         passthrough = source_clip.index in additive
         if passthrough:
@@ -666,13 +677,13 @@ def merge_g4mt_family_preserving_additive(
                 shared_channel_blocks[block_key] = channel_start
                 for channel_index in range(info.channel_start, info.channel_start + info.channel_count):
                     channel = bank.channels[channel_index]
-                    key_start = len(keys) // 2
-                    data_start = len(data)
-                    keys.extend(struct.pack(f"<{channel.key_count}H", *channel.keys))
-                    data.extend(bank_bytes[
+                    key_bytes = struct.pack(f"<{channel.key_count}H", *channel.keys)
+                    data_bytes = bank_bytes[
                         bank.header.data_offset + channel.data_offset:
                         bank.header.data_offset + channel.data_offset + channel.key_count * channel.bytes_per_key
-                    ])
+                    ]
+                    key_start = _append_shared_payload(keys, key_offsets, key_bytes) // 2
+                    data_start = _append_shared_payload(data, data_offsets, data_bytes)
                     record_offset = bank.header.channel_offset + channel.index * 20
                     record = bytearray(bank_bytes[record_offset:record_offset + 20])
                     record[6] = scale_maps[bank_index][channel.scale_index]
@@ -784,3 +795,47 @@ def merge_g4mt_family_preserving_additive(
             if source.targets[original_info.target_index].name_hash != readback.targets[actual_info.target_index].name_hash:
                 raise ValueError(f"G4MT additive clip {original.name!r} changed its targets")
     return result
+
+
+def write_authored_g4mt(clips: Sequence[G4MTClipSamples], fps: int) -> bytes:
+    """Create an absolute motion bank using the existing sample encoder."""
+    if not clips or len(clips) > 65535 or not 1 <= fps <= 255:
+        raise ValueError('Motion export requires 1 to 65535 Actions and an integer FPS from 1 to 255')
+    names = [clip.name for clip in clips]
+    if len({crc32b(name) for name in names}) != len(names):
+        raise ValueError('Action clip names must have unique name hashes')
+    seed = bytearray(0x40 + len(clips) * 16)
+    seed[:4] = b'G4MT'
+    struct.pack_into('<HH', seed, 4, 0x40, 0x68)
+    struct.pack_into('<H', seed, 0x0A, 0x10)
+    struct.pack_into('<H', seed, 0x20, len(clips))
+    for index, clip in enumerate(clips):
+        count = len(clip.targets[0].samples) if clip.targets else 0
+        if not 1 <= count <= 65536:
+            raise ValueError(f'Action {clip.name!r} requires 1 to 65536 sampled frames')
+        struct.pack_into('<HHHHBBBBI', seed, 0x40 + index * 16, 0, count - 1, 0, 0, 0, fps, 0, 0, 0)
+
+    def section(field: int, payload: bytes) -> None:
+        seed.extend(bytes(-len(seed) % 4))
+        units = (len(seed) - 0x40) // 4
+        if units > 65535:
+            raise ValueError('Action directory exceeds the G4MT offset capacity')
+        struct.pack_into('<H', seed, field, units)
+        seed.extend(payload)
+
+    section(0x28, struct.pack('<f', 1.))
+    section(0x2A, struct.pack(f'<{len(clips)}I', *(crc32b(name) for name in names)))
+    section(0x2C, b'')
+    directory = bytearray(struct.pack(f'<{len(clips)}H', *range(len(clips))))
+    directory.extend(bytes(-len(directory) % 4))
+    string_table = bytearray(len(clips) * 2)
+    for index, name in enumerate(names):
+        if not name or any(ord(c) < 32 for c in name) or len(string_table) > 65535:
+            raise ValueError('Action names are invalid or exceed the G4MT name table capacity')
+        struct.pack_into('<H', string_table, index * 2, len(string_table))
+        string_table.extend(name.encode('utf-8') + b'\0')
+    section(0x2E, bytes(directory + string_table))
+    for field in (0x24, 0x26, 0x30, 0x32):
+        section(field, b'')
+    struct.pack_into('<I', seed, 0x0C, len(seed) - 0x40)
+    return write_g4mt_family(bytes(seed), tuple(G4MTClipSamples(i, clip.name, clip.targets) for i, clip in enumerate(clips)))

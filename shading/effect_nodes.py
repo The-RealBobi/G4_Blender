@@ -185,15 +185,25 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             return vector(*result)
 
         def displace(coordinates, direction, amount):
-            split = nodes.new('ShaderNodeSeparateXYZ')
-            links.new(coordinates, split.inputs[0])
-            return vector(*(math('ADD', split.outputs[i], math('MULTIPLY', direction[i], amount)) for i in range(2)))
+            node = nodes.new('ShaderNodeVectorMath')
+            node.operation = 'MULTIPLY_ADD'
+            links.new(direction, node.inputs[0])
+            if isinstance(amount, (int, float)):
+                node.inputs[1].default_value = (amount, amount, amount)
+            else:
+                links.new(amount, node.inputs[1])
+            links.new(coordinates, node.inputs[2])
+            return node.outputs[0]
 
         def flow_direction(texture):
-            split = nodes.new('ShaderNodeSeparateColor')
-            links.new(texture.outputs['Color'], split.inputs[0])
-            # Flipping the native UV origin also flips its negative-Y displacement.
-            return tuple(math('SUBTRACT', math('MULTIPLY', split.outputs[i], 2.0), 1.0) for i in range(2))
+            # Keep Z zero: affine UV rows consume the homogeneous Z=1 of
+            # coordinates after displacement, not the flow texture's blue.
+            node = nodes.new('ShaderNodeVectorMath')
+            node.operation = 'MULTIPLY_ADD'
+            node.inputs[1].default_value = (2.0, 2.0, 0.0)
+            node.inputs[2].default_value = (-1.0, -1.0, 0.0)
+            links.new(texture.outputs['Color'], node.inputs[0])
+            return node.outputs[0]
 
         flow = flow_direction(sample_texture(5, parameters.textures[5], affine(5, uv(5))))
         mask_uv = displace(affine(3, uv(3)), flow,
@@ -230,7 +240,15 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         links.new(first.outputs[0], second.inputs[2])
         texture_color = second.outputs[0]
         def lerp(a, b, weight):
-            return math('ADD', a, math('MULTIPLY', math('SUBTRACT', b, a), weight))
+            node = nodes.new('ShaderNodeMix')
+            node.data_type = 'FLOAT'
+            node.clamp_factor = False
+            for socket, value in zip((node.inputs[0], node.inputs[2], node.inputs[3]), (weight, a, b)):
+                if isinstance(value, (int, float)):
+                    socket.default_value = value
+                else:
+                    links.new(value, socket)
+            return node.outputs[0]
         opacity = lerp(vertex.outputs['Alpha'], 1.0, p[2][2])
         alpha = lerp(samples[1].outputs['Alpha'], samples[0].outputs['Alpha'], weights[0])
         alpha = lerp(samples[2].outputs['Alpha'], alpha, weights[1])

@@ -9,7 +9,7 @@ from .character_textures import (
     is_global_character_ramp_name,
 )
 from .map_surfaces import MapSurfaceProfile, classify_map_surface
-from .map_nodes import apply_map_surface_nodes
+from .map_nodes import build_native_map_material
 
 __all__ = [
     "CharacterShaderProfile",
@@ -21,5 +21,5 @@ __all__ = [
     "is_global_character_ramp_name",
     "MapSurfaceProfile",
     "classify_map_surface",
-    "apply_map_surface_nodes",
+    "build_native_map_material",
 ]

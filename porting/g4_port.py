@@ -17,10 +17,17 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:
+    from .g4_normal_materials import promote_normal_materials, serialize_expanded_g4tx
+except ImportError:
+    from g4_normal_materials import promote_normal_materials, serialize_expanded_g4tx
+
+try:
     from .g4_model_probe import (
         dds_format,
         dds_to_nxtch,
         matrix_mul,
+        parse_g4md,
+        parse_g4tx,
         rigid_matrix_inverse,
     )
     from ..shared.g4_joint_aliases import (
@@ -36,6 +43,8 @@ except ImportError:
         dds_format,
         dds_to_nxtch,
         matrix_mul,
+        parse_g4md,
+        parse_g4tx,
         rigid_matrix_inverse,
     )
     from shared.g4_joint_aliases import (
@@ -59,7 +68,7 @@ NON_FACE_NAME_INDEX = 95
 FACE_NAME_INDEX = 96
 EYE_NAME_INDEX = 97
 G4_PORT_CONVERTER_MARKER = "mesh-json-v1-handoff"
-G4_PORT_SCRIPT_VERSION = "1.0.14"
+G4_PORT_SCRIPT_VERSION = "1.0.20"
 STABLE_CUSTOM_VERTEX_COLOR = STABLE_OUTLINE_COLOR
 VERTEX_COLOR_MODES = {"native", "constant", "authored"}
 
@@ -85,6 +94,15 @@ class RecordRule:
     weight_anchor_joint: str | int | None = None
     outline_enabled: bool = True
     native_template_record_index: int | None = None
+    normal_texture: str | None = None
+
+
+@dataclass
+class NativeVertexLayout:
+    stride: int
+    uv_offset: int
+    secondary_color_offset: int | None
+    secondary_colors: list[tuple[tuple[float, float, float], tuple[int, int, int, int]]]
 
 
 @dataclass
@@ -103,6 +121,7 @@ class PortConfig:
     texture_replacements: dict[str, str]
     texture_platform: str = "auto"
     material_overrides: list[MaterialOverride] | None = None
+    alpha_material_indices: list[int] | None = None
     uv_flip: tuple[bool, bool] = (False, False)
     joint_aliases: dict[str, str | int] | None = None
     strict_skinning: bool = True
@@ -119,6 +138,7 @@ class PortConfig:
     producer_marker: str = ""
     producer_source: str = ""
     unique_material_per_mesh: bool = False
+    keep_source_submeshes: bool = False
     vertex_color_mode: str = "native"
     vertex_color: tuple[int, int, int, int] = STABLE_CUSTOM_VERTEX_COLOR
 
@@ -294,6 +314,7 @@ def load_config(path: Path | None) -> PortConfig:
                 secondary_weight_scale=float(item.get("secondary_weight_scale", 1.0)),
                 weight_anchor_joint=item.get("weight_anchor_joint"),
                 outline_enabled=bool(item.get("outline_enabled", True)),
+                normal_texture=item.get("normal_texture"),
                 native_template_record_index=(
                     int(item["native_template_record_index"])
                     if item.get("native_template_record_index") is not None
@@ -307,6 +328,7 @@ def load_config(path: Path | None) -> PortConfig:
         records=records,
         texture_replacements=dict(data.get("texture_replacements", {})),
         texture_platform=str(data.get("texture_platform", "auto")).lower(),
+        alpha_material_indices=[int(index) for index in data.get("alpha_material_indices", [])],
         material_overrides=[
             MaterialOverride(
                 material_index=int(item["material_index"]),
@@ -348,6 +370,7 @@ def load_config(path: Path | None) -> PortConfig:
         producer_marker=str(data.get("g4_blender_addon_marker", "")),
         producer_source=str(data.get("g4_blender_addon_source", "")),
         unique_material_per_mesh=bool(data.get("unique_material_per_mesh", False)),
+        keep_source_submeshes=bool(data.get("keep_source_submeshes", False)),
         vertex_color_mode=vertex_color_mode,
         vertex_color=normalize_vertex_color(data.get("vertex_color"), STABLE_CUSTOM_VERTEX_COLOR),
     )
@@ -528,16 +551,19 @@ def pack_vertex(
     fallback_color: tuple[int, int, int, int] = (255, 255, 255, 255),
     uv_format_id: int = 14,
 ) -> bytes:
-    out = bytearray(0x44)
+    out = bytearray(0x48 if uv_format_id == 2 else 0x44)
     struct.pack_into("<3f", out, 0x00, *vertex.position)
     struct.pack_into("<4H", out, 0x0C, *(pack_snorm16(v) for v in (*vertex.normal, 0.0)))
     tangent = vertex.tangent or (1.0, 0.0, 0.0)
     bitangent = vertex.bitangent or (0.0, 1.0, 0.0)
+    # Chr_ToonNrm reconstructs B as cross(N,T)*T.w. Keep the authored basis
+    # orientation when converting UV storage to the image's top-left convention.
+    tangent_sign = -1.0 if vector_dot(vector_cross(vertex.normal, tangent), bitangent) < 0.0 else 1.0
     if vertex.tangent is not None and uv_flip[0]:
         tangent = tuple(-value for value in tangent)
     if vertex.bitangent is not None and uv_flip[1]:
         bitangent = tuple(-value for value in bitangent)
-    struct.pack_into("<4H", out, 0x14, *(pack_snorm16(v) for v in (*tangent, 0.0)))
+    struct.pack_into("<4H", out, 0x14, *(pack_snorm16(v) for v in (*tangent, tangent_sign)))
     struct.pack_into("<4H", out, 0x1C, *(pack_snorm16(v) for v in (*bitangent, 0.0)))
     packed_influences = quantize_influences(influences or [(0, 1.0)])
     weights = [weight for _, weight in packed_influences]
@@ -555,7 +581,9 @@ def pack_vertex(
     struct.pack_into("<4B", out, 0x3C, *(vertex.color or fallback_color))
     local_uv = (1.0 - vertex.uv[0] if uv_flip[0] else vertex.uv[0], 1.0 - vertex.uv[1] if uv_flip[1] else vertex.uv[1])
     uv = (local_uv[0] * uv_scale[0] + uv_offset[0], local_uv[1] * uv_scale[1] + uv_offset[1])
-    if uv_format_id in (18, 20):
+    if uv_format_id == 2:
+        struct.pack_into("<2f", out, 0x40, *uv)
+    elif uv_format_id in (18, 20):
         # Signed-normalized 16-bit.  eye_10 in c11010060 uses format 18.
         # Writing these values as UNORM16 makes the importer reinterpret the
         # upper half of the range as negative and stretches the UV island.
@@ -641,6 +669,24 @@ def vertex_tangent_space(
     tangent = vector_normalize(tuple(tangent[i] - normal[i] * vector_dot(normal, tangent) for i in range(3)))
     handedness = -1.0 if vector_dot(vector_cross(normal, tangent), bitangent) < 0.0 else 1.0
     return tangent, tuple(value * handedness for value in vector_normalize(vector_cross(normal, tangent)))
+
+
+def mesh_tangent_space(mesh: Mesh) -> Mesh:
+    tangents = [[0.0, 0.0, 0.0] for _ in mesh.vertices]
+    bitangents = [[0.0, 0.0, 0.0] for _ in mesh.vertices]
+    for offset in range(0, len(mesh.indices), 3):
+        indices = mesh.indices[offset:offset + 3]
+        triangle = [mesh.vertices[index] for index in indices]
+        tangent, bitangent = triangle_tangent_space([(v.position, v.normal, v.uv) for v in triangle])
+        for index in indices:
+            for axis in range(3):
+                tangents[index][axis] += tangent[axis]
+                bitangents[index][axis] += bitangent[axis]
+    vertices = []
+    for index, vertex in enumerate(mesh.vertices):
+        tangent, bitangent = vertex_tangent_space(vertex.normal, tuple(tangents[index]), tuple(bitangents[index]))
+        vertices.append(replace(vertex, tangent=tangent, bitangent=bitangent))
+    return replace(mesh, vertices=vertices)
 
 
 def calibration_mesh() -> list[Mesh]:
@@ -1436,6 +1482,7 @@ def build_g4mg(
     joint_position_offsets: dict[str, tuple[float, float, float]] | None = None,
     joint_position_transforms: dict[str, tuple[float, ...]] | None = None,
     source_joint_position_transforms: dict[str, tuple[float, ...]] | None = None,
+    native_layouts: list[NativeVertexLayout] | None = None,
 ) -> tuple[bytes, list[dict]]:
     buf = bytearray()
     records = []
@@ -1456,6 +1503,8 @@ def build_g4mg(
         )
         rule = source_rule
         uv_format_id = uv_formats[source_index] if uv_formats is not None and source_index < len(uv_formats) else 14
+        native_layout = native_layouts[source_index] if native_layouts is not None else None
+        secondary_colors = native_color_kd_tree(native_layout.secondary_colors) if native_layout is not None else None
         # Palettes are resolved for the output mesh itself because a split
         # chunk can expose joints that were absent from its sibling chunk.
         # The native source index only selects the baseline palette in
@@ -1553,9 +1602,18 @@ def build_g4mg(
                         vector_normalize(tuple(bitangent)) if bitangent is not None and any(bitangent) else vertex.bitangent,
                         vertex.color, vertex.color_from_source,
                     )
-            buf.extend(pack_vertex(
+            packed = pack_vertex(
                 adjusted_vertex, influences, record_uv_flip, uv_scale, uv_offset, fallback_color, uv_format_id
-            ))
+            )
+            if native_layout is not None:
+                native_vertex = bytearray(native_layout.stride)
+                native_vertex[:0x40] = packed[:0x40]
+                native_vertex[native_layout.uv_offset:native_layout.uv_offset + len(packed) - 0x40] = packed[0x40:]
+                if native_layout.secondary_color_offset is not None:
+                    color = nearest_native_color(secondary_colors, vertex.position)
+                    struct.pack_into('<4B', native_vertex, native_layout.secondary_color_offset, *color)
+                packed = native_vertex
+            buf.extend(packed)
         records.append({
             "vertex_offset": vertex_offset,
             "vertex_count": len(mesh.vertices),
@@ -1859,6 +1917,46 @@ def resolve_vertex_influences(
     return resolved, unresolved
 
 
+def native_record_vertex_layouts(md: bytes, mg: bytes) -> list[NativeVertexLayout]:
+    """Keep native COLOR1 and UV placement when writing replacement vertices."""
+    info = parse_g4md(md)
+    layouts = []
+    prefix = {1: (0, 3), 2: (12, 20), 13: (20, 20), 3: (28, 20),
+              5: (36, 32), 6: (52, 24), 8: (60, 12)}
+    for record in info['records']:
+        elements = info['vertex_layouts'][record['layout_index']]['elements']
+        uv = next(element for element in elements if element['type'] == 10)
+        uv_size = 8 if uv['format_id'] == 2 else 4
+        stride = record['vertex_stride']
+        if uv['value_offset'] < 64 or uv['value_offset'] + uv_size > stride:
+            raise ValueError('Native UV declaration exceeds its vertex stride')
+        secondary = None
+        for element in elements:
+            kind = element['type']
+            location = (element['value_offset'], element['format_id'])
+            if kind in prefix and location == prefix[kind]:
+                continue
+            if kind in (10, 11, 12, 14, 15) and location == (uv['value_offset'], uv['format_id']):
+                continue
+            if kind == 9 and element['format_id'] == 12 and 64 <= element['value_offset'] <= uv['value_offset'] - 4:
+                secondary = element['value_offset']
+                continue
+            raise ValueError(f'Unsupported native vertex element {kind} at {location}')
+        colors = []
+        start = record['vertex_offset']
+        count = record['vertex_count']
+        if start + count * stride > len(mg):
+            raise ValueError('Native vertex range exceeds its geometry buffer')
+        if secondary is not None:
+            colors = [(struct.unpack_from('<3f', mg, start + index * stride),
+                       struct.unpack_from('<4B', mg, start + index * stride + secondary))
+                      for index in range(count)]
+            if not colors:
+                raise ValueError('Native secondary color has no source vertices')
+        layouts.append(NativeVertexLayout(stride, uv['value_offset'], secondary, colors))
+    return layouts
+
+
 def native_record_uv_formats(md: bytes) -> list[int]:
     """Return the native UV0 format id selected by each mesh record."""
     if len(md) < 0x28:
@@ -2154,6 +2252,9 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
         raise ValueError("generated model has no G4MD magic")
     header_size = struct.unpack_from("<H", md, 0x04)[0]
     mesh_count = struct.unpack_from("<H", md, 0x20)[0]
+    info = parse_g4md(md)
+    if len(info["mesh_names"]) != mesh_count or len(info["material_names"]) != info["material_count"]:
+        raise ValueError("G4MD mesh or material names are incomplete")
     name_base = struct.unpack_from("<H", md, 0x0A)[0] * 4
     joint_count = struct.unpack_from("<H", md, 0x24)[0]
     joint_hash_start = name_base + struct.unpack_from("<H", md, 0x74)[0] * 4
@@ -2173,13 +2274,58 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
     if index_base < vertex_buffer_size or index_base + index_buffer_size > len(mg):
         raise ValueError("generated G4MG buffer sizes are inconsistent with G4MD")
 
+    shader_table = name_base + struct.unpack_from("<H", md, 0x78)[0] * 4
+    shader_end = name_base + struct.unpack_from("<H", md, 0x7A)[0] * 4
+    if not name_base <= shader_table < shader_table + md[0x28] * 4 <= shader_end <= len(md):
+        raise ValueError("generated model has an incomplete base shader table")
+
+    layouts = info["vertex_layouts"]
+    if not layouts or len(layouts) != md[0x26]:
+        raise ValueError("generated model has an incomplete vertex declaration table")
+    # The runtime resolves declarations through their base shader index, then
+    # fetches each element at its declared byte offset within the vertex stride.
+    element_sizes = {fmt: ((fmt - 1) % 4 + 1) * (4 if fmt <= 4 or fmt >= 29 else 1 if fmt <= 12 else 2)
+                     for fmt in range(1, 37) if fmt not in (7, 11, 15, 19, 23, 27)}
+    layout_ends = []
+    for layout in layouts:
+        if not layout["elements"]:
+            raise ValueError("generated model has an empty vertex declaration")
+        if struct.unpack_from("<I", md, layout["offset"] + 4)[0] >= md[0x28]:
+            raise ValueError("vertex declaration references outside the base shader table")
+        for element in layout["elements"]:
+            if element["format_id"] not in element_sizes:
+                raise ValueError("vertex element has an unsupported runtime format")
+        layout_ends.append(max(element["value_offset"] + element_sizes[element["format_id"]]
+                               for element in layout["elements"]))
+
+    if len(info["material_records"]) != info["material_count"]:
+        raise ValueError("generated model has an incomplete material table")
+    for material in info["material_records"]:
+        count = material["texture_ref_count"]
+        if len(material["texture_refs"]) != count or len(material.get("uv_matrices", [])) != count:
+            raise ValueError(f"material {material['index']} has incomplete texture or UV bindings")
+        if material["raw_u16"][4] >> 8 >= md[0x28]:
+            raise ValueError(f"material {material['index']} references outside the shader table")
+        if any(ref["texture_index"] >= md[0x27] for ref in material["texture_refs"]):
+            raise ValueError(f"material {material['index']} references outside the texture table")
+
     checked_vertices = 0
     checked_indices = 0
+    degenerate_triangles = 0
     for mesh_index in range(mesh_count):
         off = header_size + mesh_index * 0x50
         vertex_offset, index_offset, vertex_count, index_count = struct.unpack_from("<IIII", md, off)
+        if md[off + 0x43] >= info["material_count"]:
+            raise ValueError(f"record {mesh_index} references outside the material table")
+        if index_count % 3:
+            raise ValueError(f"record {mesh_index} index count is not a complete triangle list")
         flags = struct.unpack_from("<H", md, off + 0x3C)[0]
         stride = struct.unpack_from("<H", md, off + 0x3E)[0] & 0xFF
+        layout_index = md[off + 0x42]
+        if layout_index >= len(layouts):
+            raise ValueError(f"record {mesh_index} vertex layout index exceeds its declaration table")
+        if layout_ends[layout_index] > stride:
+            raise ValueError(f"record {mesh_index} vertex element exceeds its stride")
         palette_length = flags & 0xFF if flags & 0x100 else 0
         palette_start = struct.unpack_from("<H", md, off + 0x3A)[0]
         if palette_start + palette_length > (mesh_name_table - palette_table) // 2:
@@ -2198,8 +2344,13 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
         indices = struct.unpack_from("<" + "H" * index_count, mg, index_base + index_offset) if index_count else ()
         if any(index >= vertex_count for index in indices):
             raise ValueError(f"record {mesh_index} contains an index outside its local vertex range")
+        degenerate_triangles += sum(
+            len(set(indices[index:index + 3])) < 3 for index in range(0, index_count, 3)
+        )
         for vertex_index in range(vertex_count):
             vertex = vertex_offset + vertex_index * stride
+            if not all(math.isfinite(value) for value in struct.unpack_from("<3f", mg, vertex)):
+                raise ValueError(f"record {mesh_index} vertex {vertex_index} has a non-finite position")
             weights = struct.unpack_from("<8H", mg, vertex + 0x24)
             joints = struct.unpack_from("<8B", mg, vertex + 0x34)
             if sum(weights) != 0xFFFF:
@@ -2213,7 +2364,39 @@ def validate_generated_model(md: bytes, mg: bytes) -> dict:
         "vertices": checked_vertices,
         "indices": checked_indices,
         "g4mg_size": len(mg),
+        "triangle_count": checked_indices // 3,
+        "degenerate_index_triangles": degenerate_triangles,
     }
+
+
+def validate_model_texture_bindings(md: bytes, tx: bytes) -> dict:
+    model = parse_g4md(md)
+    textures = parse_g4tx(tx)
+    names = textures["names"]
+    hashes = [zlib.crc32(name.encode("ascii")) for name in names]
+    ids = textures["ids"]
+    if sorted(ids) != list(range(len(names))):
+        raise ValueError("G4TX texture lookup is not a complete ID permutation")
+    hash_offset = align(textures["header_size"] + textures["texture_count"] * 0x30
+                        + textures["sub_texture_count"] * 0x18, 0x10)
+    stored_hashes = list(struct.unpack_from(f"<{len(names)}I", tx, hash_offset))
+    if stored_hashes != hashes or [hashes[index] for index in ids] != sorted(hashes):
+        raise ValueError("G4TX texture lookup does not match hash-sorted texture names")
+    for texture in textures["textures"]:
+        if texture["size"] <= 0 or texture["offset"] + texture["size"] > len(tx):
+            raise ValueError(f"G4TX texture '{texture['name']}' has an incomplete payload")
+    available = set(hashes)
+    bindings = 0
+    for material in model["material_records"]:
+        for reference in material["texture_refs"]:
+            index = reference["texture_index"]
+            if index >= len(model["texture_hashes"]):
+                raise ValueError(f"material {material['index']} has an invalid texture index {index}")
+            texture_hash = model["texture_hashes"][index]["hash_u32"]
+            if texture_hash not in available:
+                raise ValueError(f"material {material['index']} texture {texture_hash:08x} is missing from G4TX")
+            bindings += 1
+    return {"status": "ok", "texture_names": len(names), "resolved_bindings": bindings}
 
 
 def mesh_match_rank(mesh: Mesh, rule: RecordRule) -> int:
@@ -2252,6 +2435,13 @@ def source_uv_transform(mesh: Mesh, rule: RecordRule) -> tuple[tuple[float, floa
         for key in (f"{name}::{mesh.material_name}", f"{clean_symbol(name)}::{mesh.material_name}"):
             if key in transforms:
                 return values(transforms[key])
+        material_matches = [values(transform) for key, transform in transforms.items()
+                            if "::" in key and key.rsplit("::", 1)[0] == name
+                            and clean_symbol(key.rsplit("::", 1)[1]) == clean_symbol(mesh.material_name)]
+        if material_matches:
+            if len(set(material_matches)) != 1:
+                raise ValueError(f"Ambiguous material UV transform for {name!r}::{mesh.material_name}")
+            return material_matches[0]
     for name in lookup_names:
         exact = {name, clean_symbol(name)}
         for key, transform in transforms.items():
@@ -2467,11 +2657,6 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             })
             vertices.extend(transformed_source_vertex(vertex, scale, offset) for vertex in part.vertices)
             indices.extend(base + index for index in part.indices)
-        template_index = (
-            rule.native_template_record_index
-            if rule.native_template_record_index is not None
-            else source_record_index
-        )
         return Mesh(
             rule.output_name,
             vertices,
@@ -2484,7 +2669,7 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
                 for source_name in (part.source_names or (part.name,))
             ),
             tuple(uv_transform_trace),
-            template_index,
+            source_record_index,
         )
 
     zero = Vertex((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.5, 0.5))
@@ -2504,9 +2689,23 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
         if mesh.name:
             lookup_names.append(mesh.name)
         for lookup_name in lookup_names:
+            for source_name, record_name in assignments.items():
+                if "::" in source_name:
+                    source_object, source_material = source_name.rsplit("::", 1)
+                    if source_object == lookup_name and clean_symbol(source_material) == mesh.material_name:
+                        return record_name
+        for lookup_name in lookup_names:
             key = clean_symbol(lookup_name).casefold()
             for source_name, record_name in assignments.items():
-                if clean_symbol(source_name).casefold() == key:
+                if "::" not in source_name:
+                    continue
+                source_object, source_material = source_name.rsplit("::", 1)
+                if clean_symbol(source_object).casefold() == key and clean_symbol(source_material) == mesh.material_name:
+                    return record_name
+        for lookup_name in lookup_names:
+            key = clean_symbol(lookup_name).casefold()
+            for source_name, record_name in assignments.items():
+                if "::" not in source_name and clean_symbol(source_name).casefold() == key:
                     return record_name
 
         # Legacy files may only expose a canonicalized Collada name.  Accept a
@@ -2516,7 +2715,7 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
         fallback_records: set[str] = set()
         canonical_keys = {canonical_mesh_name(name).casefold() for name in lookup_names}
         for source_name, record_name in assignments.items():
-            if canonical_mesh_name(source_name).casefold() in canonical_keys:
+            if "::" not in source_name and canonical_mesh_name(source_name).casefold() in canonical_keys:
                 fallback_records.add(record_name)
         return next(iter(fallback_records)) if len(fallback_records) == 1 else ""
 
@@ -2565,6 +2764,25 @@ def merged_native_meshes(meshes: list[Mesh], config: PortConfig) -> list[Mesh]:
             merged = merge(rule, material_index, rule.material_name, parts, record_index)
             if len(merged.vertices) <= 0xFFFF:
                 output[record_index] = merged
+                continue
+            if config.keep_source_submeshes:
+                chunks = split_mesh_by_vertex_limit(merged, [rule.output_name])
+                output[record_index] = chunks[0]
+                names = {item.output_name for item in config.records}
+                for chunk in chunks[1:]:
+                    if len(config.records) >= 256:
+                        raise ValueError("Source submesh splits exceed 256 native material slots")
+                    stem = chunk.name
+                    suffix = 1
+                    while chunk.name in names:
+                        chunk.name = f"{stem}_{suffix}"
+                        suffix += 1
+                    names.add(chunk.name)
+                    if config.unique_material_per_mesh and record_index in (config.alpha_material_indices or []):
+                        config.alpha_material_indices.append(len(config.records))
+                    template_index = rule.native_template_record_index if rule.native_template_record_index is not None else record_index
+                    config.records.append(replace(rule, output_name=chunk.name, native_template_record_index=template_index))
+                    output.append(chunk)
                 continue
             chunk_rule_indices = []
             for index in range(record_index, len(config.records)):
@@ -2793,60 +3011,37 @@ def duplicate_g4md_material_records(
     mesh_count = struct.unpack_from("<H", md, 0x20)[0]
     old_material_count = struct.unpack_from("<H", md, 0x22)[0]
     new_material_count = len(source_material_indices)
+    if new_material_count > 256:
+        raise ValueError("G4MD material indices support at most 256 independent material slots")
     if new_material_count != mesh_count:
         raise ValueError("unique material export requires one material slot per mesh record")
-    if new_material_count <= old_material_count:
-        return md
     if len(material_names) != new_material_count:
         raise ValueError("unique material names do not match the output material count")
 
+    mesh_names = parse_g4md(md)["mesh_names"]
+    if len(mesh_names) != mesh_count:
+        raise ValueError("native G4MD mesh names are incomplete")
     material_table = material_table_offset(md, mesh_count)
-    old_ref_table = material_table + old_material_count * 0x10 + 0x30
     name_base = struct.unpack_from("<H", md, 0x0A)[0] * 4
-    old_name_index_table = name_base + struct.unpack_from("<H", md, 0x80)[0] * 4
-    old_name_index_end = name_base + struct.unpack_from("<H", md, 0x82)[0] * 4
-    if not (
-        old_name_index_table > 0
-        and old_name_index_table < old_name_index_end <= len(md)
-        and (old_name_index_end - old_name_index_table) % 2 == 0
-    ):
-        raise ValueError("native G4MD material index table is outside the file")
-    old_name_index_count = (old_name_index_end - old_name_index_table) // 2
-    source_refs: list[tuple[int, int]] = []
-    old_ref_end = 0
-    for source_index in range(old_material_count):
-        record_offset = material_table + source_index * 0x10
-        ref_count = struct.unpack_from("<H", md, record_offset + 0x0C)[0]
-        ref_start = struct.unpack_from("<H", md, record_offset + 0x0E)[0]
-        source_refs.append((ref_start, ref_count))
-        old_ref_end = max(old_ref_end, ref_start + ref_count)
-
+    old_ref_table = name_base + struct.unpack_from("<H", md, 0x68)[0] * 4
     new_records = bytearray()
     new_refs = bytearray()
-    new_name_indices = bytearray()
-    for source_index in source_material_indices:
+    for output_index, source_index in enumerate(source_material_indices):
         if not 0 <= source_index < old_material_count:
-            raise ValueError(
-                f"source material index {source_index} is outside native material count {old_material_count}"
-            )
+            raise ValueError(f"source material index {source_index} is outside native material count {old_material_count}")
         record_offset = material_table + source_index * 0x10
         record = bytearray(md[record_offset : record_offset + 0x10])
-        ref_start, ref_count = source_refs[source_index]
-        name_index_end = ref_start + ref_count
-        if name_index_end > old_name_index_count:
-            raise ValueError("native G4MD material index table does not cover material references")
-        struct.pack_into("<H", record, 0x0E, len(new_refs) // 6)
+        ref_count = struct.unpack_from("<H", record, 0x0C)[0] & 0xFF
+        ref_start = struct.unpack_from("<H", record, 0x06)[0]
+        struct.pack_into("<H", record, 0x06, len(new_refs) // 6)
         new_records.extend(record)
-        new_name_indices.extend(
-            md[old_name_index_table + ref_start * 2 : old_name_index_table + name_index_end * 2]
-        )
         ref_offset = old_ref_table + ref_start * 6
         ref_end = ref_offset + ref_count * 6
-        if ref_end > len(md):
-            raise ValueError("native G4MD material references exceed the file")
+        if ref_end > name_base + struct.unpack_from("<H", md, 0x6A)[0] * 4:
+            raise ValueError("native G4MD material references exceed their descriptor section")
         new_refs.extend(md[ref_offset:ref_end])
 
-    old_ref_end_offset = old_ref_table + old_ref_end * 6
+    old_ref_end_offset = name_base + struct.unpack_from("<H", md, 0x6A)[0] * 4
     if old_ref_end_offset > len(md):
         raise ValueError("native G4MD material reference table exceeds the file")
     gap = md[material_table + old_material_count * 0x10 : old_ref_table]
@@ -2859,39 +3054,72 @@ def duplicate_g4md_material_records(
     delta = len(out) - len(md)
 
     struct.pack_into("<H", out, 0x22, new_material_count)
-    for field in (0x74, 0x76, 0x78, 0x7A, 0x7C, 0x7E, 0x80, 0x82, 0x84, 0x86):
+    record_delta = (new_material_count - old_material_count) * 0x10
+    for field in range(0x66, 0x8C, 2):
         value = struct.unpack_from("<H", md, field)[0]
         absolute = name_base + value * 4
-        if value and absolute >= old_ref_table:
-            struct.pack_into("<H", out, field, value + delta // 4)
+        shift = record_delta if field in (0x66, 0x68) else delta
+        boundary = material_table + old_material_count * 0x10 if field in (0x66, 0x68) else old_ref_end_offset
+        if value and absolute >= boundary:
+            struct.pack_into("<H", out, field, value + shift // 4)
 
-    shifted_name_index_table = old_name_index_table + delta
-    shifted_name_index_end = old_name_index_end + delta
-    name_index_delta = len(new_name_indices) - (old_name_index_end - old_name_index_table)
-    out = bytearray(
-        out[:shifted_name_index_table]
-        + new_name_indices
-        + out[shifted_name_index_end:]
-    )
-    total_delta = delta + name_index_delta
-    struct.pack_into("<H", out, 0x82, table_offset_units(shifted_name_index_table + len(new_name_indices), name_base))
-    for field in (0x84, 0x86):
-        value = struct.unpack_from("<H", md, field)[0]
-        absolute = name_base + value * 4
-        if value and absolute >= old_name_index_end:
-            struct.pack_into("<H", out, field, value + total_delta // 4)
-
-    old_material_name_table = name_base + struct.unpack_from("<H", md, 0x86)[0] * 4
-    shifted_material_name_table = old_material_name_table + total_delta
-    if not old_material_name_table <= len(md):
-        raise ValueError("native G4MD material name table is outside the file")
-    out = bytearray(out[:shifted_material_name_table] + build_offset_string_table(material_names))
+    old_mesh_name_table = name_base + struct.unpack_from("<H", md, 0x84)[0] * 4
+    shifted_mesh_name_table = old_mesh_name_table + delta
+    # Native mesh/material offset tables can share trailing strings. Rebuild
+    # both tables before replacing names so mesh offsets cannot dangle.
+    mesh_name_data = build_offset_string_table(mesh_names)
+    material_name_start = align(shifted_mesh_name_table + len(mesh_name_data), 4)
+    out = bytearray(out[:shifted_mesh_name_table] + mesh_name_data)
+    out.extend(b"\0" * (material_name_start - len(out)))
+    out.extend(build_offset_string_table(material_names))
     out.extend(b"\0" * ((-len(out)) % 4))
-    struct.pack_into("<H", out, 0x86, table_offset_units(shifted_material_name_table, name_base))
+    struct.pack_into("<H", out, 0x84, table_offset_units(shifted_mesh_name_table, name_base))
+    struct.pack_into("<H", out, 0x86, table_offset_units(material_name_start, name_base))
     submesh_table = struct.unpack_from("<H", out, 0x04)[0]
     for output_index in range(new_material_count):
         out[submesh_table + output_index * 0x50 + 0x43] = output_index
+        struct.pack_into("<H", out, submesh_table + output_index * 0x50 + 0x38, output_index)
     struct.pack_into("<I", out, 0x0C, len(out) - struct.unpack_from("<H", out, 0x04)[0])
+    return bytes(out)
+
+
+def enable_material_alpha(md: bytes, material_indices: list[int]) -> bytes:
+    if not material_indices:
+        return md
+    info = parse_g4md(md)
+    count = info["material_count"]
+    if any(index < 0 or index >= count for index in material_indices):
+        raise ValueError("Alpha material index is outside the G4MD material table")
+    base = struct.unpack_from("<H", md, 0x0A)[0] * 4
+    start = base + struct.unpack_from("<H", md, 0x6C)[0] * 4
+    end = base + struct.unpack_from("<H", md, 0x6E)[0] * 4
+    if not info["material_table"] < start <= end <= len(md):
+        raise ValueError("G4MD render-state section is outside the file")
+    table = bytearray()
+    out = bytearray(md)
+    for material in info["material_records"]:
+        states = dict(material.get("render_states", []))
+        if not states:
+            raise ValueError("G4MD material has no readable render states")
+        if material["index"] in material_indices:
+            # Native c05026910 eye/mouth use this straight-alpha blend state.
+            states.update({5: 0, 6: 1, 7: 1, 9: 4, 10: 5})
+        offset = material["offset"]
+        struct.pack_into("<H", out, offset + 4, len(table) // 2)
+        word = struct.unpack_from("<H", out, offset + 10)[0]
+        struct.pack_into("<H", out, offset + 10, (word & 255) | (len(states) << 8))
+        table.extend(value for state in states.items() for value in state)
+    table.extend(b"\0" * ((-len(table)) % 4))
+    delta = len(table) - (end - start)
+    out = out[:start] + table + out[end:]
+    for field in range(0x6E, 0x8C, 2):
+        value = struct.unpack_from("<H", md, field)[0]
+        if value and base + value * 4 >= end:
+            shifted = value + delta // 4
+            if not 0 <= shifted <= 0xFFFF:
+                raise ValueError("G4MD alpha states exceed the header offset range")
+            struct.pack_into("<H", out, field, shifted)
+    struct.pack_into("<I", out, 0x0C, len(out) - struct.unpack_from("<H", out, 4)[0])
     return bytes(out)
 
 
@@ -2946,7 +3174,11 @@ def build_base_g4md(meshes: list[Mesh], records: list[dict], raw_root: Path, con
 
     for mesh_index, (mesh, record, rule) in enumerate(zip(meshes, records, config.records)):
         off = header_size + mesh_index * 0x50
-        source_index = _source_record_index(mesh, mesh_index, native_mesh_count)
+        source_index = rule.native_template_record_index
+        if source_index is None:
+            source_index = _source_record_index(mesh, mesh_index, native_mesh_count)
+        if not 0 <= source_index < native_mesh_count:
+            source_index = min(mesh_index, native_mesh_count - 1)
         if mesh_count > native_mesh_count:
             # A newly added output record has no corresponding native record.
             # Seed it from the last valid descriptor instead of copying an
@@ -2954,7 +3186,7 @@ def build_base_g4md(meshes: list[Mesh], records: list[dict], raw_root: Path, con
             # its ranges and any explicitly configured layout/material data.
             source_index = min(source_index, native_mesh_count - 1)
         source_off = header_size + source_index * 0x50
-        if mesh_count > native_mesh_count:
+        if mesh_count > native_mesh_count or source_index != mesh_index:
             md[off : off + 0x50] = native[source_off : source_off + 0x50]
         positions = [vertex.position for vertex in mesh.vertices]
         local_mins = [min(position[axis] for position in positions) for axis in range(3)]
@@ -2991,13 +3223,14 @@ def build_base_g4md(meshes: list[Mesh], records: list[dict], raw_root: Path, con
             struct.pack_into("<H", md, off + 0x3C, rule.force_palette_flags[1])
     if config.unique_material_per_mesh:
         source_material_indices = [mesh.material_index for mesh in meshes]
-        unique_names = [
-            f"{config.native_material_names[source_index]}_{mesh_index:02d}"
-            for mesh_index, source_index in enumerate(source_material_indices)
-        ]
+        unique_names = []
+        for mesh_index, source_index in enumerate(source_material_indices):
+            name = config.native_material_names[source_index]
+            unique_names.append(name if name not in unique_names else f"{name}_{mesh_index:02d}")
         md = bytearray(duplicate_g4md_material_records(md, source_material_indices, unique_names))
     apply_material_overrides(md, config.material_overrides or [])
-    return bytes(md)
+    alpha_indices = config.alpha_material_indices or []
+    return enable_material_alpha(bytes(md), alpha_indices)
 
 
 def material_core(material_name: str) -> str:
@@ -3155,18 +3388,6 @@ def texture_converter_path() -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
-def _png_dimensions(path: Path) -> tuple[int, int] | None:
-    """Read PNG dimensions without decoding the image."""
-    try:
-        with path.open("rb") as stream:
-            header = stream.read(24)
-    except OSError:
-        return None
-    if header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
-        return None
-    return struct.unpack_from(">II", header, 16)
-
-
 def png_to_dds(path: Path, native_payload: bytes) -> bytes:
     """Encode a PNG in the exact compressed DDS family expected by the template."""
     compression = native_dds_compression(native_payload)
@@ -3183,26 +3404,6 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
             "or set LEVEL5_G4_TEXTURE_CONVERTER to its executable."
         )
     mip_count = max(1, struct.unpack_from("<I", native_payload, 28)[0])
-    native_dimensions = dds_dimensions(native_payload)
-    input_path = path
-    resized_path: Path | None = None
-    if image_dimensions := _png_dimensions(path):
-        if image_dimensions != native_dimensions:
-            try:
-                from PIL import Image
-            except ImportError as exc:
-                raise RuntimeError(
-                    f"PNG replacement {path.name} is {image_dimensions[0]}x{image_dimensions[1]}, "
-                    f"but the native texture is {native_dimensions[0]}x{native_dimensions[1]}; "
-                    "Pillow is required to resize it"
-                ) from exc
-            with Image.open(path) as image:
-                image = image.convert("RGBA").resize(native_dimensions, Image.Resampling.LANCZOS)
-                handle, temporary_name = tempfile.mkstemp(prefix="g4_native_texture_", suffix=".png")
-                os.close(handle)
-                resized_path = Path(temporary_name)
-                image.save(resized_path, format="PNG")
-            input_path = resized_path
     tmp = path.with_suffix(path.suffix + ".port_tmp.dds")
     try:
         if converter.name.casefold() == "texconv":
@@ -3210,7 +3411,7 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
                 str(converter), "-f", f"{compression}_UNORM", "-m", str(mip_count),
                 "-y", "-o", str(tmp.parent), str(path),
             ]
-            output = tmp.parent / f"{input_path.stem}.DDS"
+            output = tmp.parent / f"{path.stem}.DDS"
         else:
             command = [
                 str(converter), f"--compression_format={compression}",
@@ -3218,7 +3419,7 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
                 # transparent texels; ISPC Fastest remains deterministic and
                 # writes the same DX10/BC7 contract as the native archive.
                 "--compression_quality=Fastest", "--alpha_mode=Preserve",
-                f"--max_mipmaps={mip_count}", "--file_format=DDS", f"--output={tmp}", str(input_path),
+                f"--max_mipmaps={mip_count}", "--file_format=DDS", f"--output={tmp}", str(path),
             ]
             output = tmp
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -3231,10 +3432,8 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
         return payload
     finally:
         tmp.unlink(missing_ok=True)
-        if resized_path is not None:
-            resized_path.unlink(missing_ok=True)
         if converter.name.casefold() == "texconv":
-            (tmp.parent / f"{input_path.stem}.DDS").unlink(missing_ok=True)
+            (tmp.parent / f"{path.stem}.DDS").unlink(missing_ok=True)
 
 
 def replacement_texture(path: Path, native_payload: bytes) -> bytes:
@@ -3377,16 +3576,43 @@ def rebuild_native_g4tx_with_custom_textures(
     template_data = template_path.read_bytes()
     header, template_entries, native_payloads = parse_g4tx_payloads(template_path)
     replacement_paths = {name: custom_dir / rel_path for name, rel_path in replacements.items()}
+    for name, path in replacement_paths.items():
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing texture replacement for {name!r}: {path}")
     output_entries: list[dict] = []
     for entry in template_entries:
         name = entry["name"]
         replacement_path = replacement_paths.get(name)
         payload = (
             replacement_texture(replacement_path, native_payloads[name])
-            if replacement_path is not None and replacement_path.exists()
+            if replacement_path is not None
             else native_payloads[name]
         )
         output_entries.append({"name": name, "payload": payload, "template": entry})
+
+    extra_names = set(replacement_paths) - set(native_payloads)
+    if extra_names:
+        if any(not name.endswith("nml") for name in extra_names):
+            raise ValueError("Only verified normal-map entries can extend a native G4TX")
+        root = next((parent for parent in template_path.parents if (parent / "common/chr").is_dir()), None)
+        donor = None
+        if root is not None:
+            platform = "dx11" if native_payloads[template_entries[0]["name"]].startswith(b"DDS ") else "nx"
+            for candidate in (root / platform / "chr/_uniform").glob("*/*.g4tx"):
+                with candidate.open("rb") as stream:
+                    if b"nml\0" not in stream.read(32768):
+                        continue
+                _, donor_entries, donor_payloads = parse_g4tx_payloads(candidate)
+                donor = next(((entry, donor_payloads[entry["name"]]) for entry in donor_entries if entry["name"].endswith("nml")), None)
+                if donor is not None:
+                    break
+        if donor is None:
+            raise ValueError("The dump contains no native uniform normal-map texture template")
+        for name in sorted(extra_names):
+            output_entries.append({"name": name, "template": donor[0],
+                                   "payload": replacement_texture(replacement_paths[name], donor[1])})
+        out_path.write_bytes(serialize_expanded_g4tx(header, output_entries))
+        return [entry["name"] for entry in output_entries]
 
     if all(entry["payload"] == native_payloads[entry["name"]] for entry in output_entries):
         out_path.write_bytes(template_data)
@@ -3465,6 +3691,9 @@ def prepare_port_geometry(
             authored_colors=config.vertex_color_mode == "authored",
         )
     meshes = merged_native_meshes(source_meshes, config)
+    if config.generate_tangents:
+        meshes = [mesh_tangent_space(mesh) if any(vertex.tangent is None for vertex in mesh.vertices) else mesh
+                  for mesh in meshes]
     # Resolve UV fitting only after Collada has been parsed and modifiers are
     # already baked into the actual exported mesh.  This prevents a mirrored or
     # modifier-expanded face from using stale pre-export Blender UV bounds.
@@ -3477,7 +3706,16 @@ def prepare_port_geometry(
         )
     native_g4md = (raw_root / config.common_rel).read_bytes()
     target_skeleton = parse_g4sk(config.target_g4sk_path) if config.target_g4sk_path else None
-    native_palettes = [[] for _ in config.records] if target_skeleton else native_record_palettes(native_g4md)
+    template_palettes = native_record_palettes(native_g4md)
+    for rule in config.records:
+        if rule.native_template_record_index is not None and not 0 <= rule.native_template_record_index < len(template_palettes):
+            raise ValueError(f"Submesh {rule.output_name!r} refers to an invalid native template record")
+    native_palettes = [
+        [] if target_skeleton else list(template_palettes[
+            rule.native_template_record_index if rule.native_template_record_index is not None
+            else min(index, len(template_palettes) - 1)
+        ]) for index, rule in enumerate(config.records)
+    ]
     native_joint_indices = (
         skeleton_joint_name_indices(target_skeleton)
         if target_skeleton else native_joint_name_indices(native_g4md)
@@ -3496,7 +3734,10 @@ def prepare_port_geometry(
         meshes[index] = chunks[0]
         for chunk in chunks[1:]:
             additional_meshes.append(chunk)
-            additional_rules.append(replace(rule, output_name=chunk.name, native_template_record_index=source_index))
+            if config.unique_material_per_mesh and index in (config.alpha_material_indices or []):
+                config.alpha_material_indices.append(len(meshes) + len(additional_meshes) - 1)
+            template_index = rule.native_template_record_index if rule.native_template_record_index is not None else min(source_index, len(template_palettes) - 1)
+            additional_rules.append(replace(rule, output_name=chunk.name, native_template_record_index=template_index))
             native_palettes.append(list(native_palette))
     meshes.extend(additional_meshes)
     config.records.extend(additional_rules)
@@ -3720,7 +3961,12 @@ def write_port(
     native_md = native_model.read_bytes() if native_model.is_file() else b""
     native_mg = native_model.with_suffix(".g4mg")
     if native_md and native_mg.is_file():
-        transfer_native_vertex_colors(meshes, native_record_vertex_colors(native_md, native_mg.read_bytes()), [])
+        template_colors = native_record_vertex_colors(native_md, native_mg.read_bytes())
+        record_colors = [template_colors[
+            rule.native_template_record_index if rule.native_template_record_index is not None
+            else min(index, len(template_colors) - 1)
+        ] for index, rule in enumerate(config.records)]
+        transfer_native_vertex_colors(meshes, record_colors, [])
     vertex_color_vertices = apply_vertex_color_policy(
         meshes, config.vertex_color_mode, config.vertex_color
     )
@@ -3730,7 +3976,16 @@ def write_port(
         skeleton_joint_name_indices(target_skeleton)
         if target_skeleton else native_joint_name_indices(native_md) if native_md else {}
     )
-    native_uv_formats = native_record_uv_formats(native_md) if native_md else []
+    template_uv_formats = native_record_uv_formats(native_md) if native_md else []
+    native_uv_formats = [template_uv_formats[
+        rule.native_template_record_index if rule.native_template_record_index is not None
+        else min(index, len(template_uv_formats) - 1)
+    ] for index, rule in enumerate(config.records)] if template_uv_formats else []
+    template_layouts = native_record_vertex_layouts(native_md, native_mg.read_bytes()) if native_md and native_mg.is_file() else None
+    native_layouts = [template_layouts[
+        rule.native_template_record_index if rule.native_template_record_index is not None
+        else min(index, len(template_layouts) - 1)
+    ] for index, rule in enumerate(config.records)] if template_layouts else None
     g4mg, records = build_g4mg(
         meshes,
         config.uv_flip,
@@ -3739,6 +3994,7 @@ def write_port(
         config.joint_aliases or {},
         native_joint_indices,
         uv_formats=native_uv_formats,
+        native_layouts=native_layouts,
         joint_position_offsets=config.joint_position_offsets,
         joint_position_transforms=config.joint_position_transforms,
         source_joint_position_transforms=config.source_joint_position_transforms,
@@ -3764,26 +4020,42 @@ def write_port(
     common_out.parent.mkdir(parents=True, exist_ok=True)
     texture_out.parent.mkdir(parents=True, exist_ok=True)
     g4md = build_base_g4md(meshes, records, raw_root, config)
+    normal_materials = {}
+    for index, rule in enumerate(config.records):
+        if rule.normal_texture:
+            table = struct.unpack_from("<H", g4md, 4)[0]
+            material_index = g4md[table + index * 0x50 + 0x43]
+            if material_index in normal_materials and normal_materials[material_index] != rule.normal_texture:
+                raise ValueError("Multiple normal maps share one native material slot")
+            normal_materials[material_index] = rule.normal_texture
+    if normal_materials:
+        _, texture_entries, _ = parse_g4tx_payloads(texture_template)
+        g4md = promote_normal_materials(g4md, normal_materials, {i: entry["name"] for i, entry in enumerate(texture_entries)})
     g4md = rewrite_joint_palettes(g4md, palettes)
     if target_skeleton:
         g4md = rewrite_g4md_joint_hashes(g4md, target_skeleton["names"])
     validation = validate_generated_model(g4md, g4mg)
     custom_texture_dir = source_mesh_path.parent / "customTextures" if source_mesh_path else Path()
-    if texture_mode == "custom":
-        texture_names = rebuild_native_g4tx_with_custom_textures(
-            texture_template, custom_texture_dir, texture_out, config.texture_replacements
-        )
-    elif texture_mode == "native":
-        texture_out.write_bytes(texture_template.read_bytes())
-        _, template_entries, _ = parse_g4tx_payloads(texture_template)
-        texture_names = [entry["name"] for entry in template_entries]
-    elif texture_mode == "keep":
-        if not texture_out.exists():
-            texture_out.write_bytes(texture_template.read_bytes())
-        _, template_entries, _ = parse_g4tx_payloads(texture_out)
-        texture_names = [entry["name"] for entry in template_entries]
-    else:
-        raise ValueError(f"unsupported texture mode {texture_mode!r}")
+    if target_skeleton:
+        joint_hash_start = struct.unpack_from("<H", g4md, 0x0A)[0] * 4 + struct.unpack_from("<H", g4md, 0x74)[0] * 4
+        model_hashes = list(struct.unpack_from(f"<{target_skeleton['joint_count']}I", g4md, joint_hash_start))
+        if model_hashes != list(target_skeleton["joint_hashes"]):
+            raise ValueError("G4MD joint hashes do not match the exported G4SK joint order")
+    with tempfile.TemporaryDirectory(prefix=".g4tx-", dir=texture_out.parent) as staging:
+        staged_texture = Path(staging) / texture_out.name
+        if texture_mode == "custom":
+            texture_names = rebuild_native_g4tx_with_custom_textures(
+                texture_template, custom_texture_dir, staged_texture, config.texture_replacements
+            )
+        elif texture_mode in {"native", "keep"}:
+            source_texture = texture_out if texture_mode == "keep" and texture_out.exists() else texture_template
+            shutil.copyfile(source_texture, staged_texture)
+            _, template_entries, _ = parse_g4tx_payloads(staged_texture)
+            texture_names = [entry["name"] for entry in template_entries]
+        else:
+            raise ValueError(f"unsupported texture mode {texture_mode!r}")
+        validation["texture_bindings"] = validate_model_texture_bindings(g4md, staged_texture.read_bytes())
+        os.replace(staged_texture, texture_out)
     common_out.write_bytes(g4md)
     mg_out.write_bytes(g4mg)
     local_g4sk_out = None
@@ -3825,6 +4097,13 @@ def write_port(
         "meshes": len(meshes),
         "materials": struct.unpack_from("<H", g4md, 0x22)[0],
         "textures": len(texture_names),
+        "texture_sources": [
+            {"name": name,
+             "source": ("custom" if name in config.texture_replacements else "template")
+                       if texture_mode == "custom" else texture_mode,
+             "replacement": config.texture_replacements.get(name) if texture_mode == "custom" else None}
+            for name in texture_names
+        ],
         "vertices": sum(len(mesh.vertices) for mesh in meshes),
         "indices": sum(len(mesh.indices) for mesh in meshes),
         "source_meshes": len(source_meshes),
@@ -3839,6 +4118,11 @@ def write_port(
         "native_uv_formats": native_uv_formats,
         "palette_expanded": palettes != native_palettes,
         "validation": validation,
+        "warnings": [
+            "The exported head has no visible faces. Keep the head and hair in the head model so changing uniforms does not replace them."
+        ] if ("_face" in config.model_rel.parts
+              and validation["triangle_count"] > 0
+              and validation["degenerate_index_triangles"] == validation["triangle_count"]) else [],
         "expected_skeleton": expected_skeleton,
         "skeleton_validation": skeleton_validation,
         "record_assignments": {mesh.name: list(mesh.source_names) for mesh in meshes},

@@ -17,10 +17,12 @@ from xml.sax.saxutils import escape
 try:
     from ..shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
     from ..formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from ..formats.shader_catalog import registered_shaders
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from shading.character_textures import character_data_roots, character_shader_texture_containers, character_texture_base_key, character_texture_role
     from formats.cfgbin import CfgBinDocument, parse_cfgbin_file
+    from formats.shader_catalog import registered_shaders
 
 
 ASCII_RE = re.compile(rb"[A-Za-z0-9_]{3,}(?:_LOD[0-9])?M?")
@@ -752,6 +754,8 @@ def parse_texture_hash_table(data: bytes) -> list[dict]:
 def parse_vertex_layouts(data: bytes, submesh_table_end: int) -> list[dict]:
     layout_count = u8(data, 0x26) if len(data) > 0x26 else 0
     cursor = submesh_table_end
+    if len(data) >= 0x64 and u16(data, 0x62):
+        cursor = (u16(data, 0x0A) + u16(data, 0x62)) * 4
     layouts: list[dict] = []
     for layout_index in range(layout_count):
         if cursor + 8 > len(data):
@@ -868,6 +872,8 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
 
     vertex_layouts = parse_vertex_layouts(data, submesh_table + mesh_count * 0x50)
     material_table = align(vertex_layouts_end(vertex_layouts, submesh_table + mesh_count * 0x50), 0x10)
+    if len(data) >= 0x66 and u16(data, 0x64):
+        material_table = (u16(data, 0x0A) + u16(data, 0x64)) * 4
     material_records = parse_material_records(data, material_table, material_count)
     texture_hashes = parse_texture_hash_table(data)
     name_base_bias = u16(data, 0x0A) * 4
@@ -899,6 +905,9 @@ def parse_g4md(data: bytes, g4mg: bytes | None = None) -> dict:
                     ]
             if shader_base <= shader_offset and shader_offset + 4 <= shader_end <= len(data):
                 material["shader_hash"] = u32(data, shader_offset)
+                shader = registered_shaders().get(material["shader_hash"])
+                material["shader_name"] = shader[0] if shader is not None else None
+                material["shader_configuration"] = shader[1] if shader is not None else None
             if len(data) >= 0x8C:
                 uv_base = name_base_bias + u16(data, 0x88) * 4
                 parameter_base = name_base_bias + u16(data, 0x6A) * 4
@@ -1017,25 +1026,29 @@ def remap_joint_palette_by_g4md_hashes(
     """Resolve G4MD palette slots through its embedded CRC32 joint table.
 
     G4MD stores the start of its CRC32 joint-name table at header offset
-    ``0x74``. Local blend indices address that table from zero. Matching the
+    ``0x74``. Submesh palette entries address that table from zero. Matching the
     hashes to the selected skeleton makes shared clothes and dynamic helpers
     independent of physical G4SK order.
     """
     if not joint_palette or skeleton_info is None:
         return None, 0
     names = skeleton_info.get("names") or []
-    hash_to_index = {
-        crc32b(name.encode("ascii")): index
-        for index, name in enumerate(names)
-        if name
-    }
+    hash_to_index: dict[int, int] = {}
+    for index, name in enumerate(names):
+        if not name:
+            continue
+        name_hash = crc32b(name.encode("ascii"))
+        if name_hash in hash_to_index:
+            raise ValueError(f"Skeleton has an ambiguous joint-name hash for {name}")
+        hash_to_index[name_hash] = index
     if not hash_to_index:
         return None, 0
 
     if min(joint_palette) < 0 or joint_hash_table_offset <= 0:
         return None, 0
     last_offset = joint_hash_table_offset + max(joint_palette) * 4
-    if last_offset + 4 > len(data):
+    hash_table_end = u16(data, 0x0A) * 4 + u16(data, 0x76) * 4
+    if not joint_hash_table_offset < hash_table_end <= len(data) or last_offset + 4 > hash_table_end:
         return None, 0
     hashes = [u32(data, joint_hash_table_offset + index * 4) for index in joint_palette]
     unresolved = [value for value in hashes if value not in hash_to_index]
@@ -1044,7 +1057,8 @@ def remap_joint_palette_by_g4md_hashes(
     # A few character-exclusive clothes reference dynamic helper joints that
     # are absent from the actor's exported G4SK.  Do not reinterpret those
     # slots as physical indices: that attaches their weights to unrelated
-    # limbs.  ``-1`` is intentionally ignored by the Blender mesh writer.
+    # limbs. ``-1`` marks an unresolved slot; native import rejects it when
+    # a retained vertex has a positive weight on that slot.
     remapped = [hash_to_index.get(value, -1) for value in hashes]
     if not any(index >= 0 for index in remapped):
         return None, 0
@@ -2147,7 +2161,8 @@ def g4sk_entries_from_candidate(path: Path) -> Iterable[tuple[bytes, str]]:
 
 def uniform_used_joint_hashes(path: Path) -> set[int]:
     try:
-        md_info = parse_g4md(path.read_bytes())
+        data = model_g4md_data(path, path.read_bytes())
+        md_info = parse_g4md(data)
     except (OSError, ValueError, struct.error):
         return set()
     joint_table = md_info.get("joint_hash_table", 0)
@@ -2158,9 +2173,9 @@ def uniform_used_joint_hashes(path: Path) -> set[int]:
         for record in md_info.get("records", [])
         for index in joint_palette_for_record(md_info, record)
     }
-    if not indices or joint_table + max(indices) * 4 + 4 > path.stat().st_size:
+    joint_end = u16(data, 0x0A) * 4 + u16(data, 0x76) * 4
+    if not indices or not joint_table < joint_end <= len(data) or joint_table + max(indices) * 4 + 4 > joint_end:
         return set()
-    data = path.read_bytes()
     return {u32(data, joint_table + index * 4) for index in indices}
 
 
@@ -2348,9 +2363,9 @@ def resolve_unique_face_crc_g4sk(path: Path) -> tuple[bytes | None, str | None]:
 
 
 def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple[bytes | None, str | None]:
-    palette_path = companion(path, ".g4md") if pack_data is not None else path
-    if palette_path is None:
-        palette_path = path
+    # A pack's embedded descriptor can differ from its loose sibling. Test
+    # skeleton coverage against the descriptor that supplies the geometry.
+    palette_path = path
 
     if pack_data is not None and pack_data[:4] == b"G4PK":
         pack = parse_g4pk(pack_data)
@@ -2361,6 +2376,14 @@ def find_skeleton_for_model(path: Path, pack_data: bytes | None = None) -> tuple
                 skeleton_data = pack_data[start:end]
                 if g4sk_matches_or_unskinned_g4md(skeleton_data, palette_path):
                     return skeleton_data, f"{path}::{entry['name']}"
+        if (
+            any(entry["magic"] == "G4SK" for entry in pack["entries"])
+            and any(entry["magic"] == "G4MD" for entry in pack["entries"])
+        ):
+            raise ValueError(
+                f"{path}: no embedded G4SK covers the embedded G4MD joint palette. "
+                "The model pack is inconsistent; an external character rig cannot repair this binding."
+            )
 
     # Character G4MD files are sometimes unpacked beside their original
     # G4PKM.  The pack keeps the character-specific (and often dynamic) G4SK;
@@ -3046,8 +3069,9 @@ def load_model(path: Path) -> dict:
 
     if data[:4] == b"G4PK":
         result["pack"] = parse_g4pk(data)
-        md_data = find_embedded(data, b"G4MD")
-        if md_data is not None:
+        has_embedded_md = any(entry["magic"] == "G4MD" for entry in result["pack"]["entries"])
+        if has_embedded_md:
+            md_data = model_g4md_data(path, data)
             md_size = u32(md_data, 0x0C) + 0xA4 if len(md_data) >= 0x10 else len(md_data)
             result["embedded_g4md_offset"] = data.find(b"G4MD")
             result["embedded_g4md_probe_size"] = min(len(md_data), md_size)
@@ -3175,21 +3199,32 @@ def export_obj(path: Path, out_dir: Path) -> Path:
     return out_path
 
 
-def read_model_buffers(path: Path) -> tuple[bytes, bytes, Path | None]:
-    configure_raw_data_root_from_path(path)
-    data = path.read_bytes()
+def model_g4md_data(path: Path, data: bytes) -> bytes:
     if data[:4] == b"G4PK":
-        embedded_offset = data.find(b"G4MD")
-        if embedded_offset >= 0:
-            data = data[embedded_offset:]
+        entries = [entry for entry in parse_g4pk(data)["entries"] if entry["magic"] == "G4MD"]
+        matching = [entry for entry in entries if Path(entry["name"]).stem.casefold() == path.stem.casefold()]
+        if len(matching) == 1:
+            entry = matching[0]
+        elif not matching and len(entries) == 1:
+            entry = entries[0]
+        elif entries:
+            raise ValueError(f"{path} has no unambiguous embedded G4MD for this model")
         else:
-            external_md = companion(path, ".g4md")
-            if external_md is None:
-                raise ValueError(f"{path} has no embedded or external G4MD")
-            data = external_md.read_bytes()
-
+            entry = None
+        if entry is not None:
+            return data[entry["offset"]:entry["offset"] + entry["size"]]
+        external_md = companion(path, ".g4md")
+        if external_md is None:
+            raise ValueError(f"{path} has no embedded or external G4MD")
+        data = external_md.read_bytes()
     if data[:4] != b"G4MD":
         raise ValueError(f"{path} is not G4MD/G4PKM")
+    return data
+
+
+def read_model_buffers(path: Path) -> tuple[bytes, bytes, Path | None]:
+    configure_raw_data_root_from_path(path)
+    data = model_g4md_data(path, path.read_bytes())
 
     g4mg_path = companion(path, ".g4mg")
     if g4mg_path is None:
@@ -3870,10 +3905,13 @@ def build_skin_controller(payload: dict, skeleton_info: dict) -> tuple[str, dict
     bind_shape_matrix = payload.get("bind_shape_matrix") or identity_matrix()
 
     def resolve_joint(local_index: int) -> int | None:
+        if local_index < 0:
+            return None
         if joint_palette:
-            return joint_palette[local_index] if local_index < len(joint_palette) else None
+            joint = joint_palette[local_index] if local_index < len(joint_palette) else -1
+            return joint if 0 <= joint < joint_count else None
         fallback = palette_base + local_index
-        if fallback < joint_count:
+        if 0 <= fallback < joint_count:
             return fallback
         return None
 
@@ -5181,8 +5219,9 @@ def export_dae(
         extra_uvs = {channel: [] for channel in (3, 4, 5)
                      if "effect" in {part.lower() for part in path.parts}
                      and layout_element(layout_for_record(md_info, record), 10 + channel) is not None}
-        uv1_element = layout_element(layout_for_record(md_info, record), 11) if "effect" in {part.lower() for part in path.parts} else None
-        uv2_element = layout_element(layout_for_record(md_info, record), 12) if uv1_element is not None else None
+        source_parts = {part.lower() for part in path.parts}
+        uv1_element = layout_element(layout_for_record(md_info, record), 11) if source_parts & {"effect", "map"} else None
+        uv2_element = layout_element(layout_for_record(md_info, record), 12) if "effect" in source_parts and uv1_element is not None else None
         vertex_colors: list[float] = []
         vertex_colors1: list[float] = []
         color1_element = layout_element(layout_for_record(md_info, record), 9)
@@ -5232,8 +5271,11 @@ def export_dae(
             if joint_palette:
                 valid_influences, invalid_influences = skin_palette_fit(skin_influences, len(joint_palette))
                 if invalid_influences > valid_influences:
-                    skin_influences = rigid_skin_influences(vertex_count)
-                    skin_mode = "rigid_invalid_palette_bytes"
+                    raise ValueError(
+                        f"{path}: mesh '{mesh_name}' has {invalid_influences} skin influences outside "
+                        f"its {len(joint_palette)}-joint palette. The G4MD and G4MG may be different variants; "
+                        "import the matching G4PKM when available."
+                    )
         palette_remap_count = 0
         palette_remap_source = None
         palette_spatial_score = None
@@ -5252,6 +5294,7 @@ def export_dae(
             md_info.get("joint_hash_table", 0),
             allow_partial=crc_palette_is_authoritative,
         )
+        complete_hash_match = hash_palette is not None and all(index >= 0 for index in hash_palette)
         direct_palette_score = palette_spatial_error(
             position_tuples,
             skin_influences,
@@ -5319,26 +5362,15 @@ def export_dae(
             palette_spatial_score = palette_spatial_error(
                 position_tuples, skin_influences, joint_palette, skeleton_info
             )
-        elif (
-            hash_palette is not None
-            and all(index >= 0 for index in hash_palette)
-            and (
-                not assigned_skeleton
-                or "actor skeleton override" in (skeleton_source or "")
-            )
-        ):
-            # A model-local G4SK is authored with this G4MD.  Its CRC palette
-            # is the binding contract; compact shared-palette heuristics are
-            # only for uniforms attached to an external actor skeleton.
+        elif complete_hash_match:
+            # Complete name-hash coverage also binds an externally assigned
+            # rig; physical order and spatial proximity cannot override it.
             joint_palette = hash_palette
             palette_remap_count = hash_remap_count
-            palette_remap_source = "G4MD CRC32 joint table (model-local G4SK)"
+            palette_remap_source = "G4MD CRC32 joint table (complete name match)"
             palette_spatial_score = hash_palette_score
-        # A G4MD can contain a full CRC32 skeleton-name table while some of
-        # its submeshes still use physical G4SK indices.  This is common in
-        # bodies and shoes, so keep a geometrically better physical palette.
-        # Conversely, gloves can be compact CRC palettes even when their
-        # physical indices happen to be near the mesh in bind pose.
+        # Legacy paths without complete hash coverage retain their existing
+        # physical/compact palette resolution.
         elif direct_palette_score <= 0.35:
             if hash_palette is not None and hash_palette_score is not None and hash_palette_score < direct_palette_score:
                 joint_palette = hash_palette
@@ -5383,7 +5415,10 @@ def export_dae(
             else:
                 joint_palette, palette_remap_count = remap_assigned_joint_palette(joint_palette, skeleton_info)
                 palette_remap_source = "compact assigned skeleton order"
-        joint_palette_override = face_rigid_joint_override(path, skeleton_info, joint_palette)
+        joint_palette_override = (
+            None if complete_hash_match
+            else face_rigid_joint_override(path, skeleton_info, joint_palette)
+        )
         if joint_palette_override is not None:
             joint_palette = joint_palette_override
             skin_mode = "rigid_face_head_override"
@@ -5495,7 +5530,18 @@ def export_dae(
             "mesh_count": len(mesh_payloads),
             "materials": {name: str(texture) if texture else None for name, texture in used_materials.items()},
             "meshes": [
-                {"name": payload["name"], "record_index": payload["record_index"], "material": payload["material"]}
+                {
+                    "name": payload["name"],
+                    "record_index": payload["record_index"],
+                    "material": payload["material"],
+                    "material_index": payload["material_index"],
+                    "joint_palette": payload["joint_palette"],
+                    "assigned_skeleton_palette_remaps": payload["assigned_skeleton_palette_remaps"],
+                    "palette_remap_source": payload["palette_remap_source"],
+                    "palette_spatial_score": payload["palette_spatial_score"],
+                    "skin_mode": payload["skin_mode"],
+                    "skin": payload["skin_summary"],
+                }
                 for payload in mesh_payloads
             ],
             "skeleton_source": skeleton_source,

@@ -428,6 +428,8 @@ def optimize_effect_animation(scene: bpy.types.Scene) -> int:
                  for index in range(8) for component in "XYZW")
     paths.update(f'nodes["Effect UV {index} Row {row}"].inputs[1].default_value'
                  for index in range(8) for row in range(2))
+    paths.update(f'nodes["Effect Random UV {index} {axis}"].outputs[0].default_value'
+                 for index in range(8) for axis in range(2))
     materials = {slot.material for obj in scene.objects for slot in obj.material_slots
                  if slot.material and slot.material.get("g4_effect_preview")}
     materials = {material for material in materials if material.node_tree

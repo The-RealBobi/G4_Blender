@@ -42,18 +42,6 @@ def matrix_mul(a: list[float], b: list[float]) -> list[float]:
     ]
 
 
-def rigid_inverse(matrix: list[float]) -> list[float]:
-    r00, r01, r02, tx = matrix[0:4]
-    r10, r11, r12, ty = matrix[4:8]
-    r20, r21, r22, tz = matrix[8:12]
-    return [
-        r00, r10, r20, -(r00 * tx + r10 * ty + r20 * tz),
-        r01, r11, r21, -(r01 * tx + r11 * ty + r21 * tz),
-        r02, r12, r22, -(r02 * tx + r12 * ty + r22 * tz),
-        0.0, 0.0, 0.0, 1.0,
-    ]
-
-
 def quaternion_from_matrix(matrix: list[float]) -> list[float]:
     m00, m01, m02 = matrix[0], matrix[1], matrix[2]
     m10, m11, m12 = matrix[4], matrix[5], matrix[6]
@@ -131,11 +119,15 @@ def parse_skeleton(path: Path) -> dict:
         offset = u16(data, name_table + index * 2)
         end = data.find(b"\0", name_table + offset)
         names.append(data[name_table + offset:end].decode("utf-8", errors="replace"))
+    inverse_matrices = [
+        [*struct.unpack_from('<12f', data, sections[0] + index * 0x30), 0., 0., 0., 1.]
+        for index in range(count)
+    ]
     local_matrices = []
     for index, matrix in enumerate(global_matrices):
         parent = parents[index]
         local_matrices.append(
-            matrix_mul(rigid_inverse(global_matrices[parent]), matrix)
+            matrix_mul(inverse_matrices[parent], matrix)
             if parent < count and parent != index else matrix
         )
     return {

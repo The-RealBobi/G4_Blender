@@ -1,8 +1,8 @@
 """Character lighting reconstructed from the draw shaders in capture 16.
 
 The two white gradient rows carry shadow coverage in alpha. Their RGB is not
-an albedo tint. EEVEE supplies signed scene lighting in place of the game's
-character light direction and shadow atlas; see docs/CHARACTER_RENDERDOC.md.
+an albedo tint. Artistic direction is analytical; EEVEE supplies only the
+projected-shadow approximation. See docs/CHARACTER_RENDERDOC.md.
 """
 import bpy
 
@@ -17,11 +17,16 @@ def optimize_event_lighting(scene: bpy.types.Scene) -> int:
             "G4 Shadow Color 0", "G4 Shadow Color 1",
             "G4 Shadow Threshold 0", "G4 Shadow Threshold 1",
             "G4 Ambient Color", "G4 Highlight Threshold", "G4 Under Threshold",
+            "G4 Self Shadow", "G4 Shadow Irradiance",
         )
     } | {
         f'nodes["{name}"].inputs[2].default_value'
         for name in ("G4 Highlight", "G4 Under Light")
     }
+    paths.update({
+        'nodes["G4 Light Direction"].inputs[0].default_value',
+        'nodes["G4 Shadow Direction"].inputs[0].default_value',
+    })
     from .scene_animation import migrate_material_animation
     materials = {slot.material for obj in scene.objects for slot in obj.material_slots
                  if slot.material and slot.material.get("g4_level5_toon")}
@@ -103,6 +108,7 @@ def color_transfer(
 
 
 def build_character_lighting(nodes, links, base_color, occlusion_channels, surface_normal):
+    """Evaluate chr_toon's artistic lighting independently of EEVEE irradiance."""
     def math(name, operation, *values, clamp=False):
         node = nodes.new("ShaderNodeMath")
         node.name = name
@@ -115,11 +121,30 @@ def build_character_lighting(nodes, links, base_color, occlusion_channels, surfa
                 links.new(value, socket)
         return node.outputs[0]
 
-    def mix(name, operation, factor, a, b):
-        node = nodes.new("ShaderNodeMixRGB")
+    def vector(name, operation, *values):
+        node = nodes.new("ShaderNodeVectorMath")
         node.name = name
+        node.operation = operation
+        for socket, value in zip(node.inputs, values):
+            if isinstance(value, tuple):
+                socket.default_value = value
+            else:
+                links.new(value, socket)
+        return node.outputs["Value" if operation == "DOT_PRODUCT" else "Vector"]
+
+    def parameter(name, value):
+        node = nodes.new("ShaderNodeRGB" if isinstance(value, tuple) else "ShaderNodeValue")
+        node.name = name
+        node.outputs[0].default_value = value
+        return node.outputs[0]
+
+    def mix(name, operation, factor, a, b):
+        node = nodes.new("ShaderNodeMix")
+        node.name = name
+        node.data_type = "RGBA"
         node.blend_type = operation
-        for socket, value in zip(node.inputs, (factor, a, b)):
+        node.clamp_factor = False
+        for socket, value in zip((node.inputs[0], node.inputs[6], node.inputs[7]), (factor, a, b)):
             if isinstance(value, (int, float, tuple)):
                 socket.default_value = value
             else:
@@ -128,126 +153,111 @@ def build_character_lighting(nodes, links, base_color, occlusion_channels, surfa
 
     geometry = nodes.new("ShaderNodeNewGeometry")
     normal = surface_normal if surface_normal is not None else geometry.outputs["Normal"]
-    inverted = nodes.new("ShaderNodeVectorMath")
-    inverted.operation = "SCALE"
-    inverted.inputs[3].default_value = -1.0
-    links.new(normal, inverted.inputs[0])
-    intensities = []
-    for direction in (normal, inverted.outputs[0]):
-        diffuse = nodes.new("ShaderNodeBsdfDiffuse")
-        diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
-        links.new(direction, diffuse.inputs["Normal"])
-        rgb = nodes.new("ShaderNodeShaderToRGB")
-        links.new(diffuse.outputs[0], rgb.inputs[0])
-        intensities.append(rgb.outputs["Color"])
-    signed = math("G4 Signed Light", "SUBTRACT", *intensities)
-    # Opposing diffuse probes cancel uniform environment light. Character
-    # ambient is applied separately, as it is in CBUSE_UB_CHARA_LIGHT_IDX.
-    toon = math("G4 Toon Ambient", "MULTIPLY_ADD", signed, 0.5, 0.5, clamp=True)
+    # chr_toon.vfxo emits the world normal in o3. PS instruction 244 dots it
+    # with cb7[4], independently of the shadow comparison at instructions 861+.
+    direction = vector("G4 Light Direction", "ADD", (-.6805263, -.0009858, .7327231))
+    signed = vector("G4 Native Light Dot", "DOT_PRODUCT", normal, direction)
+    toon = math("G4 Toon Ambient", "MULTIPLY_ADD", signed, .5, .5, clamp=True)
     signed = math("G4 Light Direction Factor", "MULTIPLY_ADD", toon, 2.0, -1.0)
+    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+    diffuse.name = "G4 Shadow Receiver"
+    diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    shadow_direction = vector("G4 Shadow Direction", "ADD", (-.6805263, -.0009858, .7327231))
+    links.new(shadow_direction, diffuse.inputs["Normal"])
+    probe = nodes.new("ShaderNodeShaderToRGB")
+    probe.name = "G4 Shadow Visibility"
+    links.new(diffuse.outputs[0], probe.inputs[0])
+    # A light-facing receiver removes N.L from this query. White unit sun
+    # irradiance is 1/pi in EEVEE; event import supplies energy and RGB luma.
+    irradiance = parameter("G4 Shadow Irradiance", 10.0 / 3.141592653589793)
+    luminance_probe = vector("G4 Shadow Luminance Probe", "DOT_PRODUCT",
+                             probe.outputs["Color"], (.2126, .7152, .0722))
+    visibility = math("G4 Shadow Normalize", "DIVIDE", luminance_probe, irradiance)
+    shadow = math("G4 Projected Shadow", "SUBTRACT", 1.0, visibility, clamp=True)
+    valid = math("G4 Shadow Light Present", "GREATER_THAN", irradiance, 1e-6)
+    shadow = math("G4 Shadow Light Weight", "MULTIPLY", shadow, valid)
+    strength = parameter("G4 Self Shadow", .65)
+    shadow = math("G4 Self Shadow Weight", "MULTIPLY", shadow, strength)
+
     attr = nodes.new("ShaderNodeVertexColor")
     attr.layer_name = "G4 Outline Parameters"
     attr.name = "G4 Character Vertex Parameters"
     oc = [1.0, 0.0, 0.0] if occlusion_channels is None else list(occlusion_channels.outputs)[:3]
-    oc_weight = math("G4 Occlusion Vertex Weight", "MULTIPLY", oc[0], attr.outputs["Alpha"])
-    oc_weight = math("G4 Occlusion Weight", "MULTIPLY", oc_weight, 2.0, clamp=True)
-    offset = math("G4 Occlusion Offset", "MULTIPLY_ADD", oc_weight, 0.90, -0.25)
-    main = math("G4 Occlusion Light", "MULTIPLY_ADD", signed, 0.35, offset)
-    main = math("G4 Gradient Coordinate 0", "MULTIPLY_ADD", main, 0.5, 0.5)
-    inv = math("G4 Inverse Gradient", "SUBTRACT", 1.0, main)
-    second = math("G4 Gradient Coordinate 1", "MULTIPLY_ADD", oc[1], inv, main)
+    weight = math("G4 Occlusion Vertex Weight", "MULTIPLY", oc[0], attr.outputs["Alpha"])
+    weight = math("G4 Occlusion Weight", "MULTIPLY", weight, 2.0, clamp=True)
+    offset = math("G4 Occlusion Offset", "MULTIPLY_ADD", weight, .9, -.25)
+    main = math("G4 Occlusion Light", "MULTIPLY_ADD", signed, .35, offset)
+    coordinate = math("G4 Gradient Coordinate 0", "MULTIPLY_ADD", main, .5, .5)
+    inverse = math("G4 Inverse Gradient", "SUBTRACT", 1.0, coordinate)
+    second = math("G4 Gradient Coordinate 1", "MULTIPLY_ADD", oc[1], inverse, coordinate)
     covers, colors = [], []
-    # Capture 16: all 74 character draws use u_shaderParam2=(.9921875,.9765625).
-    # These are the white RGB rows 254/250 of chrGrd_01, with alpha transitions
-    # at about .754/.530. Use equivalent short ramps, not a bundled game asset.
-    for index, (coordinate, threshold, cutoff, color) in enumerate((
-        (main, .5, .754, (.74995, .60020, .77992, 1.0)),
+    # Capture 16 cb7 and chrGrd_01 rows 254/250: RGB is white, alpha is
+    # coverage. Fold each short linear ramp into a saturating affine map.
+    for index, (value, threshold, cutoff, color) in enumerate((
+        (coordinate, .5, .754, (.74995, .60020, .77992, 1.0)),
         (second, .54, .530, (.72967, .52992, .69982, 1.0)),
     )):
-        parameter = nodes.new("ShaderNodeValue")
-        parameter.name = f"G4 Shadow Threshold {index}"
-        parameter.outputs[0].default_value = threshold
-        coordinate = math(f"G4 Gradient Shift {index}", "SUBTRACT", coordinate, parameter.outputs[0])
-        coordinate = math(f"G4 Gradient UV {index}", "ADD", coordinate, .5)
-        ramp = nodes.new("ShaderNodeValToRGB")
-        ramp.name = f"G4 Shadow Band {index}"
-        ramp.color_ramp.interpolation = "LINEAR"
-        ramp.color_ramp.elements[0].position = cutoff - .003
-        ramp.color_ramp.elements[0].color = (1.0, 1.0, 1.0, 1.0)
-        ramp.color_ramp.elements[1].position = cutoff + .003
-        ramp.color_ramp.elements[1].color = (0.0, 0.0, 0.0, 0.0)
-        links.new(coordinate, ramp.inputs[0])
-        covers.append(ramp.outputs["Alpha"])
-        color_node = nodes.new("ShaderNodeRGB")
-        color_node.name = f"G4 Shadow Color {index}"
-        color_node.outputs[0].default_value = color
-        colors.append(color_node.outputs[0])
+        threshold = parameter(f"G4 Shadow Threshold {index}", threshold)
+        delta = math(f"G4 Gradient Shift {index}", "SUBTRACT", threshold, value)
+        cover = math(f"G4 Shadow Band {index}", "MULTIPLY_ADD", delta, 1.0 / .006,
+                     (cutoff - .497) / .006, clamp=True)
+        covers.append(cover)
+        colors.append(parameter(f"G4 Shadow Color {index}", color))
     shadows = mix("G4 Dual Toon Ramp", "MIX", covers[1], *colors)
-    luminance = nodes.new("ShaderNodeVectorMath")
-    luminance.operation = "DOT_PRODUCT"
-    luminance.inputs[1].default_value = (.29891, .58661, .11448)
-    links.new(base_color, luminance.inputs[0])
-    lift = math("G4 Shadow Luminance", "MULTIPLY", luminance.outputs["Value"], .1)
-    shade_node = nodes.new("ShaderNodeVectorMath")
-    shade_node.name = "G4 Shadow Luminance Composite"
-    shade_node.operation = "ADD"
-    links.new(shadows.outputs[0], shade_node.inputs[0])
-    links.new(lift, shade_node.inputs[1])
-    shade = shade_node.outputs[0]
-    ambient = mix("G4 Character Ambient", "MIX", .04995, base_color, (.924925, .874975, .874975, 1.0))
-    # Keep a single editable/animated ambient color for both native terms.
-    # RGB sockets are linked via a separate color source by the event adapter.
-    ambient_color = nodes.new("ShaderNodeRGB")
-    ambient_color.name = "G4 Ambient Color"
-    ambient_color.outputs[0].default_value = tuple(ambient.inputs[2].default_value)
-    links.new(ambient_color.outputs[0], ambient.inputs[2])
-    ambient_mul = nodes.new("ShaderNodeVectorMath")
-    ambient_mul.name = "G4 Character Ambient Multiply"
-    ambient_mul.operation = "MULTIPLY"
-    links.new(ambient.outputs[0], ambient_mul.inputs[0])
-    links.new(ambient_color.outputs[0], ambient_mul.inputs[1])
-    add_rate = math("G4 Shadow Add Rate", "MULTIPLY", covers[0], -.1)
-    mul_rate = math("G4 Shadow Multiply Rate", "MULTIPLY", covers[0], 1.3)
-    def vector(operation, a, b):
-        node = nodes.new("ShaderNodeVectorMath")
-        node.operation = operation
-        links.new(a, node.inputs[0])
-        links.new(b, node.inputs[3] if operation == "SCALE" else node.inputs[1])
-        return node.outputs[0]
+    coverage = math("G4 Combined Shadow", "MAXIMUM", covers[0], shadow)
+    luminance = vector("G4 Albedo Luminance", "DOT_PRODUCT", base_color, (.29891, .58661, .11448))
+    lift = math("G4 Shadow Luminance", "MULTIPLY", luminance, .1)
+    shade = vector("G4 Shadow Luminance Composite", "ADD", shadows.outputs[2], lift)
+    ambient_color = parameter("G4 Ambient Color", (.924925, .874975, .874975, 1.0))
+    ambient = mix("G4 Character Ambient", "MIX", .04995, base_color, ambient_color)
+    ambient = vector("G4 Character Ambient Multiply", "MULTIPLY", ambient.outputs[2], ambient_color)
+    add_rate = math("G4 Shadow Add Rate", "MULTIPLY", coverage, -.1)
+    mul_rate = math("G4 Shadow Multiply Rate", "MULTIPLY", coverage, 1.3)
+    added = mix("G4 Native Shadow Add", "MIX", add_rate, ambient, shade)
+    multiplied = mix("G4 Native Shadow Multiply", "MULTIPLY", mul_rate, added.outputs[2], shade)
+    recovery = math("G4 Albedo Recovery", "MULTIPLY_ADD", luminance, .2, oc[2], clamp=True)
+    color = mix("G4 Occlusion Composite", "MIX", recovery, multiplied.outputs[2], base_color).outputs[2]
 
-    # MixRGB clamps its factor; the native -.1/1.3 blend extrapolates.
-    delta = vector("SUBTRACT", shade, ambient_mul.outputs[0])
-    added = vector("ADD", ambient_mul.outputs[0], vector("SCALE", delta, add_rate))
-    multiplied = vector("MULTIPLY", added, shade)
-    delta = vector("SUBTRACT", multiplied, added)
-    shaded = vector("ADD", added, vector("SCALE", delta, mul_rate))
-    recovery = math("G4 Albedo Recovery", "MULTIPLY_ADD", luminance.outputs["Value"], .2, oc[2], clamp=True)
-    color = mix("G4 Occlusion Composite", "MIX", recovery, shaded, base_color).outputs[0]
-    # A narrow, directional rim replaces the old broad Fresnel wash.
-    facing = nodes.new("ShaderNodeVectorMath")
-    facing.operation = "DOT_PRODUCT"
-    links.new(normal, facing.inputs[0])
-    links.new(geometry.outputs["Incoming"], facing.inputs[1])
-    inv_facing = math("G4 Native Grazing", "SUBTRACT", 1.0, facing.outputs["Value"], clamp=True)
-    high_signal = math("G4 Native Highlight Signal", "MULTIPLY_ADD", inv_facing, signed, main)
-    high_threshold = nodes.new("ShaderNodeValue")
-    high_threshold.name = "G4 Highlight Threshold"
-    high_threshold.outputs[0].default_value = 1.5999
-    high = math("G4 Native Highlight", "SUBTRACT", high_signal, high_threshold.outputs[0])
+    facing = vector("G4 Native Facing", "DOT_PRODUCT", normal, geometry.outputs["Incoming"])
+    grazing = math("G4 Native Grazing", "SUBTRACT", 1.0, facing, clamp=True)
+    high_signal = math("G4 Native Highlight Signal", "MULTIPLY_ADD", grazing, signed, coordinate)
+    high_threshold = parameter("G4 Highlight Threshold", 1.5999)
+    high = math("G4 Native Highlight", "SUBTRACT", high_signal, high_threshold)
     high = math("G4 Native Highlight Cut", "MULTIPLY", high, 10000.0, clamp=True)
-    under = math("G4 Native Under Direction", "MULTIPLY", signed, -1.0, clamp=True)
-    under = math("G4 Native Under Grazing", "MULTIPLY", under, inv_facing)
-    under_threshold = nodes.new("ShaderNodeValue")
-    under_threshold.name = "G4 Under Threshold"
-    under_threshold.outputs[0].default_value = 1.45
-    under = math("G4 Native Under Signal", "ADD", under, 1.0)
-    under = math("G4 Native Under Offset", "SUBTRACT", under, under_threshold.outputs[0])
-    under = math("G4 Native Under Cut", "MULTIPLY", under, 300.0, clamp=True)
+    # PS 354..371, 2118..2134: the under rim also contains the AO offset
+    # and signed direction, rather than a broad Fresnel on the unlit side.
+    under_direction = math("G4 Native Under Direction", "MULTIPLY", signed, -1.0, clamp=True)
+    under_grazing = math("G4 Native Under Grazing", "MULTIPLY", under_direction, grazing)
+    under_base = math("G4 Native Under Base", "MULTIPLY_ADD", signed, -.35, offset)
+    under_signal = math("G4 Native Under Signal", "MULTIPLY_ADD", under_base, .5, under_grazing)
+    under_threshold = parameter("G4 Under Threshold", 1.45)
+    under_signal = math("G4 Native Under Offset", "SUBTRACT", under_signal, under_threshold)
+    under_signal = math("G4 Native Under Bias", "ADD", under_signal, .5)
+    under = math("G4 Native Under Cut", "MULTIPLY", under_signal, 300.0, clamp=True)
     return color, toon, shadows, high, under
 
 
 def animate_capture_lighting(nodes: bpy.types.Nodes, parameters: dict[str, list[float]], frame: int) -> None:
     """Apply native colors and offsets without treating thresholds as strength."""
+    direction = parameters.get("charaLightDir")
+    node = nodes.get("G4 Light Direction")
+    if node is not None and direction and len(direction) >= 3:
+        from ..formats.g4_axes import blender_from_g4_matrix
+        from mathutils import Vector
+        value = blender_from_g4_matrix().to_3x3() @ Vector(direction[:3])
+        if value.length_squared > 1e-8:
+            node.inputs[0].default_value = value.normalized()
+            node.inputs[0].keyframe_insert("default_value", frame=frame)
+    shadow = parameters.get("charaSelfShadow")
+    node = nodes.get("G4 Self Shadow")
+    if node is not None and shadow:
+        node.outputs[0].default_value = max(0.0, min(1.0, shadow[0]))
+        node.outputs[0].keyframe_insert("default_value", frame=frame)
+    under = parameters.get("charaUnderRimRate")
+    if under and nodes.get("G4 Under Threshold"):
+        socket = nodes["G4 Under Threshold"].outputs[0]
+        socket.default_value = under[0]
+        socket.keyframe_insert("default_value", frame=frame)
     for index in range(2):
         names = (f"charaShadowColor{index + 1}", f"charaShadow{index + 1}")
         values = next((parameters[n] for n in names if parameters.get(n)), None)

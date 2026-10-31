@@ -5,6 +5,16 @@ import json
 import bpy
 
 
+def _native_uv_cycle(curve: bpy.types.FCurve) -> bool:
+    if not curve.data_path.startswith('nodes["Effect UV ') or len(curve.modifiers) != 1:
+        return False
+    modifier = curve.modifiers[0]
+    return (modifier.type == 'CYCLES' and modifier.mode_before == 'NONE'
+            and modifier.mode_after == 'REPEAT' and modifier.cycles_before == 0
+            and modifier.cycles_after == 0 and not modifier.mute
+            and not modifier.use_restricted_range and not modifier.use_influence)
+
+
 def migrate_material_animation(
     scene: bpy.types.Scene,
     materials: set[bpy.types.Material],
@@ -46,7 +56,7 @@ def migrate_material_animation(
             continue
         # User-edited interpolation, modifiers and unrelated animation stay untouched.
         if not curves or any(
-            curve.data_path not in paths or curve.modifiers or curve.sampled_points
+            curve.data_path not in paths or (curve.modifiers and not _native_uv_cycle(curve)) or curve.sampled_points
             or curve.mute or (curve.group and curve.group.mute)
             or curve.extrapolation != "CONSTANT" or not curve.keyframe_points
             or any(point.interpolation not in interpolations for point in curve.keyframe_points)
@@ -65,6 +75,7 @@ def migrate_material_animation(
                 (
                     curve.array_index,
                     [(tuple(point.co), point.interpolation) for point in curve.keyframe_points],
+                    _native_uv_cycle(curve),
                 )
                 for curve in sorted(channels, key=lambda curve: curve.array_index)
             ]))
@@ -86,6 +97,8 @@ def migrate_material_animation(
                     for source, point in zip(curve.keyframe_points, target.keyframe_points):
                         point.co = source.co
                         point.interpolation = source.interpolation
+                    if _native_uv_cycle(curve):
+                        target.modifiers.new('CYCLES').mode_before = 'NONE'
                     target.update()
             attribute = next(
                 (

@@ -43,7 +43,7 @@ class CharacterShaderProfile:
                 ShaderParameter("specular", "float", native_source="shader variant"),
             ),
             notes=(
-                "Preserve the existing apply_level5_toon_shader node graph.",
+                "Analytical native direction, captured AO bands, and one normalized EEVEE projected-shadow query.",
                 "ShaderToRGB requires EEVEE; other engines receive a marked fallback.",
                 "Character ambient, dual shadow colors, threshold and rim defaults follow the native light profiles; normal/_oc/_sp/_spm are the authoritative surface maps, while nml/_msk are optional variants and chr_toon in_texGrd alpha rows are approximated from the captured variant.",
             ),
@@ -51,13 +51,13 @@ class CharacterShaderProfile:
 
 
 def characterize_current_toon_shader(material=None, variants=None) -> CharacterShaderProfile:
-    """Return the shared profile used to annotate the legacy implementation."""
+    """Return the shared compatibility profile for character materials."""
 
     return CharacterShaderProfile()
 
 
 def annotate_current_toon_material(material, variants=None) -> None:
-    """Attach non-invasive metadata to a material built by the old shader path."""
+    """Attach the character shader compatibility metadata."""
 
     if material is None:
         return
