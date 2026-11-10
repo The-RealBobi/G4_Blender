@@ -17,9 +17,11 @@ from .g4_model_writer import AuthoredMaterial, AuthoredTexture, bc7_dds_header, 
 from .g4_port import (Mesh, Vertex, RecordRule, STABLE_CUSTOM_VERTEX_COLOR,
                       apply_record_outline_rules, png_to_dds)
 try:
+    from ..formats.export_provenance import mark_export
     from ..formats.g4_axes import g4_from_blender_matrix
     from ..formats.g4sk_writer import G4SKNode, NATIVE_HELPER_NAMES
 except ImportError:
+    from formats.export_provenance import mark_export
     from formats.g4_axes import g4_from_blender_matrix
     from formats.g4sk_writer import G4SKNode, NATIVE_HELPER_NAMES
 
@@ -334,17 +336,20 @@ def export_model_package(context: bpy.types.Context, directory: Path, model_name
             output_materials.append(AuthoredMaterial(f'{name}M', name, slots[0], slots[1], source.alpha_blend, normal_name))
         for mesh in meshes:
             mesh.material_name = output_materials[mesh.material_index].name
+        from .. import bl_info
+
+        version = bl_info["version"]
         resources = build_authored_model(meshes, output_materials, textures, nodes)
         package = cache / 'package'
         common = package / 'data/common/chr' / model_name
         common.mkdir(parents=True)
         for suffix, data in (('.g4md', resources.g4md), ('.g4mg', resources.g4mg), ('.g4sk', resources.g4sk)):
-            (common / f'{model_name}{suffix}').write_bytes(data)
+            (common / f'{model_name}{suffix}').write_bytes(mark_export(data, suffix, version))
         for target_platform in (('dx11', 'nx') if platform == 'both' else (platform,)):
             texture_dir = package / f'data/{target_platform}/chr' / model_name
             texture_dir.mkdir(parents=True)
             archive = resources.g4tx if target_platform == 'dx11' else build_authored_texture_archive(textures, 'nx')
-            (texture_dir / f'{model_name}.g4tx').write_bytes(archive)
+            (texture_dir / f'{model_name}.g4tx').write_bytes(mark_export(archive, ".g4tx", version) if target_platform == "dx11" else archive)
         if prepare_profile is not None:
             prepare_profile(common / f'{model_name}.g4md')
         if destination.exists():

@@ -4418,7 +4418,10 @@ def run_port(context, filepath: str = "") -> tuple[dict, Path]:
     else:
         command.extend(["--texture-mode", props.texture_mode, "--out-root", str(output_root)])
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    from .. import bl_info
+
+    env = dict(os.environ, LEVEL5_G4_EXPORT_VERSION=".".join(map(str, bl_info["version"])))
+    completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
     with trace_path.open("a", encoding="utf-8") as stream:
         stream.write("\nConverter command:\n" + shlex.join(command) + "\n")
         stream.write("\nConverter stdout:\n" + (completed.stdout or "<empty>") + "\n")

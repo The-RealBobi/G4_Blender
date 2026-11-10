@@ -33,6 +33,8 @@ def rig_actions(rig) -> list:
 
 
 def export_actions(context, rig, actions: list, path: Path, keep_g4mt: bool) -> None:
+    from .. import bl_info
+    from ..formats.export_provenance import mark_export
     from .g4_animation_addon import sample_action_for_g4mt
     if rig is None or rig.type != 'ARMATURE' or not actions:
         raise ValueError('Select an armature and at least one compatible Action')
@@ -68,7 +70,7 @@ def export_actions(context, rig, actions: list, path: Path, keep_g4mt: bool) -> 
         package = pack_g4mt(motion_path.name, motion)
         with tempfile.TemporaryDirectory(prefix='.g4-motion-', dir=path.parent) as directory:
             staged = Path(directory)
-            (staged / path.name).write_bytes(package)
+            (staged / path.name).write_bytes(mark_export(package, ".g4pk", bl_info["version"]))
             if keep_g4mt:
                 (staged / motion_path.name).write_bytes(motion)
                 os.replace(staged / motion_path.name, motion_path)

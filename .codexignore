@@ -1,8 +1,0 @@
-*.zip
-*.tar.gz
-*.tgz
-dist/
-build/
-out/
-node_modules/
-.git/

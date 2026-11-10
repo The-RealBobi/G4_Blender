@@ -22,6 +22,7 @@ except ImportError:
     from g4_normal_materials import promote_normal_materials, serialize_expanded_g4tx
 
 try:
+    from ..formats.export_provenance import mark_export
     from .g4_model_probe import (
         dds_format,
         dds_to_nxtch,
@@ -39,6 +40,7 @@ try:
     from .outline_regions import STABLE_OUTLINE_COLOR, OUTLINE_BAND_FRACTION, outline_triangle_bands
 except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from formats.export_provenance import mark_export
     from porting.g4_model_probe import (
         dds_format,
         dds_to_nxtch,
@@ -3404,25 +3406,29 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
             "or set LEVEL5_G4_TEXTURE_CONVERTER to its executable."
         )
     mip_count = max(1, struct.unpack_from("<I", native_payload, 28)[0])
-    tmp = path.with_suffix(path.suffix + ".port_tmp.dds")
-    try:
-        if converter.name.casefold() == "texconv":
+    with tempfile.TemporaryDirectory(prefix="g4-dds-") as directory:
+        output_dir = Path(directory)
+        if converter.name.casefold() in {"texconv", "texconv.exe"}:
             command = [
                 str(converter), "-f", f"{compression}_UNORM", "-m", str(mip_count),
-                "-y", "-o", str(tmp.parent), str(path),
+                "-o", str(output_dir), str(path),
             ]
-            output = tmp.parent / f"{path.stem}.DDS"
+            output = output_dir / path.with_suffix(".dds").name
         else:
+            output = output_dir / "texture.dds"
             command = [
                 str(converter), f"--compression_format={compression}",
                 # Xcode's NVTT Production/Normal BC7 path aborts on valid
                 # transparent texels; ISPC Fastest remains deterministic and
                 # writes the same DX10/BC7 contract as the native archive.
                 "--compression_quality=Fastest", "--alpha_mode=Preserve",
-                f"--max_mipmaps={mip_count}", "--file_format=DDS", f"--output={tmp}", str(path),
+                f"--max_mipmaps={mip_count}", "--file_format=DDS", f"--output={output}", str(path),
             ]
-            output = tmp
         completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if not output.is_file():
+            upper_extension = output.with_suffix(".DDS")
+            if upper_extension.is_file():
+                output = upper_extension
         if completed.returncode != 0 or not output.is_file():
             detail = (completed.stderr or completed.stdout or "unknown encoder failure").strip()
             raise RuntimeError(f"DDS encoding failed for {path.name}: {detail}")
@@ -3430,10 +3436,6 @@ def png_to_dds(path: Path, native_payload: bytes) -> bytes:
         if native_dds_compression(payload) != compression:
             raise RuntimeError(f"DDS encoder produced the wrong format for {path.name}")
         return payload
-    finally:
-        tmp.unlink(missing_ok=True)
-        if converter.name.casefold() == "texconv":
-            (tmp.parent / f"{path.stem}.DDS").unlink(missing_ok=True)
 
 
 def replacement_texture(path: Path, native_payload: bytes) -> bytes:
@@ -4041,6 +4043,7 @@ def write_port(
         model_hashes = list(struct.unpack_from(f"<{target_skeleton['joint_count']}I", g4md, joint_hash_start))
         if model_hashes != list(target_skeleton["joint_hashes"]):
             raise ValueError("G4MD joint hashes do not match the exported G4SK joint order")
+    version = tuple(map(int, os.environ.get("LEVEL5_G4_EXPORT_VERSION", "").split("."))) if os.environ.get("LEVEL5_G4_EXPORT_VERSION") else ()
     with tempfile.TemporaryDirectory(prefix=".g4tx-", dir=texture_out.parent) as staging:
         staged_texture = Path(staging) / texture_out.name
         if texture_mode == "custom":
@@ -4055,9 +4058,11 @@ def write_port(
         else:
             raise ValueError(f"unsupported texture mode {texture_mode!r}")
         validation["texture_bindings"] = validate_model_texture_bindings(g4md, staged_texture.read_bytes())
+        if version and texture_mode == "custom" and "dx11" in texture_rel.parts:
+            staged_texture.write_bytes(mark_export(staged_texture.read_bytes(), ".g4tx", version))
         os.replace(staged_texture, texture_out)
-    common_out.write_bytes(g4md)
-    mg_out.write_bytes(g4mg)
+    common_out.write_bytes(mark_export(g4md, ".g4md", version) if version else g4md)
+    mg_out.write_bytes(mark_export(g4mg, ".g4mg", version) if version else g4mg)
     local_g4sk_out = None
     if config.target_g4sk_path:
         local_g4sk_out = common_out.with_suffix(".g4sk")

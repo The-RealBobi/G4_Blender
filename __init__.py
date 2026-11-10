@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (2, 1, 0),
+    "version": (2, 1, 1),
     "blender": (4, 0, 0),
     "location": "File > Import/Export; View3D > Sidebar > Level-5",
     "description": "Import, animate and port Level-5 G4 game assets.",
