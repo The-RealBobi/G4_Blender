@@ -240,8 +240,16 @@ def _draw():
     shading = context.space_data.shading.type
     if shading not in {'MATERIAL','RENDERED'} and not (authored and shading == 'SOLID'):
         return
-    objects = [o for o in context.visible_objects if o.type == 'MESH' and
-               not any(m and m.get('g4_effect_preview') for m in o.data.materials)]
+    objects = [obj for obj in context.visible_objects if obj.type == 'MESH']
+    if any(
+        material and (
+            material.get('g4_effect_preview') or material.get('g4_effect_shader_family')
+        )
+        for obj in objects for material in obj.data.materials
+    ):
+        # POST_VIEW runs after Eevee composites translucent FX. Its depth
+        # buffer cannot tell us how much of the character ink is visible.
+        return
     outlined_objects = {
         o.as_pointer() for o in objects
         if game and shading in {'MATERIAL', 'RENDERED'} and any(m and m.get('g4_level5_toon') for m in o.data.materials)

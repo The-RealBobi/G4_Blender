@@ -7,9 +7,24 @@ import zlib
 
 T1_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in ('Effect_T1', 'Effect_T1_low'))
 T1M1_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in ('Effect_T1M1', 'Effect_T1M1_low'))
+T2_SHADER_HASH = zlib.crc32(b'Effect_T2')
+T2M1_SHADER_HASH = zlib.crc32(b'Effect_T2M1')
+T1M1_AREA_SHADER_HASH = zlib.crc32(b'Effect_T1M1_area')
 THRESHOLD_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in ('Effect_ThresholdGrd', 'Effect_ThresholdGrd_low'))
+SOLID_TOON1_SHADER_HASH = zlib.crc32(b'Effect_SolidToon1')
+T1M1_FLOW_SHADER_HASH = zlib.crc32(b'Effect_T1M1Flow')
+T1_FLOW2_SHADER_HASH = zlib.crc32(b'Effect_T1Flow2')
+DIFFERENCE_FLOW_HASHES = {zlib.crc32(b'Effect_DifferenceFlow'): 4, zlib.crc32(b'Effect_DifferenceFlowM'): 5}
+BALL_AURA_SHADER_HASH = zlib.crc32(b'Effect_BallAura1')
+T3_THRESHOLD_NO_FLOW_HASH = zlib.crc32(b'Effect_T3Threshold')
+T1M1_MORPH_SHADER_HASH = zlib.crc32(b'Effect_T1M1Morph')
+VDISP_RIM_SHADER_HASH = zlib.crc32(b'Effect_VDispRim')
+T1M1_RIM_SHADER_HASH = zlib.crc32(b'Effect_T1M1Rim')
 T3_THRESHOLD_SHADER_HASH = zlib.crc32(b'Effect_T3ThresholdF')
 
+DISTORTION_SHADER_HASHES = frozenset(zlib.crc32(name.encode('ascii')) for name in (
+    'Effect_Distortion', 'Effect_DistortionBlur',
+))
 
 @dataclass(frozen=True)
 class EffectTexture:
@@ -34,12 +49,34 @@ def blender_uv_rows(matrix: list[float]) -> tuple[tuple[float, float, float], tu
 
 def static_effect_material(record: dict) -> EffectMaterial | None:
     shader = record.get('shader_hash')
-    if shader in T1_SHADER_HASHES:
-        texture_count = 1
-    elif shader in T1M1_SHADER_HASHES:
-        texture_count = 2
-    elif shader in THRESHOLD_SHADER_HASHES:
+    if shader in DIFFERENCE_FLOW_HASHES:
+        texture_count = DIFFERENCE_FLOW_HASHES[shader]
+    elif shader in (T1_FLOW2_SHADER_HASH, T1M1_FLOW_SHADER_HASH):
         texture_count = 3
+        vectors = record.get("shader_parameters", [])
+        if not vectors or len(vectors[0]) != 4:
+            return None
+    elif shader in T1_SHADER_HASHES:
+        texture_count = 1
+    elif shader in (T2_SHADER_HASH, T2M1_SHADER_HASH, T1M1_AREA_SHADER_HASH):
+        texture_count = 3 if shader == T2M1_SHADER_HASH else 2
+        vectors = record.get('shader_parameters', [])
+        parameter_index = 2 if shader == T1M1_AREA_SHADER_HASH else 0
+        if len(vectors) <= parameter_index or len(vectors[parameter_index]) != 4:
+            return None
+    elif shader in T1M1_SHADER_HASHES or shader == T1M1_MORPH_SHADER_HASH:
+        texture_count = 2
+    elif shader in THRESHOLD_SHADER_HASHES or shader == BALL_AURA_SHADER_HASH:
+        texture_count = 3
+    elif shader == VDISP_RIM_SHADER_HASH:
+        texture_count = 3
+    elif shader == T1M1_RIM_SHADER_HASH:
+        texture_count = 4
+    elif shader == T3_THRESHOLD_NO_FLOW_HASH:
+        texture_count = 5
+        vectors = record.get("shader_parameters", [])
+        if len(vectors) < 4 or any(len(row) != 4 for row in vectors[:4]):
+            return None
     elif shader == T3_THRESHOLD_SHADER_HASH:
         texture_count = 6
     else:
@@ -54,7 +91,7 @@ def static_effect_material(record: dict) -> EffectMaterial | None:
         if (len(parameters) < 7 or any(len(row) != 4 for row in parameters[:7])
                 or parameters[3][2:] != [1.0, 1.0] or parameters[5][2] != 0.0):
             return None
-    if texture_count == 3:
+    if shader in THRESHOLD_SHADER_HASHES or shader == BALL_AURA_SHADER_HASH:
         parameters = record.get('shader_parameters', [])
         if len(parameters) < 3 or any(len(row) != 4 for row in parameters[:3]):
             return None

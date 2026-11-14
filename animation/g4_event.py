@@ -282,7 +282,9 @@ def actor_point_assignments_from_entries(entries: list[dict]) -> dict[str, dict[
             actor = actor.replace("<type>", template_types.get(actor, "??"))
             actor = actor.replace("<no>", "*").replace("_p<variation>", "")
         else:
-            match = ACTOR_INSTANCE_RE.fullmatch(actor)
+            match = re.fullmatch(r"(ev\d+_\d+)(?:_s\d+_p(?:\d+|<variation>))?", actor)
+            if match is None:
+                match = ACTOR_INSTANCE_RE.fullmatch(actor.replace("_p<variation>", "_p00"))
             if match is None:
                 continue
             actor = match.group(1).lower()

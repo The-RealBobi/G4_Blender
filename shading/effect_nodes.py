@@ -3,7 +3,11 @@ from pathlib import Path
 
 import bpy
 
-from ..effects.materials import static_effect_material
+from ..effects.materials import (
+    BALL_AURA_SHADER_HASH, DIFFERENCE_FLOW_HASHES, T1_FLOW2_SHADER_HASH, T1M1_FLOW_SHADER_HASH, T1M1_RIM_SHADER_HASH,
+    T1M1_AREA_SHADER_HASH, T2_SHADER_HASH, T2M1_SHADER_HASH, T3_THRESHOLD_NO_FLOW_HASH,
+    T1M1_MORPH_SHADER_HASH, VDISP_RIM_SHADER_HASH, static_effect_material,
+)
 from .character_lighting import color_transfer
 
 
@@ -63,7 +67,7 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             return math('PINGPONG', coordinate, 1.0)
         return math('MINIMUM', math('MAXIMUM', coordinate, 0.0), 1.0)
 
-    def sample_texture(slot, settings, coordinates):
+    def sample_texture(slot, settings, coordinates, displacement=None):
         texture = nodes.new('ShaderNodeTexImage')
         texture.name = 'Effect Texture' if slot == 0 else f'Effect Mask {slot}'
         texture.image = images[slot]
@@ -85,9 +89,16 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             return texture
         uv = nodes.new('ShaderNodeUVMap')
         uv.uv_map = 'UVMap' if slot == 0 else f'UVMap{slot}'
+        source_uv = uv.outputs[0]
+        if displacement is not None:
+            offset = nodes.new('ShaderNodeVectorMath')
+            offset.operation = 'ADD'
+            links.new(source_uv, offset.inputs[0])
+            links.new(displacement, offset.inputs[1])
+            source_uv = offset.outputs[0]
         row_u, row_v = settings.uv_rows
         if (row_u == (1.0, 0.0, 0.0) and row_v == (0.0, 1.0, 0.0)):
-            coordinates = uv.outputs[0]
+            coordinates = source_uv
             if not native_addressing:
                 split = nodes.new('ShaderNodeSeparateXYZ')
                 links.new(coordinates, split.inputs[0])
@@ -98,7 +109,7 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
             links.new(coordinates, texture.inputs['Vector'])
             return texture
         split_uv = nodes.new('ShaderNodeSeparateXYZ')
-        links.new(uv.outputs[0], split_uv.inputs[0])
+        links.new(source_uv, split_uv.inputs[0])
         affine_uv = nodes.new('ShaderNodeCombineXYZ')
         links.new(split_uv.outputs[0], affine_uv.inputs[0])
         links.new(split_uv.outputs[1], affine_uv.inputs[1])
@@ -142,7 +153,79 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         links.new(texture.outputs['Color'], channels.inputs[0])
         return channels.outputs['Red']
 
-    if len(parameters.textures) == 6:
+    def parameter(index, component):
+        node = nodes.new('ShaderNodeValue')
+        node.name = f'Effect Parameter {index} {"XYZW"[component]}'
+        node.outputs[0].default_value = record['shader_parameters'][index][component]
+        return node.outputs[0]
+
+    shader = record.get('shader_hash')
+    if shader in (T2_SHADER_HASH, T2M1_SHADER_HASH):
+        first, second = (sample_texture(i, parameters.textures[i], None) for i in range(2))
+        second_alpha = second.outputs['Alpha']
+        first_weight = math('SUBTRACT', 1.0, math('MULTIPLY', second_alpha, parameter(0, 3)))
+        layers = []
+        for sample, weight in ((first, first_weight), (second, second_alpha)):
+            weighted = nodes.new('ShaderNodeVectorMath')
+            weighted.operation = 'SCALE'
+            links.new(sample.outputs['Color'], weighted.inputs[0])
+            links.new(weight, weighted.inputs['Scale'])
+            layers.append(weighted.outputs[0])
+        composite = nodes.new('ShaderNodeMixRGB')
+        composite.blend_type = 'ADD'
+        composite.use_clamp = True
+        composite.inputs[0].default_value = 1.0
+        for index, layer in enumerate(layers, 1):
+            links.new(layer, composite.inputs[index])
+        texture_color = composite.outputs[0]
+        coverage = saturate(math('ADD', first.outputs['Alpha'], second_alpha))
+        if shader == T2M1_SHADER_HASH:
+            coverage = math('MULTIPLY', coverage, red(sample_texture(2, parameters.textures[2], None)))
+        alpha = math('MULTIPLY', coverage, math('MULTIPLY', vertex.outputs['Alpha'], diffuse_alpha.outputs[0]))
+    elif shader in DIFFERENCE_FLOW_HASHES:
+        # Preview the difference and palette using the native texture slots.
+        flow = sample_texture(3, parameters.textures[3], None)
+        displacement = nodes.new('ShaderNodeVectorMath')
+        displacement.operation = 'MULTIPLY_ADD'
+        strength = (record.get('shader_parameters') or [(0.0,)])[0][0]
+        links.new(flow.outputs['Color'], displacement.inputs[0])
+        displacement.inputs[1].default_value = (2 * strength, -2 * strength, 0)
+        displacement.inputs[2].default_value = (-strength, strength, 0)
+        first = sample_texture(0, parameters.textures[0], None, displacement.outputs[0])
+        second = sample_texture(1, parameters.textures[1], None)
+        difference = saturate(math('SUBTRACT', red(first), red(second)))
+        uv = nodes.new('ShaderNodeCombineXYZ')
+        links.new(difference, uv.inputs['X'])
+        palette = sample_texture(2, parameters.textures[2], uv.outputs[0])
+        texture_color = palette.outputs['Color']
+        alpha = math('MULTIPLY', difference, palette.outputs['Alpha'])
+        alpha = math('MULTIPLY', alpha, math('MULTIPLY', vertex.outputs['Alpha'], diffuse_alpha.outputs[0]))
+        if len(parameters.textures) == 5:
+            alpha = math('MULTIPLY', alpha, red(sample_texture(4, parameters.textures[4], None)))
+    elif shader == T3_THRESHOLD_NO_FLOW_HASH:
+        # Preview the five material inputs without framebuffer depth.
+        mask = red(sample_texture(3, parameters.textures[3], None))
+        coverage = red(sample_texture(4, parameters.textures[4], None))
+        samples = [sample_texture(i, parameters.textures[i], None) for i in range(3)]
+        texture_color = samples[2].outputs['Color']
+        texture_alpha = samples[2].outputs['Alpha']
+        for index in (1, 0):
+            row = record['shader_parameters'][index]
+            threshold = nodes.new('ShaderNodeValue')
+            threshold.name = f'Effect Parameter {index} Y'
+            threshold.outputs[0].default_value = row[1]
+            weight = saturate(math('DIVIDE', math('SUBTRACT', mask,
+                math('SUBTRACT', 1.0, threshold.outputs[0])), max(0.01, 1.0 - row[0])))
+            mix = nodes.new('ShaderNodeMixRGB')
+            links.new(weight, mix.inputs[0])
+            links.new(texture_color, mix.inputs[1])
+            links.new(samples[index].outputs['Color'], mix.inputs[2])
+            texture_color = mix.outputs[0]
+            texture_alpha = math('ADD', texture_alpha, math('MULTIPLY', weight,
+                math('SUBTRACT', samples[index].outputs['Alpha'], texture_alpha)))
+        alpha = math('MULTIPLY', math('MULTIPLY', coverage, texture_alpha),
+                     math('MULTIPLY', vertex.outputs['Alpha'], diffuse_alpha.outputs[0]))
+    elif len(parameters.textures) == 6:
         p = record['shader_parameters']
         animated_parameters = {}
         for index in (1, 2):
@@ -301,13 +384,65 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         alpha = math('MULTIPLY', math('MULTIPLY', coverage, opacity_alpha), diffuse_alpha.outputs[0])
         alpha = math('MULTIPLY', alpha, texture.outputs['Alpha'])
     else:
-        texture = sample_texture(0, parameters.textures[0], None)
+        displacement = None
+        if shader in (T1_FLOW2_SHADER_HASH, T1M1_FLOW_SHADER_HASH):
+            native = record['shader_parameters'][0]
+            strength = nodes.new('ShaderNodeValue')
+            strength.name = 'Effect Parameter 0 X'
+            strength.outputs[0].default_value = native[0]
+            directions = []
+            for slot in ((1, 2) if shader == T1_FLOW2_SHADER_HASH else (2,)):
+                flow = sample_texture(slot, parameters.textures[slot], None)
+                direction = nodes.new('ShaderNodeVectorMath')
+                direction.operation = 'MULTIPLY_ADD'
+                links.new(flow.outputs['Color'], direction.inputs[0])
+                direction.inputs[1].default_value = (2.0, -2.0, 0.0)
+                direction.inputs[2].default_value = (-1.0, 1.0, 0.0)
+                directions.append(direction.outputs[0])
+            offset = directions[0]
+            if shader == T1_FLOW2_SHADER_HASH:
+                weight = nodes.new('ShaderNodeValue')
+                weight.name = 'Effect Parameter 0 W'
+                weight.outputs[0].default_value = native[3]
+                weighted = nodes.new('ShaderNodeVectorMath')
+                weighted.operation = 'MULTIPLY_ADD'
+                links.new(directions[1], weighted.inputs[0])
+                links.new(weight.outputs[0], weighted.inputs[1])
+                links.new(offset, weighted.inputs[2])
+                offset = weighted.outputs[0]
+            scale = nodes.new('ShaderNodeVectorMath')
+            scale.operation = 'SCALE'
+            links.new(offset, scale.inputs[0])
+            links.new(strength.outputs[0], scale.inputs['Scale'])
+            displacement = scale.outputs[0]
+        texture = sample_texture(0, parameters.textures[0], None, displacement)
         alpha = math('MULTIPLY', vertex.outputs['Alpha'], diffuse_alpha.outputs[0])
         alpha = math('MULTIPLY', texture.outputs['Alpha'], math('MINIMUM', alpha, 1.0))
-        if len(parameters.textures) == 2:
+        if len(parameters.textures) == 2 or shader in (T1M1_FLOW_SHADER_HASH, T1M1_RIM_SHADER_HASH):
             mask = sample_texture(1, parameters.textures[1], None)
             alpha = math('MULTIPLY', alpha, red(mask))
-    if len(parameters.textures) != 6:
+        if shader == T1M1_AREA_SHADER_HASH:
+            near, far = parameter(2, 0), parameter(2, 1)
+            distance = nodes.new('ShaderNodeCameraData').outputs['View Distance']
+            fade = saturate(math('DIVIDE', math('SUBTRACT', distance, near), math('SUBTRACT', far, near)))
+            alpha = math('MULTIPLY', alpha, math('SUBTRACT', 1.0, fade))
+        if shader in (T1M1_RIM_SHADER_HASH, VDISP_RIM_SHADER_HASH):
+            # Approximate the rim with a view-facing lookup and its native mask.
+            facing = nodes.new('ShaderNodeLayerWeight')
+            coords = nodes.new('ShaderNodeCombineXYZ')
+            links.new(facing.outputs['Facing'], coords.inputs['X'])
+            ramp_slot = 2 if shader == T1M1_RIM_SHADER_HASH else 1
+            ramp = sample_texture(ramp_slot, parameters.textures[ramp_slot], coords.outputs[0])
+            rim_mask = sample_texture(ramp_slot + 1, parameters.textures[ramp_slot + 1], None)
+            rim = nodes.new('ShaderNodeMixRGB')
+            rim.blend_type = 'MULTIPLY'
+            links.new(red(rim_mask), rim.inputs[0])
+            links.new(texture.outputs['Color'], rim.inputs[1])
+            links.new(ramp.outputs['Color'], rim.inputs[2])
+            texture_color = rim.outputs[0]
+    if (len(parameters.textures) < 5 and shader not in
+            (T1M1_RIM_SHADER_HASH, VDISP_RIM_SHADER_HASH, T2_SHADER_HASH, T2M1_SHADER_HASH)
+            and shader not in DIFFERENCE_FLOW_HASHES):
         texture_color = texture.outputs['Color']
     product = nodes.new('ShaderNodeVectorMath')
     product.operation = 'MULTIPLY'
@@ -335,5 +470,22 @@ def build_static_effect_material(material: bpy.types.Material, record: dict) -> 
         material.blend_method = 'BLEND'
     if hasattr(material, 'use_transparent_shadow'):
         material.use_transparent_shadow = False
-    material['g4_effect_preview'] = {1: 'T1_STATIC', 2: 'T1M1_STATIC', 3: 'THRESHOLD_STATIC', 6: 'T3_THRESHOLD'}[len(parameters.textures)]
+    if shader in (T2_SHADER_HASH, T2M1_SHADER_HASH):
+        material['g4_effect_preview'] = 'T2' if shader == T2_SHADER_HASH else 'T2M1'
+    elif shader == T1M1_AREA_SHADER_HASH:
+        material['g4_effect_preview'] = 'T1M1_AREA_PREVIEW'
+    elif shader in DIFFERENCE_FLOW_HASHES:
+        material['g4_effect_preview'] = 'DIFFERENCE_FLOW_PREVIEW'
+    elif shader == T1M1_MORPH_SHADER_HASH:
+        material['g4_effect_preview'] = 'T1M1_MORPH_SURFACE'
+    elif shader == VDISP_RIM_SHADER_HASH:
+        material['g4_effect_preview'] = 'VDISP_RIM_SURFACE'
+    elif shader == BALL_AURA_SHADER_HASH:
+        material['g4_effect_preview'] = 'BALL_AURA_PREVIEW'
+    elif shader in (T1_FLOW2_SHADER_HASH, T1M1_FLOW_SHADER_HASH):
+        material['g4_effect_preview'] = 'T1_FLOW2' if shader == T1_FLOW2_SHADER_HASH else 'T1M1_FLOW'
+    else:
+        material['g4_effect_preview'] = {
+            1: 'T1_STATIC', 2: 'T1M1_STATIC', 3: 'THRESHOLD_STATIC', 4: 'T1M1_RIM', 5: 'T3_THRESHOLD_PREVIEW', 6: 'T3_THRESHOLD'
+        }[len(parameters.textures)]
     return True

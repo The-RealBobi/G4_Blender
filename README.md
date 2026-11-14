@@ -47,3 +47,5 @@ Compatibility can vary between games and assets, so support for every file isn't
 ## License
 
 G4_Blender is licensed under the **GNU General Public License v3.0 or later**. See [LICENSE.MD](LICENSE.MD) for details.
+
+Independent model export supports both **G4MD file** and **G4PKM file** under **File > Export > LEVEL5 files > Models**. G4PKM contains the model descriptor and skeleton. Keep the exported G4MG and platform G4TX files alongside the package in their original folders.

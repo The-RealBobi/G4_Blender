@@ -117,6 +117,7 @@ def native_map_material(record: dict) -> NativeMapMaterial | None:
         zlib.crc32(name.encode('ascii')): (name, count, alpha)
         for name, count, alpha in (
             ('Map_PbrT1', 2, None), ('Map_PbrT2', 4, None),
+            ('Map_PbrT1L', 2, None), ('Map_PbrT1LCutout', 3, 2),
             ('Map_Basic', 1, None), ('MapNolight', 1, None),
             ('Map_PbrT1Cutout', 3, 2), ('Map_BasicCutout', 2, 1),
             ('Map_ParallaxGrass1', 2, None),
@@ -132,10 +133,11 @@ def native_map_material(record: dict) -> NativeMapMaterial | None:
     params = record.get('shader_parameters', [])
     pbr = name.startswith('Map_Pbr')
     grass = name == 'Map_ParallaxGrass1'
+    compact_pbr = name in {'Map_PbrT1L', 'Map_PbrT1LCutout'}
     if (not isinstance(colors, (list, tuple)) or len(colors) != 12
             or len(refs) != count or len(matrices) != count
             or any(len(v) != 4 for v in params)
-            or (pbr and len(params) < 7) or (grass and len(params) < 3)):
+            or (pbr and len(params) < (3 if compact_pbr else 7)) or (grass and len(params) < 3)):
         return None
     numbers = list(colors) + [v for row in matrices for v in row] + [v for row in params for v in row]
     if any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in numbers):
@@ -166,7 +168,7 @@ def native_map_material(record: dict) -> NativeMapMaterial | None:
     a, b, c, _, d, e, f, _ = matrix
     return NativeMapMaterial(
         name, tuple(colors[:4]), 0.0 if grass else max(0.0, colors[4]),
-        params[6][1] if pbr else 0.0, params[0][2] if params and not grass else 0.0,
+        params[6][1] if pbr and len(params) > 6 else 0.0, params[0][2] if params and not grass else 0.0,
         max(0.0, min(.99, params[2][1])) if pbr else 0.0,
         max(0.0, params[1][0]) if pbr else 0.0,
         (params[0][0], params[0][1]) if name == 'Map_PbrT2' else (1.0, 1.0),

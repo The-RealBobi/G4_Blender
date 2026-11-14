@@ -302,6 +302,9 @@ def join_event_effect_meshes(scene) -> int:
             material and material.get("g4_effect_preview") for material in obj.data.materials
         ):
             continue
+        if any(modifier.type == "NODES" and modifier.node_group
+               and modifier.node_group.get("g4_particle_geometry") for modifier in obj.modifiers):
+            continue
         parent = obj.parent
         if parent is not None and parent.type == "ARMATURE":
             groups[(parent, visibility_signature(obj))].append(obj)
@@ -683,7 +686,14 @@ def target_animation_bank_id(armature) -> str:
 
 
 def resolve_model_path(g4mt_path: Path, configured_root: str) -> Path | None:
+    waza = re.search(r"(?:^|_)(ev\d+_\d+)(?=_s\d+_p\d+_c\d+$|$)", g4mt_path.stem, re.IGNORECASE)
     for raw_root in candidate_data_roots(g4mt_path, configured_root):
+        if waza:
+            stem = waza.group(1).lower()
+            base = raw_root / "common" / "chr" / "_waza" / stem / stem
+            for extension in (".g4pkm", ".g4md"):
+                if (candidate := base.with_suffix(extension)).is_file():
+                    return candidate
         model_roots = (
             raw_root / "common" / "chr",
             raw_root / "common" / "event" / "ev_item",
@@ -776,7 +786,8 @@ def resolve_skeleton_path(model_path: Path | None) -> Path | None:
     # palette; decoding against that fallback stretches skinned descendants.
     try:
         configure_raw_data_root_from_path(model_path)
-        skeleton_data, skeleton_source = find_skeleton_for_model(model_path)
+        pack_data = model_path.read_bytes() if model_path.suffix.lower() == ".g4pkm" else None
+        skeleton_data, skeleton_source = find_skeleton_for_model(model_path, pack_data)
     except (OSError, ValueError, RuntimeError):
         skeleton_data, skeleton_source = None, None
     if skeleton_data:
@@ -3476,7 +3487,7 @@ def effect_g4ma_material_targets(paths: list[Path], shader_params: list[dict]) -
     return resolved
 
 
-def create_effect_g4ma_actions(paths: list[Path], materials_by_crc: dict[int, list[object]]) -> list[str]:
+def create_effect_g4ma_actions(paths: list[Path], materials_by_crc: dict[int, list[object]], cut: str) -> list[str]:
     """Preserve resolved G4MA curves as Blender actions without guessing sockets."""
     action_names = []
     for path in paths:
@@ -3486,7 +3497,10 @@ def create_effect_g4ma_actions(paths: list[Path], materials_by_crc: dict[int, li
             continue
         if parsed.get("magic") != "G4MA":
             continue
-        for clip in parsed.get("clips", []):
+        clips = parsed.get("clips", [])
+        for clip in clips:
+            if len(clips) > 1 and re.fullmatch(r"c\d{4}", clip["name"]) and clip["name"] != cut:
+                continue
             try:
                 motion = decode_material_motion(path, clip["name"])
             except (OSError, ValueError, struct.error):
@@ -3572,9 +3586,19 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
                     match.decode("ascii", errors="ignore")
                     for match in re.findall(rb"[A-Za-z0-9_./-]+\.(?:vfxo|pfxo|cfxo|gfxo)", data)
                 )
-            results.append({
+            cuts = {cut} if cut else set()
+            if model.stem.casefold() in {event_key, f"{event_key}0", directory.name.casefold()}:
+                data = model.read_bytes()
+                cuts = {
+                    clip.name.lower()
+                    for _, offset, size in g4pk_entries(data)
+                    if data[offset:offset + 4] == b"G4MT"
+                    for clip in parse_g4mt_bank(data[offset:offset + size], str(model)).clips
+                    if clip.name.lower() in available_cuts
+                } or cuts
+            candidate = {
                 "name": asset_directory.name,
-                "model": str(model) if model else "",
+                "model": str(model),
                 "particle": str(particle) if particle else "",
                 "particle_library": particle_library,
                 "particle_library_error": particle_library_error,
@@ -3583,8 +3607,8 @@ def discover_event_effects(directory: Path, prefs) -> list[dict]:
                 "shader_params": shader_params,
                 "g4ma_material_targets": effect_g4ma_material_targets(material_animations, shader_params),
                 "shaders": sorted(shader_names),
-                "cut": cut,
-            })
+            }
+            results.extend(dict(candidate, cut=value) for value in sorted(cuts, key=cut_sort_key))
         if results:
             break
     return results
@@ -3611,8 +3635,12 @@ def decode_event_effect_motions(directory: Path, prefs, temporary_directory: Pat
     return motions
 
 
-def configure_event_effect_materials(imported: set[object]) -> list[str]:
+def configure_event_effect_materials(imported: set[object], records: list[dict]) -> list[str]:
     """Preserve reconstructed shaders and provide a fallback for other effects."""
+    from .. import blender_base_name, connect_normal_map, load_image
+    from ..effects.materials import DISTORTION_SHADER_HASHES, SOLID_TOON1_SHADER_HASH
+
+    records_by_name = {record["name"]: record for record in records}
     effect_tokens = ("effect_", "ma_smoke", "_aura", "threshold")
     converted = []
     seen = set()
@@ -3623,14 +3651,50 @@ def configure_event_effect_materials(imported: set[object]) -> list[str]:
             if material is None or material in seen:
                 continue
             seen.add(material)
-            if material.get("g4_effect_preview") in {"T1_STATIC", "T1M1_STATIC", "THRESHOLD_STATIC", "T3_THRESHOLD", "FAKE_PARTICLE"}:
+            if material.get("g4_effect_preview"):
                 converted.append(material.name)
                 continue
             name = material.name.lower()
-            if not any(token in name for token in effect_tokens):
+            record = records_by_name.get(blender_base_name(material.name), {})
+            shader = record.get("shader_hash")
+            if shader == SOLID_TOON1_SHADER_HASH:
+                # Keep solids lit. The native shadow/ramp and sphere passes
+                # are approximated by Eevee's surface lighting.
+                tree = material.node_tree
+                surface = next((node for node in tree.nodes if node.type == "BSDF_PRINCIPLED"), None) if tree else None
+                if surface is not None:
+                    refs = record.get("texture_refs", ())
+                    if refs and (path := refs[0].get("texture_path")) and Path(path).is_file():
+                        image = load_image(Path(path))
+                        if image is not None:
+                            color = surface.inputs["Base Color"]
+                            texture = next((node for node in tree.nodes if node.type == "TEX_IMAGE" and node.image == image), None)
+                            if texture is None:
+                                texture = tree.nodes.new("ShaderNodeTexImage")
+                                texture.image = image
+                            tree.links.new(texture.outputs["Color"], color)
+                    if (len(refs) > 1 and not surface.inputs["Normal"].is_linked
+                            and (path := refs[1].get("texture_path")) and Path(path).is_file()):
+                        connect_normal_map(material, surface, Path(path))
+                    surface.inputs["Roughness"].default_value = 0.85
+                    converted.append(material.name)
+                continue
+            distortion = shader in DISTORTION_SHADER_HASHES
+            if not distortion and not any(token in name for token in effect_tokens):
                 continue
             nodes = material.node_tree.nodes if material.use_nodes and material.node_tree else None
             if nodes is None:
+                continue
+            if distortion:
+                # The native pass samples the prior scene color. Without that buffer,
+                # keep the geometry in the scene without covering the color pass.
+                nodes.clear()
+                output = nodes.new("ShaderNodeOutputMaterial")
+                transparent = nodes.new("ShaderNodeBsdfTransparent")
+                material.node_tree.links.new(transparent.outputs[0], output.inputs["Surface"])
+                material.surface_render_method = "DITHERED"
+                material.use_transparent_shadow = False
+                material["g4_effect_shader_family"] = "scene_distortion"
                 continue
             images = [node.image for node in nodes if node.bl_idname == "ShaderNodeTexImage" and node.image]
             image = images[0] if images else None
@@ -3708,21 +3772,18 @@ def import_event_effect_models(
             scene.render.fps = 60
             scene.render.fps_base = 1.0
             try:
-                result = bpy.ops.import_scene.level5_g4(
-                    filepath=str(model_path),
-                    create_report_text=False,
-                    import_character_parts=False,
-                    event_effects=True,
+                importer = model_importer_module()
+                summary, _ = importer.import_g4_model(
+                    model_path, importer.addon_preferences(), False,
+                    event_effects=True, event_effect_cut=cut,
                 )
-            except RuntimeError as exc:
+            except (OSError, ValueError, RuntimeError) as exc:
                 for obj in set(bpy.data.objects) - before:
                     bpy.data.objects.remove(obj, do_unlink=True)
                 failed_models.append({"model": str(model_path), "error": str(exc)})
                 continue
             finally:
                 scene.frame_start, scene.frame_end, scene.render.fps, scene.render.fps_base = previous_timing
-            if "FINISHED" not in result:
-                continue
             imported = set(bpy.data.objects) - before
             root = bpy.data.objects.new(f"{candidate['name']} [{cut}]", None)
             bpy.context.scene.collection.objects.link(root)
@@ -3731,7 +3792,7 @@ def import_event_effect_models(
                     world = obj.matrix_world.copy()
                     obj.parent = root
                     obj.matrix_world = world
-            effect_materials = configure_event_effect_materials(imported)
+            effect_materials = configure_event_effect_materials(imported, summary.get("material_records", []))
             root["g4_event_effect_model"] = str(model_path)
             root["g4_event_effect_cut"] = cut
             root["g4_event_effect_start_frame"] = cut_starts[cut]
@@ -3776,6 +3837,7 @@ def import_event_effect_models(
                 create_effect_g4ma_actions(
                     [Path(path) for path in candidate.get("material_animations") or []],
                     materials_by_crc,
+                    cut,
                 )
             )
             motion = motions.get(cut)
@@ -5131,6 +5193,10 @@ def event_accessory_from_body(body_model: str, prefs) -> str:
     return str(accessory) if accessory is not None else ""
 
 
+def event_part_body_changed(item, _context) -> None:
+    item.accessory_model = event_accessory_from_body(item.body_model, addon_preferences())
+
+
 def event_part_head_changed(item, _context) -> None:
     defaults = event_part_defaults_from_head(item.head_model, addon_preferences())
     for key, value in defaults.items():
@@ -5144,7 +5210,7 @@ class G4EventCharacterPart(PropertyGroup):
     actor_id: StringProperty()
     actor_ids: StringProperty()
     head_model: StringProperty(name="Head", subtype="FILE_PATH", update=event_part_head_changed)
-    body_model: StringProperty(name="Body", subtype="FILE_PATH")
+    body_model: StringProperty(name="Body", subtype="FILE_PATH", update=event_part_body_changed)
     shoes_model: StringProperty(name="Shoes", subtype="FILE_PATH")
     accessory_model: StringProperty(name="Arms/Neck", subtype="FILE_PATH")
     skin_color: FloatVectorProperty(
@@ -5212,11 +5278,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
                 if event_part_needs_default(generic_saved.get("shoes", ""), "shoes", generic_overrides)
                 else generic_saved.get("shoes", "")
             )
-            item.accessory_model = (
-                event_defaults.get("accessory", "")
-                if event_part_needs_default(generic_saved.get("accessory", ""), "accessory", generic_overrides)
-                else generic_saved.get("accessory", "")
-            )
+            saved_accessory = generic_saved.get("accessory", "")
+            if not event_part_needs_default(saved_accessory, "accessory", generic_overrides):
+                item.accessory_model = saved_accessory
             item.gloves_model = generic_saved.get("gloves", "")
             item.armband_model = generic_saved.get("armband", "")
             item.nameplate_model = generic_saved.get("nameplate", "")
@@ -5255,7 +5319,9 @@ class IMPORT_OT_level5_g4_event_parts(Operator):
             )
             item.body_model = actor_parts.get("body", "")
             item.shoes_model = actor_parts.get("shoes", "")
-            item.accessory_model = actor_parts.get("accessory", "")
+            saved_accessory = actor_parts.get("accessory", "")
+            if not event_part_needs_default(saved_accessory, "accessory", overrides):
+                item.accessory_model = saved_accessory
             item.gloves_model = actor_parts.get("gloves", "")
             item.armband_model = actor_parts.get("armband", "")
             item.nameplate_model = actor_parts.get("nameplate", "")
@@ -5599,8 +5665,14 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             progress()
                         continue
                     defaults = event_part_defaults(directory, actor, prefs)
-                    overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(actor, {})
+                    head_defaults = event_part_defaults_from_head(actor_parts.get("head", ""), prefs)
+                    overrides = EVENT_PART_OVERRIDES.get(directory.name, {}).get(event_actor_base_id(actor), {})
+                    for key, value in head_defaults.items():
+                        if key not in overrides:
+                            defaults[key] = value
                     for key, value in defaults.items():
+                        if key == "accessory":
+                            continue
                         current = actor_parts.get(key, "")
                         current_path = Path(bpy.path.abspath(current)) if current else None
                         if (
@@ -5608,6 +5680,13 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
                             or (current_path is not None and not current_path.is_file())
                         ):
                             actor_parts[key] = value
+                    accessory = actor_parts.get("accessory", "")
+                    if (
+                        event_part_needs_default(accessory, "accessory", overrides)
+                        or not Path(bpy.path.abspath(accessory)).is_file()
+                        or "body" in overrides
+                    ):
+                        actor_parts["accessory"] = event_accessory_from_body(actor_parts.get("body", ""), prefs)
                     event_log.append(
                         f"{actor}: parts=" + json.dumps(
                             {key: actor_parts.get(key, "") for key in ("head", "body", "shoes", "accessory")},
@@ -5710,6 +5789,12 @@ class IMPORT_OT_level5_g4_event_folder(Operator):
             scene.render.fps_base = 1.0
             if camera_object is not None:
                 scene.camera = camera_object
+            event_rigs = set(actors)
+            for root in effect_roots:
+                event_rigs.update(obj for obj in root.children_recursive if obj.type == "ARMATURE")
+            for rig in event_rigs:
+                for bone in rig.data.bones:
+                    bone.hide = True
             for cut, frame in sorted(cut_frames.items(), key=lambda item: item[1]):
                 scene.timeline_markers.new(cut, frame=frame)
             scene.frame_set(1)
@@ -7225,7 +7310,7 @@ class EXPORT_OT_level5_g4mt_bank_family(Operator):
             )
         if armature is not None:
             model_path = Path(str(armature.get("g4_exported_model_path", "")))
-            if model_path.suffix.lower() == ".g4md" and not self.output_directory:
+            if model_path.suffix.lower() in {".g4md", ".g4pkm"} and not self.output_directory:
                 data_root = next((parent for parent in model_path.parents if parent.name.casefold() == "data"), None)
                 self.output_directory = str(data_root or model_path.parent)
         return context.window_manager.invoke_props_dialog(self, width=560)
@@ -7312,6 +7397,10 @@ class EXPORT_OT_level5_g4mt_bank_family(Operator):
             )
             target_skeleton_value = str(armature.get("g4_exported_skeleton_path", ""))
             target_skeleton_path = Path(target_skeleton_value) if target_skeleton_value else None
+            if target_skeleton_path is None or not target_skeleton_path.is_file():
+                model_path = Path(str(armature.get("g4_exported_model_path", "")))
+                if model_path.suffix.lower() == ".g4pkm" and model_path.is_file():
+                    target_skeleton_path = resolve_skeleton_path(model_path)
             if target_skeleton_path is None or not target_skeleton_path.is_file():
                 raise RuntimeError("Export the target model first so its G4SK can be used for animation retargeting")
             target_armature = create_g4sk_armature(target_skeleton_path)
@@ -7724,7 +7813,7 @@ class EXPORT_OT_level5_g4mt_victorytool_family(Operator):
             return {"CANCELLED"}
 
         model_path = Path(str(armature.get("g4_exported_model_path", ""))).resolve()
-        if model_path.suffix.lower() != ".g4md" or not model_path.is_file():
+        if model_path.suffix.lower() not in {".g4md", ".g4pkm"} or not model_path.is_file():
             self.report({"ERROR"}, "Export the model before exporting animations")
             return {"CANCELLED"}
         try:
@@ -7762,7 +7851,8 @@ class EXPORT_OT_level5_g4mt_victorytool_family(Operator):
         exported_skeleton = str(armature.get("g4_exported_skeleton_path", ""))
         target_skeleton_path = Path(exported_skeleton) if exported_skeleton else None
         if target_skeleton_path is None or not target_skeleton_path.is_file():
-            target_skeleton_path = g4_port_addon.active_rig_skeleton_path(props, original_model)
+            target_skeleton_path = (resolve_skeleton_path(model_path) if model_path.suffix.lower() == ".g4pkm"
+                                    else g4_port_addon.active_rig_skeleton_path(props, original_model))
         if target_skeleton_path is None or not target_skeleton_path.is_file():
             self.report({"ERROR"}, "Could not resolve the G4SK used by the original model")
             return {"CANCELLED"}
@@ -7968,7 +8058,7 @@ def generated_g4mt_output_path(armature, source_path: Path) -> Path | None:
     model_value = str(armature.get("g4_exported_model_path", "")) if armature else ""
     model_path = Path(model_value) if model_value else None
     bank = re.fullmatch(r"(.+)_p([0-9]{3})", source_path.stem, re.IGNORECASE)
-    if (model_path is None or model_path.suffix.lower() != ".g4md" or not model_path.is_file()
+    if (model_path is None or model_path.suffix.lower() not in {".g4md", ".g4pkm"} or not model_path.is_file()
             or not model_path.with_suffix(".g4anim.json").is_file() or bank is None
             or not source_path.parent.name):
         return None

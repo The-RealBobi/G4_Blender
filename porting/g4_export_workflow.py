@@ -186,6 +186,7 @@ class G4ExportState(PropertyGroup):
     bones: CollectionProperty(type=G4ExportBone)
     references: CollectionProperty(type=G4ExportReference)
     armature: PointerProperty(type=bpy.types.Object)
+    model_format: EnumProperty(name='Format', items=[('g4md', 'G4MD', ''), ('g4pkm', 'G4PKM', '')])
     model_name: StringProperty(name='Model name')
     prepare_victorytool: BoolProperty(name='Prepare model for VictoryTool', default=True)
     platform: EnumProperty(name='Platform', items=[('dx11', 'DX11', 'DDS textures under data/dx11'),
@@ -548,7 +549,7 @@ def export_workflow(context, directory: Path) -> Path:
     settings = state(context)
     prepare = (lambda model: write_external_profile(context, model)) if settings.prepare_victorytool else None
     with export_surfaces(context):
-        return export_model_package(context, directory, settings.model_name, True, settings.platform, prepare)
+        return export_model_package(context, directory, settings.model_name, True, settings.platform, prepare, settings.model_format)
 
 
 WIZARD_STEPS = ('materials', 'rig', 'confirm')
@@ -837,6 +838,7 @@ def draw_confirmation(layout, context) -> None:
     layout.prop(settings, 'prepare_victorytool')
     if settings.prepare_victorytool:
         layout.label(text='Animation banks are exported in VictoryTool.', icon='INFO')
+    layout.prop(settings, 'model_format')
     layout.prop(settings, 'platform')
 
 

@@ -9,11 +9,11 @@ import re
 import tempfile
 
 import bpy
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy.types import Operator
 from mathutils import Matrix
 
-from .g4_model_writer import AuthoredMaterial, AuthoredTexture, bc7_dds_header, build_authored_model, build_authored_texture_archive
+from .g4_model_writer import AuthoredMaterial, AuthoredTexture, bc7_dds_header, build_authored_model, build_authored_texture_archive, build_model_pack
 from .g4_port import (Mesh, Vertex, RecordRule, STABLE_CUSTOM_VERTEX_COLOR,
                       apply_record_outline_rules, png_to_dds)
 try:
@@ -301,7 +301,10 @@ def export_authored_model(context: bpy.types.Context, directory: Path, model_nam
 
 
 def export_model_package(context: bpy.types.Context, directory: Path, model_name: str, selected_only: bool,
-                         platform: str, prepare_profile: Callable[[Path], None] | None) -> Path:
+                         platform: str, prepare_profile: Callable[[Path], None] | None,
+                         model_format: str = 'g4md') -> Path:
+    if model_format not in {'g4md', 'g4pkm'}:
+        raise ValueError('Choose G4MD or G4PKM')
     if platform not in {'dx11', 'nx', 'both'}:
         raise ValueError('Choose DX11, NX or Both')
     if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', model_name) is None:
@@ -343,22 +346,33 @@ def export_model_package(context: bpy.types.Context, directory: Path, model_name
         package = cache / 'package'
         common = package / 'data/common/chr' / model_name
         common.mkdir(parents=True)
-        for suffix, data in (('.g4md', resources.g4md), ('.g4mg', resources.g4mg), ('.g4sk', resources.g4sk)):
-            (common / f'{model_name}{suffix}').write_bytes(mark_export(data, suffix, version))
+        model_path = common / f'{model_name}.{model_format}'
+        model = mark_export(resources.g4md, '.g4md', version)
+        skeleton = mark_export(resources.g4sk, '.g4sk', version)
+        skeleton_path = common / f'{model_name}.g4sk'
+        (common / f'{model_name}.g4mg').write_bytes(mark_export(resources.g4mg, '.g4mg', version))
+        if model_format == 'g4pkm':
+            model_path.write_bytes(build_model_pack(model_name, model, skeleton))
+        else:
+            model_path.write_bytes(model)
+        if model_format == 'g4md' or prepare_profile is not None:
+            skeleton_path.write_bytes(skeleton)
         for target_platform in (('dx11', 'nx') if platform == 'both' else (platform,)):
             texture_dir = package / f'data/{target_platform}/chr' / model_name
             texture_dir.mkdir(parents=True)
             archive = resources.g4tx if target_platform == 'dx11' else build_authored_texture_archive(textures, 'nx')
             (texture_dir / f'{model_name}.g4tx').write_bytes(mark_export(archive, ".g4tx", version) if target_platform == "dx11" else archive)
         if prepare_profile is not None:
-            prepare_profile(common / f'{model_name}.g4md')
+            prepare_profile(model_path)
+            if model_format == 'g4pkm':
+                skeleton_path.unlink()
         if destination.exists():
             raise FileExistsError(f"The package {model_name!r} appeared during export; choose another name")
         os.rename(package, destination)
     if rig is not None and rig.is_editable:
-        model_path = (destination / 'data/common/chr' / model_name / f'{model_name}.g4md').resolve()
+        model_path = (destination / 'data/common/chr' / model_name / f'{model_name}.{model_format}').resolve()
         rig['g4_exported_model_path'] = str(model_path)
-        rig['g4_exported_skeleton_path'] = str(model_path.with_suffix('.g4sk'))
+        rig['g4_exported_skeleton_path'] = str(model_path.with_suffix('.g4sk')) if model_format == 'g4md' else ''
     return destination
 
 
@@ -372,15 +386,18 @@ class EXPORT_OT_level5_g4_model(Operator):
     model_name: StringProperty(name='Model Name', default='custom_model')
     selected_only: BoolProperty(name='Selected Meshes Only', default=True)
 
+    model_format: EnumProperty(items=[('g4md', 'G4MD', ''), ('g4pkm', 'G4PKM', '')])
+
     def invoke(self, context, event):
+        context.scene.level5_g4_export.model_format = self.model_format
         return bpy.ops.level5_g4_export.begin('INVOKE_DEFAULT')
 
     def execute(self, context):
         try:
             if not self.directory:
                 raise ValueError('Choose an output folder')
-            destination = export_authored_model(context, Path(bpy.path.abspath(self.directory)),
-                                                self.model_name, self.selected_only)
+            destination = export_model_package(context, Path(bpy.path.abspath(self.directory)),
+                                               self.model_name, self.selected_only, 'dx11', None, self.model_format)
         except (OSError, ValueError, RuntimeError) as error:
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}

@@ -247,6 +247,32 @@ def _model_descriptor(meshes: list[Mesh], records: list[dict], materials: list[A
     return bytes(md)
 
 
+def build_model_pack(stem: str, model: bytes, skeleton: bytes) -> bytes:
+    names = [f'{stem}.g4sk'.encode('ascii'), f'{stem}.g4md'.encode('ascii')]
+    if not stem or len(stem) > 64 or not all(c.isalnum() or c in '_-' for c in stem):
+        raise ValueError('Invalid G4PKM model name')
+    if not model.startswith(b'G4MD') or not skeleton.startswith(b'G4SK'):
+        raise ValueError('G4PKM requires G4MD and G4SK payloads')
+
+    header_size = 0x40
+    output = bytearray(0x60)
+    struct.pack_into('<4sHHI', output, 0, b'G4PK', header_size, 100, 0x00100000)
+    struct.pack_into('<I4H', output, 0x20, 2, 2, 4, 6, 7)
+    hashes = [zlib.crc32(name) for name in names]
+    struct.pack_into('<2I', output, 0x50, *hashes)
+    struct.pack_into('<2h', output, 0x58, *sorted(range(2), key=hashes.__getitem__))
+    struct.pack_into('<2h', output, 0x5c, 4, 5 + len(names[0]))
+    output.extend(b'\0'.join(names) + b'\0')
+    for index, payload in enumerate((skeleton, model)):
+        output.extend(bytes(-len(output) % 32))
+        struct.pack_into('<I', output, 0x40 + index * 4, (len(output) - header_size) // 4)
+        struct.pack_into('<I', output, 0x48 + index * 4, len(payload))
+        output.extend(payload)
+    output.extend(bytes(-len(output) % 32))
+    struct.pack_into('<I', output, 0x0c, len(output) - header_size)
+    return bytes(output)
+
+
 def build_authored_model(meshes: list[Mesh], materials: list[AuthoredMaterial],
                          textures: list[AuthoredTexture], nodes: list[G4SKNode]) -> ModelResources:
     if not meshes or not 0 < len(materials) <= 256:

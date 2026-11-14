@@ -1,4 +1,4 @@
-"""Base FakeParticle geometry; the explicit preview range is not the native emitter clock."""
+"""FakeParticle geometry previews; the explicit preview range is not the native emitter clock."""
 from pathlib import Path
 
 import bpy
@@ -285,21 +285,25 @@ def migrate_particle_library_clocks(scene: bpy.types.Scene) -> int:
 
 
 def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.types.Scene) -> bool:
-    if record.get('shader_hash') != 3792297829 or obj.type != 'MESH':
+    shader = record.get('shader_hash')
+    rotation_pattern = shader == 1960105135  # Effect_FakeParticleRotZPat
+    if shader not in (3792297829, 1960105135) or obj.type != 'MESH':
         return False
     refs = record.get('texture_refs', [])
     parameters = record.get('shader_parameters', [])
     colors = record.get('native_colors', [])
-    if (len(refs) != 3 or not parameters or len(parameters[0]) != 4 or len(colors) < 5
+    texture_count = 4 if rotation_pattern else 3
+    channels = range(1, texture_count)
+    required_attributes = ('G4 Particle Control', 'G4 Particle Color', *(f'UVMap{i}' for i in channels))
+    if (len(refs) != texture_count or not parameters or len(parameters[0]) != 4 or len(colors) < 5
             or len(obj.data.materials) != 1
             or any(len(p.vertices) != 3 for p in obj.data.polygons)
-            or any(name not in obj.data.attributes for name in
-                   ('G4 Particle Control', 'G4 Particle Color', 'UVMap1', 'UVMap2'))
+            or any(name not in obj.data.attributes for name in required_attributes)
             or any(not ref.get('texture_path') or not Path(ref['texture_path']).is_file() for ref in refs)):
         return False
     # Restrict this first adapter to the captured projection and sampler contract.
     matrices = record.get('uv_matrices', [])
-    if len(matrices) != 3 or any(len(m) != 8 for m in matrices) or any(any(abs(m[i] - v) > 1e-6 for i, v in
+    if len(matrices) != texture_count or any(len(m) != 8 for m in matrices) or any(any(abs(m[i] - v) > 1e-6 for i, v in
             ((0, 1), (1, 0), (2, 0), (4, 0), (5, 1))) for m in matrices):
         return False
     if abs(matrices[0][6]) > 1e-6:
@@ -309,13 +313,14 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
         return False
     if any(dict(ref['sampler_states']).get(1) != mode or
            dict(ref['sampler_states']).get(2) != mode or
-           dict(ref['sampler_states']).get(3) != 1 for ref, mode in zip(refs, (1, 3, 3))):
+           dict(ref['sampler_states']).get(3) != 1 for ref, mode in zip(refs, (1, 3, 3, 3))):
         return False
     if any(m.type == 'NODES' and m.node_group and m.node_group.get('g4_particle_geometry') for m in obj.modifiers):
         return True
     images = [effect_data_image(ref['texture_path']) for ref in refs]
     for image in images:
-        image.pack()
+        if not image.packed_file:
+            image.pack()
     group = bpy.data.node_groups.new('Particle texture preview', 'GeometryNodeTree')
     group['g4_particle_geometry'] = True
     group.interface.new_socket(name='Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
@@ -392,7 +397,7 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
                  math('MAXIMUM', math('SUBTRACT', source.outputs['Preview End'], source.outputs['Preview Start']), 1))
     phase = math('MINIMUM', math('MAXIMUM', phase, 0), 1)
     textures = []
-    for channel in (1, 2):
+    for channel in channels:
         uv = node('ShaderNodeCombineXYZ')
         source_uv = components(attribute(f'UVMap{channel}', 'FLOAT_VECTOR'))
         source_uv[0].node.name = f'Particle Source UV {channel}'
@@ -425,7 +430,13 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
     alpha = math('MULTIPLY', math('MULTIPLY', separate0.outputs['Alpha'], separate1.outputs['Alpha']), math('MULTIPLY', textures[0].outputs['Alpha'], colors[3]))
     # Capture fields on the source faces before replacing the triangle geometry.
     current = geometry
-    for name, value, data_type in (('Particle Tint', tint, 'FLOAT_VECTOR'), ('Particle Alpha', alpha, 'FLOAT'), ('Particle Radius', radius, 'FLOAT')):
+    fields = [('Particle Tint', tint, 'FLOAT_VECTOR'), ('Particle Alpha', alpha, 'FLOAT'),
+              ('Particle Radius', radius, 'FLOAT')]
+    if rotation_pattern:
+        pattern = components(textures[2].outputs['Color'])
+        angle = math('MULTIPLY', math('SUBTRACT', math('MULTIPLY', pattern[0], 2), 1), p[2])
+        fields.append(('Particle Angle', angle, 'FLOAT'))
+    for name, value, data_type in fields:
         store = node('GeometryNodeStoreNamedAttribute', data_type=data_type, domain='FACE')
         store.inputs['Name'].default_value = name
         links.new(current, store.inputs['Geometry'])
@@ -446,7 +457,21 @@ def build_particle_geometry(obj: bpy.types.Object, record: dict, scene: bpy.type
     instances = node('GeometryNodeInstanceOnPoints')
     links.new(points.outputs[0], instances.inputs['Points'])
     links.new(uv_store.outputs[0], instances.inputs['Instance'])
-    links.new(camera.outputs['Rotation'], instances.inputs['Rotation'])
+    rotation = camera.outputs['Rotation']
+    if rotation_pattern:
+        # Use the rotation lookup as a preview angle around billboard-local Z.
+        # Native atlas selection and angle decoding still require GS validation.
+        angle_attr = node('GeometryNodeInputNamedAttribute', data_type='FLOAT')
+        angle_attr.inputs['Name'].default_value = 'Particle Angle'
+        axis = node('FunctionNodeAxisAngleToRotation')
+        axis.inputs['Axis'].default_value = (0, 0, 1)
+        links.new(angle_attr.outputs['Attribute'], axis.inputs['Angle'])
+        twist = node('FunctionNodeRotateRotation', rotation_space='LOCAL')
+        links.new(rotation, twist.inputs['Rotation'])
+        links.new(axis.outputs['Rotation'], twist.inputs['Rotate By'])
+        rotation = twist.outputs['Rotation']
+        group['g4_particle_rotation_pattern_preview'] = True
+    links.new(rotation, instances.inputs['Rotation'])
     radius_attr = node('GeometryNodeInputNamedAttribute', data_type='FLOAT')
     radius_attr.inputs['Name'].default_value = 'Particle Radius'
     links.new(radius_attr.outputs['Attribute'], instances.inputs['Scale'])
@@ -481,12 +506,14 @@ def _particle_material(material: bpy.types.Material, image: bpy.types.Image, add
     links.new(uv.outputs['Vector'], texture.inputs['Vector'])
     tint = nodes.new('ShaderNodeAttribute')
     tint.attribute_name = 'Particle Tint'
+    tint.attribute_type = 'INSTANCER'
     product = nodes.new('ShaderNodeVectorMath')
     product.operation = 'MULTIPLY'
     links.new(tint.outputs['Vector'], product.inputs[0])
     links.new(texture.outputs['Color'], product.inputs[1])
     opacity = nodes.new('ShaderNodeAttribute')
     opacity.attribute_name = 'Particle Alpha'
+    opacity.attribute_type = 'INSTANCER'
     alpha = nodes.new('ShaderNodeMath')
     alpha.operation = 'MULTIPLY'
     links.new(opacity.outputs['Fac'], alpha.inputs[0])

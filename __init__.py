@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Level-5 G4 Blender Tools",
     "author": "Bobi",
-    "version": (2, 1, 1),
+    "version": (2, 1, 2),
     "blender": (4, 0, 0),
     "location": "File > Import/Export; View3D > Sidebar > Level-5",
     "description": "Import, animate and port Level-5 G4 game assets.",
@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zlib
 import tempfile
 import time
 import traceback
@@ -343,11 +344,11 @@ else:
 if __package__:
     from .animation import g4_animation_addon
     from .animation import humanoid_avatar_addon
-    from .porting.g4_model_probe import extract_g4tx, map_scene_placements
+    from .porting.g4_model_probe import extract_g4tx, map_scene_placements, uniform_used_joint_hashes
 else:
     from animation import g4_animation_addon
     from animation import humanoid_avatar_addon
-    from porting.g4_model_probe import extract_g4tx, map_scene_placements
+    from porting.g4_model_probe import extract_g4tx, map_scene_placements, uniform_used_joint_hashes
 
 g4_port_addon.ADDON_ID = ADDON_ID
 g4_animation_addon.ADDON_ID = ADDON_ID
@@ -1695,32 +1696,33 @@ def apply_native_map_materials(imported_names: set[str], summary: dict, source: 
     records = {blender_base_name(record.get("name") or ""): record for record in summary.get("material_records", [])}
     objects = [obj for name in imported_names if (obj := bpy.data.objects.get(name)) is not None and obj.type == "MESH"]
     is_map = "map" in {part.casefold() for part in source.parts}
-    map_objects = set()
+    owners_by_material = {}
     for obj in objects:
         for slot in obj.material_slots:
-            material = slot.material
-            if material is None:
-                continue
-            record = records.get(blender_base_name(material.name))
-            profile = native_map_material(record) if record else None
-            if not is_map and profile is None:
-                continue
-            material["g4_map_source"] = True
-            map_objects.add(obj.name)
-            if material.get("g4_map_native_shader"):
-                continue
-            owners = [owner for owner in objects if any(s.material == material for s in owner.material_slots)]
-            vertex_layer = "G4 Outline Parameters" if all(
-                "G4 Outline Parameters" in owner.data.color_attributes
-                for owner in owners
-            ) else None
-            complete_uvs = not (profile and profile.grass) or all("UVMap1" in owner.data.uv_layers for owner in owners)
-            if profile and complete_uvs and build_native_map_material(material, profile, vertex_layer):
-                debug.append(f"[map] {material.name}: {profile.family}, textures={len(profile.textures)}, nodes={len(material.node_tree.nodes)}")
-            else:
-                material["g4_map_surface_fidelity"] = "incomplete"
-                material["g4_map_surface_evidence"] = "Unsupported native family, texture or UV contract; ordinary material retained"
-                debug.append(f"[map] {material.name}: ordinary fallback; shader={record and record.get('shader_hash')}")
+            if slot.material is not None:
+                owners_by_material.setdefault(slot.material, set()).add(obj)
+
+    map_objects = set()
+    for material, owners in owners_by_material.items():
+        record = records.get(blender_base_name(material.name))
+        profile = native_map_material(record) if record else None
+        if not is_map and profile is None:
+            continue
+        material["g4_map_source"] = True
+        map_objects.update(owner.name for owner in owners)
+        if material.get("g4_map_native_shader"):
+            continue
+        vertex_layer = "G4 Outline Parameters" if all(
+            "G4 Outline Parameters" in owner.data.color_attributes
+            for owner in owners
+        ) else None
+        complete_uvs = not (profile and profile.grass) or all("UVMap1" in owner.data.uv_layers for owner in owners)
+        if profile and complete_uvs and build_native_map_material(material, profile, vertex_layer):
+            debug.append(f"[map] {material.name}: {profile.family}, textures={len(profile.textures)}, nodes={len(material.node_tree.nodes)}")
+        else:
+            material["g4_map_surface_fidelity"] = "incomplete"
+            material["g4_map_surface_evidence"] = "Unsupported native family, texture or UV contract; ordinary material retained"
+            debug.append(f"[map] {material.name}: ordinary fallback; shader={record and record.get('shader_hash')}")
     return map_objects
 
 
@@ -3489,6 +3491,7 @@ def import_g4_model(
     target_armature=None,
     apply_styling: bool | None = None,
     event_effects: bool = False,
+    event_effect_cut: str = "",
 ) -> tuple[dict, set[str]]:
     if apply_styling is None:
         apply_styling = is_character_model(path)
@@ -3594,9 +3597,9 @@ def import_g4_model(
             from .shading.effect_animation import animate_effect_geometry_phases, animate_effect_material_phases, animate_event_texture_clip
 
             try:
-                curves = animate_effect_material_phases(path, list(materials), bpy.context.scene)
+                curves = animate_effect_material_phases(path, list(materials), bpy.context.scene, event_effect_cut)
                 debug.append(f"[effects] animated color curves={curves}")
-                curves = animate_event_texture_clip(path, list(materials), records, bpy.context.scene)
+                curves = animate_event_texture_clip(path, list(materials), records, bpy.context.scene, event_effect_cut)
                 debug.append(f"[effects] animated event UV curves={curves}")
                 from .shading.effect_animation import optimize_effect_animation
                 optimized = optimize_effect_animation(bpy.context.scene)
@@ -3608,7 +3611,7 @@ def import_g4_model(
                          and obj.type == "ARMATURE"]
             if len(armatures) == 1:
                 try:
-                    strips = animate_effect_geometry_phases(path, armatures[0], bpy.context.scene)
+                    strips = animate_effect_geometry_phases(path, armatures[0], bpy.context.scene, event_effect_cut)
                     debug.append(f"[effects] animated geometry strips={strips}")
                 except (OSError, ValueError) as error:
                     debug.append(f"[effects] Effect geometry animation unavailable: {error}")
@@ -3623,8 +3626,8 @@ def import_g4_model(
             if event_effects and record is not None and build_particle_geometry(obj, record, bpy.context.scene):
                 from .shading.effect_animation import animate_particle_texture_clock
 
-                curves = animate_particle_texture_clock(path, obj, record, bpy.context.scene)
-                clock = 'native G4TP stand' if curves else 'explicit preview range'
+                curves = animate_particle_texture_clock(path, obj, record, bpy.context.scene, event_effect_cut)
+                clock = 'native G4TP' if curves else 'explicit preview range'
                 debug.append(f'[effects] {obj.name}: particle geometry with {clock}')
     if apply_styling and styled_names:
         modifier_count = configure_character_parameter_modifiers(styled_names, force_character=True)
@@ -4123,7 +4126,7 @@ def attach_part_to_armature(
 def declared_accessory_part_for_body(body_path: Path, prefs: G4ImporterPreferences) -> Path | None:
     for data_root in model_data_roots(body_path, prefs):
         try:
-            relative = body_path.resolve().relative_to(data_root / "common" / "chr").as_posix().lower()
+            relative = body_path.resolve().relative_to(data_root / "common" / "chr").with_suffix(".g4md").as_posix().lower()
         except ValueError:
             continue
         config_paths = sorted(
@@ -4138,19 +4141,19 @@ def declared_accessory_part_for_body(body_path: Path, prefs: G4ImporterPreferenc
                     if name != "CHARA_PARTS_CLOTHES_INFO" or len(values) < 7:
                         continue
                     source, accessory = values[0], values[6]
-                    if (
-                        isinstance(source, str)
-                        and isinstance(accessory, str)
-                        and source.startswith("_uniform/")
-                        and accessory.startswith("_uniform/")
-                    ):
-                        lookup.setdefault(source, accessory)
+                    if not isinstance(source, str) or not isinstance(accessory, str):
+                        continue
+                    source = source.replace("\\", "/")
+                    accessory = accessory.replace("\\", "/")
+                    if source.lower().startswith("_uniform/") and accessory.lower().startswith("_uniform/"):
+                        lookup.setdefault(Path(source.lower()).with_suffix(".g4md").as_posix(), accessory)
                 CHARACTER_PART_ACCESSORY_CACHE[config_path] = lookup
             declared = lookup.get(relative)
             if declared:
                 candidate = data_root / "common" / "chr" / declared
-                if candidate.is_file():
-                    return candidate
+                for path in (candidate, candidate.with_suffix(".g4pkm")):
+                    if path.is_file():
+                        return path
     return None
 
 
@@ -4166,6 +4169,27 @@ def find_accessory_part_for_body(body_path: Path, prefs: G4ImporterPreferences) 
     for extension in (".g4pkm", ".g4md"):
         candidate = uniform_root / stem / f"{stem}{extension}"
         if candidate.is_file():
+            return candidate
+    return None
+
+
+def find_missing_hands(body: Path, accessory: Path, target_armature) -> Path | None:
+    body_variant = re.fullmatch(r"u(\d{4,6})(\d{2})", body.stem, re.IGNORECASE)
+    family = re.fullmatch(r"u\d{4,6}01", body.parent.name, re.IGNORECASE)
+    if body_variant is None or family is None:
+        return None
+    fingers = {
+        zlib.crc32(bone.name.encode("utf-8"))
+        for bone in target_armature.data.bones
+        if re.match(r"[lr]_(?:idx|mid|rng|thb|pky)_", bone.name)
+    }
+    if not fingers or fingers & (uniform_used_joint_hashes(body) | uniform_used_joint_hashes(accessory)):
+        return None
+    stem = f"sk{body_variant[1]}{body_variant[2]}"
+    base = body.parent.parent / f"sk{body.parent.name[1:]}" / stem
+    for suffix in (".g4pkm", ".g4md"):
+        candidate = base.with_suffix(suffix)
+        if candidate.is_file() and fingers & uniform_used_joint_hashes(candidate):
             return candidate
     return None
 
@@ -4245,8 +4269,11 @@ def import_character_parts_for_armature(
         find_character_part(model_path, "s", prefs, character_part_stem) if automatic else None
     )
     accessory = Path(bpy.path.abspath(accessory_path)) if accessory_path else None
-    if accessory is None and automatic and body is not None:
+    if accessory is None and body is not None:
         accessory = find_accessory_part_for_body(body, prefs)
+    if body is not None and accessory is not None and not gloves_path:
+        if not accessory_path or accessory == find_accessory_part_for_body(body, prefs):
+            accessory = find_missing_hands(body, accessory, target_armature) or accessory
     paths = [
         body,
         shoes,
@@ -5563,10 +5590,8 @@ class G4_MT_import_files(Menu):
 class G4_MT_export_models(Menu):
     bl_label = 'Models'
     def draw(self, context):
-        self.layout.operator('export_scene.level5_g4_model', text='G4MD file')
-        row = self.layout.row()
-        row.enabled = False
-        row.operator('export_scene.level5_g4_model', text='G4PKM file')
+        self.layout.operator('export_scene.level5_g4_model', text='G4MD file').model_format = 'g4md'
+        self.layout.operator('export_scene.level5_g4_model', text='G4PKM file').model_format = 'g4pkm'
 
 
 class G4_MT_export_animations(Menu):

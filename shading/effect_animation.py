@@ -80,7 +80,7 @@ def animate_effect_uv_loops(source: Path, materials: list[bpy.types.Material], s
     return count
 
 
-def animate_effect_material_phases(model: Path, materials: list[bpy.types.Material], scene: bpy.types.Scene) -> int:
+def animate_effect_material_phases(model: Path, materials: list[bpy.types.Material], scene: bpy.types.Scene, event_cut: str = "") -> int:
     from ..effects.phase_animation import effect_phases, phase_source_frame
     from ..animation.g4ma_motion import material_animation_paths
     from ..animation.g4mt_motion import sample_channel
@@ -91,7 +91,7 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
         for path in material_animation_paths(model, Path(temporary)):
             parsed = parse_g4mt(path)
             clips = {clip['name']: clip for clip in parsed['clips']}
-            event_clip = next(iter(clips.values())) if len(clips) == 1 else None
+            event_clip = next(iter(clips.values())) if len(clips) == 1 else clips.get(event_cut)
             is_event = event_clip is not None and re.fullmatch(r'c\d{4}', event_clip['name'])
             names = (event_clip['name'],) if is_event else ('in', 'loop', 'out')
             if not set(names) <= clips.keys() or any(clips[name]['flags'] & 1 for name in names):
@@ -160,7 +160,7 @@ def animate_effect_material_phases(model: Path, materials: list[bpy.types.Materi
     return count
 
 
-def animate_effect_geometry_phases(model: Path, armature: bpy.types.Object, scene: bpy.types.Scene) -> int:
+def animate_effect_geometry_phases(model: Path, armature: bpy.types.Object, scene: bpy.types.Scene, event_cut: str = "") -> int:
     from ..effects.phase_animation import effect_phases
     from ..animation.g4_animation_addon import create_action
 
@@ -181,7 +181,7 @@ def animate_effect_geometry_phases(model: Path, armature: bpy.types.Object, scen
             path = Path(temporary)/f'{index}.g4mt'
             path.write_bytes(data[offset:offset+size])
             clips = {clip['name']:clip for clip in parse_g4mt(path)['clips']}
-            event_clip = next(iter(clips.values())) if len(clips) == 1 else None
+            event_clip = next(iter(clips.values())) if len(clips) == 1 else clips.get(event_cut)
             if event_clip is not None and re.fullmatch(r'c\d{4}', event_clip['name']):
                 if event_clip['flags'] & 1 or event_clip['end_frame'] <= event_clip['start_frame']:
                     continue
@@ -289,25 +289,27 @@ def animate_effect_random_offsets(source: Path, materials: list[bpy.types.Materi
 
 
 def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: dict,
-                                   scene: bpy.types.Scene) -> int:
-    """Bind the authored stand UV clip, retaining its source frame rate and offsets."""
+                                   scene: bpy.types.Scene, event_cut: str = "") -> int:
+    """Bind the authored event or stand UV clip, retaining its source frame rate and offsets."""
     from ..animation.g4ma_motion import texture_animation_paths
     from ..animation.g4mt_motion import sample_channel, encoding_step
     from ..animation.g4_animation_addon import action_fcurve_new
     from .particle_nodes import remove_particle_preview_window
 
     hashes = record.get('uv_animation_hashes', [])
-    if len(hashes) != 3:
+    if len(hashes) not in (3, 4):
         return 0
     modifier = next((m for m in obj.modifiers if m.type == 'NODES' and m.node_group
                      and m.node_group.get('g4_particle_geometry')), None)
     if modifier is None:
         return 0
     tree = modifier.node_group
+    channels_to_bind = range(1, len(hashes))
+    clip_name = event_cut if tree.get('g4_particle_rotation_pattern_preview') and event_cut else 'stand'
     with tempfile.TemporaryDirectory(prefix='g4_particle_clock_') as temporary:
         for path in texture_animation_paths(model, Path(temporary)):
             parsed = parse_g4mt(path)
-            clip = next((c for c in parsed['clips'] if c['name'] == 'stand'), None)
+            clip = next((c for c in parsed['clips'] if c['name'] == clip_name), None)
             if clip is None or clip['flags'] & 1 or clip['fps'] <= 0:
                 continue
             bindings = {}
@@ -316,11 +318,11 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
                 channels = parsed['channels'][info['channel_start']:info['channel_start'] + info['channel_count']]
                 if len(channels) == 1 and channels[0]['channel_type'] == 11 and channels[0]['encoding'][4] == 1 and channels[0]['encoding'][7] == 0:
                     bindings[target] = channels[0]
-            if any(hashes[index] not in bindings for index in (1, 2)):
+            if any(hashes[index] not in bindings for index in channels_to_bind):
                 continue
             data = path.read_bytes()
             samples = {}
-            for index in (1, 2):
+            for index in channels_to_bind:
                 channel = bindings[hashes[index]]
                 samples[index] = [(frame, sample_channel(data, parsed['section_offsets']['data'], channel,
                                   parsed['scales'][channel['encoding'][6]], frame)[0])
@@ -328,7 +330,7 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
             action = bpy.data.actions.new(f'Particle UV {obj.name} {clip["name"]}')
             action['g4_effect_animation'] = True
             frame_scale = scene.render.fps / scene.render.fps_base / clip['fps']
-            for index in (1, 2):
+            for index in channels_to_bind:
                 uv = tree.nodes[f'Particle UV {index}']
                 for link in list(uv.inputs[1].links):
                     tree.links.remove(link)
@@ -345,7 +347,7 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
                     key.interpolation = 'CONSTANT' if encoding_step(bindings[hashes[index]]) else 'LINEAR'
                 curve.update()
             tree.animation_data_create().action = action
-            tree['g4_particle_clock'] = 'G4TP stand'
+            tree['g4_particle_clock'] = f'G4TP {clip_name}'
             tree['g4_particle_source_fps'] = clip['fps']
             # The native action replaces the diagnostic range completely.
             remove_particle_preview_window(tree)
@@ -359,12 +361,12 @@ def animate_particle_texture_clock(model: Path, obj: bpy.types.Object, record: d
                     tree.nodes.remove(node)
                 unused = [node for node in tree.nodes if node.bl_idname != 'NodeGroupOutput'
                           and not any(socket.is_linked for socket in node.outputs)]
-            return 2
+            return len(channels_to_bind)
     return 0
 
 
 def animate_event_texture_clip(model: Path, materials: list[bpy.types.Material], records: dict,
-                               scene: bpy.types.Scene) -> int:
+                               scene: bpy.types.Scene, event_cut: str = "") -> int:
     """Bind event UV translations through the material's native target hashes."""
     from ..animation.g4ma_motion import texture_animation_paths
     from ..animation.g4mt_motion import sample_channel, encoding_step
@@ -375,10 +377,11 @@ def animate_event_texture_clip(model: Path, materials: list[bpy.types.Material],
     with tempfile.TemporaryDirectory(prefix='g4_event_uv_') as temporary:
         for path in texture_animation_paths(model, Path(temporary)):
             parsed = parse_g4mt(path)
-            if len(parsed['clips']) != 1:
-                continue
-            clip = parsed['clips'][0]
-            if not re.fullmatch(r'c\d{4}', clip['name']) or clip['flags'] & 1:
+            clips = parsed['clips']
+            clip = next((clip for clip in clips if clip['name'] == event_cut), None)
+            if clip is None and len(clips) == 1:
+                clip = clips[0]
+            if clip is None or not re.fullmatch(r'c\d{4}', clip['name']) or clip['flags'] & 1:
                 continue
             channels = {}
             for info in parsed['target_infos'][clip['target_info_start']:clip['target_info_start']+clip['target_info_count']]:
