@@ -20,6 +20,7 @@ The add-on lets you import complete models and cutscene animations, recreate the
 | --- | --- |
 | `G4MD` and `G4PKM` | Model import and export |
 | `G4PK` and `G4MT` | Animation import and export, including full cutscenes |
+| `G4MA` | Material parameter animations (cannot be imported on its own) |
 | `G4SK` | Rig data used during import (cannot be imported on its own) |
 | `G4TX` | Texture packs from Nintendo Switch and Windows versions |
 
